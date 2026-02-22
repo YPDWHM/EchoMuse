@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <!-- theme-color is progressive enhancement; unsupported browsers safely ignore it --><!-- cspell:disable-line -->
+  <!-- stylelint-disable-next-line -->
+  <meta name="theme-color" content="#4f6ef7"><!-- compat-api/html: intentional -->
+  <meta name="description" content="本地 Ollama Chatbox：聊天 + 期末复习包 + 论文生成器">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon.svg">
+  <title>EchoMuse</title>
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="chatbox-app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>EchoMuse</h1>
+      </div>
+
+      <div class="sidebar-tabs">
+        <button id="tabSessions" class="sidebar-tab active" data-tab="sessions" type="button">会话</button>
+        <button id="tabContacts" class="sidebar-tab" data-tab="contacts" type="button">联系人</button>
+      </div>
+
+      <div id="sessionsPane" class="sidebar-pane">
+        <div class="sidebar-tools">
+          <input id="sessionSearch" type="search" placeholder="搜索会话">
+          <button id="newSessionBtn" class="btn primary" type="button">新建会话</button>
+        </div>
+        <div id="sessionList" class="session-list"></div>
+      </div>
+
+      <div id="contactsPane" class="sidebar-pane hidden">
+        <div class="sidebar-tools">
+          <button id="importTavernContactBtn" class="btn ghost" type="button">🃏 导入酒馆卡片</button>
+          <button id="newGroupBtn" class="btn primary" type="button">新建群组</button>
+          <input id="contactTavernFile" type="file" hidden accept=".png,.json">
+        </div>
+        <div id="contactList" class="contact-list"></div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <button id="settingsBtn" class="sidebar-settings-btn" type="button" title="设置">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="chat-header">
+        <div class="status">
+          <img src="/logo.png" alt="EchoMuse" class="header-logo">
+          <div>
+            <div id="connLine1">连接中...</div>
+            <div id="connLine2" class="muted">模型与端口检测中</div>
+          </div>
+        </div>
+      </header>
+
+      <input id="fileInput" type="file" hidden accept=".txt,.md,.pdf,.docx,.pptx">
+      <input id="chatFileInput" type="file" hidden accept=".txt,.md,.pdf,.docx,.pptx">
+
+      <section id="messageList" class="message-list"></section>
+
+      <section class="composer">
+        <div class="composer-input-wrap">
+          <textarea id="chatInput" rows="3" placeholder="输入问题，Ctrl+Enter 发送"></textarea>
+          <button id="chatUploadBtn" class="chat-upload-btn" type="button" title="上传文件">📎</button>
+          <button id="sendBtn" class="send-btn" type="button">发送</button>
+        </div>
+        <div class="composer-bottom-bar">
+          <div class="bar-dropdown-wrap">
+            <button id="toggleStudyBtn" class="bar-chip" type="button">📘 学习模式</button>
+            <div id="studyPanel" class="popup-panel hidden">
+              <div class="popup-group-label">工具</div>
+              <button data-tool="review_pack" class="popup-item" type="button">期末复习包</button>
+              <button data-tool="paper_report" class="popup-item" type="button">论文生成器</button>
+              <div class="popup-group-label">技能</div>
+              <button class="popup-item" data-prompt="请把这份资料按考试优先级拆成必背、易错、冲刺三类。">考试优先级</button>
+              <button class="popup-item" data-prompt="请把这个概念讲得像给同学讲，通俗一点。">通俗讲解</button>
+              <button class="popup-item" data-prompt="我有点焦虑，先安慰我一句，再给一个10分钟复习计划。">减压陪练</button>
+              <button class="popup-item" data-prompt="基于资料出3道单选题并附简短解析。">快速出题</button>
+            </div>
+          </div>
+          <div class="bar-dropdown-wrap">
+          <button id="toggleAvatarBtn" class="bar-chip" type="button">🎭 角色</button>
+            <div id="avatarSelectPanel" class="popup-panel hidden"></div>
+          </div>
+          <button id="toggleSearchBtn" class="bar-chip" type="button">🔎 联网</button>
+          <div class="bar-dropdown-wrap">
+            <button id="toggleMcpBtn" class="bar-chip" type="button">🛠 MCP</button>
+            <div id="mcpQuickPanel" class="popup-panel hidden">
+              <div id="mcpQuickList" class="mcp-quick-list"><span class="muted">暂无 MCP 服务</span></div>
+              <div class="popup-group-label mcp-quick-footer">
+                <button id="mcpGoSettingsBtn" class="mcp-go-settings" type="button">⚙ 管理 MCP 工具</button>
+              </div>
+            </div>
+          </div>
+          <div class="bar-dropdown-wrap">
+            <button id="toggleKbBtn" class="bar-chip" type="button">📚 知识库</button>
+            <div id="kbQuickPanel" class="popup-panel hidden">
+              <div id="kbQuickList" class="mcp-quick-list"><span class="muted">暂无知识库</span></div>
+              <div class="popup-group-label mcp-quick-footer">
+                <button id="kbGoSettingsBtn" class="mcp-go-settings" type="button">⚙ 管理知识库</button>
+              </div>
+            </div>
+          </div>
+          <div class="bar-spacer"></div>
+          <select id="modelSelect" class="model-select" title="选择模型">
+            <option value="flash">⚡ Qwen Flash</option>
+            <option value="thinking">🧠 Qwen Thinking</option>
+          </select>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <section id="artifactDrawer" class="artifact-drawer" aria-label="产物抽屉">
+    <header class="drawer-header">
+      <div>
+        <h2 id="drawerTitle">产物中心</h2>
+        <p id="drawerSub" class="muted">点击工具卡片后查看</p>
+      </div>
+      <button id="closeDrawerBtn" class="btn ghost" type="button">关闭</button>
+    </header>
+
+    <div id="artifactList" class="artifact-list"></div>
+    <div id="artifactTabs" class="artifact-tabs"></div>
+    <div id="artifactContent" class="artifact-content"></div>
+
+    <div class="drawer-actions">
+      <button id="copyJsonBtn" class="btn" type="button">复制 JSON</button>
+      <button id="exportAnkiBtn" class="btn" type="button">导出 Anki CSV</button>
+      <button id="exportPdfBtn" class="btn" type="button">导出 PDF</button>
+      <button id="exportWordBtn" class="btn" type="button">导出 Word</button>
+    </div>
+  </section>
+
+
+  <dialog id="accessDialog" class="access-dialog">
+    <h3>手机访问</h3>
+    <p id="accessLinks" class="muted">正在加载...</p>
+    <img id="accessQr" alt="访问二维码">
+    <button id="closeAccessBtn" class="btn" type="button">关闭</button>
+  </dialog>
+
+  <section id="settingsPanel" class="settings-panel hidden">
+    <div class="settings-layout">
+      <nav class="settings-nav">
+        <h2>设置</h2>
+        <button class="settings-nav-item active" data-section="general" type="button">通用</button>
+        <button class="settings-nav-item" data-section="provider" type="button">模型</button>
+        <button class="settings-nav-item" data-section="mcp" type="button">MCP 工具</button>
+        <button class="settings-nav-item" data-section="knowledge" type="button">知识库</button>
+        <div class="settings-nav-spacer"></div>
+        <button id="closeSettingsBtn" class="btn ghost" type="button">返回聊天</button>
+      </nav>
+      <div class="settings-content">
+        <div class="settings-section" data-section="general">
+          <h3>通用设置</h3>
+          <div class="settings-group">
+            <h4>基础设置</h4>
+            <div class="setting-row">
+              <label>手机访问</label>
+              <div class="setting-control">
+                <button id="showAccessBtn" class="btn ghost" type="button">查看局域网地址 / 二维码</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>访问口令</label>
+              <div class="setting-control">
+                <input id="tokenInput" type="password" placeholder="留空则无口令">
+                <button id="saveTokenBtn" class="btn" type="button">保存</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>显示设置</h4>
+            <div class="setting-row">
+              <label>界面语言</label>
+              <select id="uiLangSelect">
+                <option value="zh-CN">简体中文</option>
+                <option value="en-US">English</option>
+                <option value="ja-JP">日本语</option>
+                <option value="ko-KR">한국어</option>
+                <option value="fr-FR">Français</option>
+                <option value="de-DE">Deutsch</option>
+                <option value="es-ES">Español</option>
+                <option value="ru-RU">Русский</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label>全局防御</label>
+              <div class="setting-control">
+                <label class="toggle">
+                  <input id="globalDefenseToggle" type="checkbox">
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="muted">用于降低提示注入与不安全输出</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>翻译方向</label>
+              <div class="setting-control">
+                <select id="translateFromSelect">
+                  <option value="auto">自动检测</option>
+                  <option value="zh-CN">中文</option>
+                  <option value="en-US">English</option>
+                  <option value="ja-JP">日本语</option>
+                  <option value="ko-KR">한국어</option>
+                  <option value="fr-FR">Français</option>
+                  <option value="de-DE">Deutsch</option>
+                  <option value="es-ES">Español</option>
+                  <option value="ru-RU">Русский</option>
+                </select>
+                <select id="translateToSelect">
+                  <option value="zh-CN">中文</option>
+                  <option value="en-US">English</option>
+                  <option value="ja-JP">日本语</option>
+                  <option value="ko-KR">한국어</option>
+                  <option value="fr-FR">Français</option>
+                  <option value="de-DE">Deutsch</option>
+                  <option value="es-ES">Español</option>
+                  <option value="ru-RU">Русский</option>
+                </select>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>字体大小</label>
+              <select id="fontSizeSelect">
+                <option value="sm">小</option>
+                <option value="md">标准</option>
+                <option value="lg">大</option>
+                <option value="xl">特大</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label>主题</label>
+              <select id="themeSelect">
+                <option value="system">跟随系统</option>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>数据设置</h4>
+            <div class="setting-row-actions">
+              <button id="openExportBtn" class="btn" type="button">导出产物</button>
+              <button id="clearChatBtn" class="btn ghost" type="button">清空当前会话</button>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>网络代理</h4>
+            <div class="setting-row">
+              <label>启用代理</label>
+              <div class="setting-control">
+                <label class="toggle">
+                  <input id="proxyEnableToggle" type="checkbox">
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="muted">默认关闭，开启后填写代理信息</span>
+              </div>
+            </div>
+            <div id="proxyFields" class="proxy-fields hidden">
+              <div class="setting-row">
+                <label>代理类型</label>
+                <select id="proxyTypeSelect">
+                  <option value="socks5">SOCKS5</option>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <label>代理地址</label>
+                <div class="setting-control">
+                  <input id="proxyHostInput" type="text" placeholder="127.0.0.1">
+                  <input id="proxyPortInput" type="number" min="1" max="65535" placeholder="7890">
+                </div>
+              </div>
+              <div class="setting-row">
+                <label>代理账号（可选）</label>
+                <input id="proxyUserInput" type="text" placeholder="留空则不使用认证">
+              </div>
+              <div class="setting-row">
+                <label>代理密码（可选）</label>
+                <input id="proxyPassInput" type="password" placeholder="留空则不使用认证">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section hidden" data-section="provider">
+          <h3>模型管理</h3>
+          <div id="providerListWrap" class="provider-list"></div>
+          <hr class="provider-divider">
+          <h4>快速添加</h4>
+          <div id="presetProviderList" class="preset-provider-list"></div>
+          <hr class="provider-divider">
+          <h4 class="provider-form-title" id="providerFormTitle">自定义添加</h4>
+          <input id="providerEditId" type="hidden" value="">
+          <div class="setting-row">
+            <label>名称</label>
+            <input id="providerName" type="text" placeholder="如：OpenAI、DeepSeek">
+          </div>
+          <div class="setting-row">
+            <label>类型</label>
+            <select id="providerType" title="Provider 类型">
+              <option value="ollama">Ollama（本地）</option>
+              <option value="openai_compatible">OpenAI Compatible（外部 API）</option>
+              <option value="anthropic">Anthropic / Claude</option>
+            </select>
+          </div>
+          <div id="openaiFields" class="hidden">
+            <div class="setting-row">
+              <label>API Base URL</label>
+              <input id="providerBaseUrl" type="text" placeholder="https://api.xxx.com/v1">
+            </div>
+            <div class="setting-row">
+              <label>API Key</label>
+              <input id="providerApiKey" type="password" placeholder="sk-...">
+            </div>
+          </div>
+          <div class="setting-row">
+            <label>模型</label>
+            <div class="setting-control">
+              <button id="fetchModelsBtn" class="btn ghost" type="button">获取模型</button>
+              <span id="fetchModelsStatus" class="muted"></span>
+            </div>
+            <div id="providerModelList" class="provider-model-list"></div>
+            <div class="setting-control provider-manual-add">
+              <input id="providerModelManual" type="text" placeholder="手动输入模型名称">
+              <button id="addModelManualBtn" class="btn ghost" type="button">添加</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label>Temperature</label>
+            <input id="providerTemp" type="number" step="0.05" min="0" max="2" placeholder="留空用默认">
+          </div>
+          <div class="setting-row">
+            <label>Max Tokens</label>
+            <input id="providerMaxTokens" type="number" step="100" min="100" placeholder="留空用默认">
+          </div>
+          <div class="setting-row-actions">
+            <button id="providerTestAllBtn" class="btn ghost" type="button">测试连接</button>
+            <button id="providerSaveBtn" class="btn primary" type="button">保存</button>
+            <button id="providerCancelBtn" class="btn ghost hidden" type="button">取消编辑</button>
+          </div>
+          <div id="providerTestResult" class="provider-test-result hidden"></div>
+          <p id="providerStatus" class="muted"></p>
+        </div>
+        <div class="settings-section hidden" data-section="avatar">
+          <h3>对话设置</h3>
+
+          <div class="settings-group">
+            <h4>上下文管理</h4>
+            <div class="setting-row">
+              <label>上下文消息数量上限</label>
+              <div class="setting-range-block">
+                <input id="chatContextLimitRange" type="range" min="4" max="40" step="2" value="14">
+                <div class="setting-range-meta">
+                  <span id="chatContextLimitLabel" class="range-value-pill">14 条</span>
+                  <label class="inline-check">
+                    <input id="chatContextUnlimitedToggle" type="checkbox">
+                    不限制
+                  </label>
+                </div>
+              </div>
+              <p class="setting-note">控制发送给模型的历史消息条数；越大越完整，但越慢。</p>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>生成参数</h4>
+            <div class="setting-row">
+              <label>温度（Temperature）</label>
+              <div class="setting-range-block">
+                <input id="chatTemperatureRange" type="range" min="0" max="2" step="0.05" value="0.7">
+                <div class="setting-range-meta">
+                  <span id="chatTemperatureLabel" class="range-value-pill">未设置</span>
+                  <label class="inline-check">
+                    <input id="chatTemperatureUseDefault" type="checkbox" checked>
+                    使用默认
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>Top P</label>
+              <div class="setting-range-block">
+                <input id="chatTopPRange" type="range" min="0.1" max="1" step="0.05" value="0.9">
+                <div class="setting-range-meta">
+                  <span id="chatTopPLabel" class="range-value-pill">未设置</span>
+                  <label class="inline-check">
+                    <input id="chatTopPUseDefault" type="checkbox" checked>
+                    使用默认
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="setting-switch-list">
+              <div class="setting-switch-item">
+                <div>
+                  <div class="setting-switch-title">流式输出</div>
+                  <div class="setting-switch-desc">开启后逐字显示回复，关闭后等待完整回复再显示</div>
+                </div>
+                <label class="toggle">
+                  <input id="chatStreamOutputToggle" type="checkbox" checked>
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h4>?????</h4>
+            <div class="setting-switch-list">
+              <div class="setting-switch-item">
+                <div class="setting-switch-title">???????</div>
+                <label class="toggle"><input id="chatShowTimestampToggle" type="checkbox" checked><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div class="setting-switch-title">??????</div>
+                <label class="toggle"><input id="chatShowModelToggle" type="checkbox"><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div class="setting-switch-title">??????</div>
+                <label class="toggle"><input id="chatShowCharCountToggle" type="checkbox"><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div>
+                  <div class="setting-switch-title">Markdown ??</div>
+                  <div class="setting-switch-desc">?????????????</div>
+                </div>
+                <label class="toggle"><input id="chatMarkdownToggle" type="checkbox" checked><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div>
+                  <div class="setting-switch-title">LaTeX ????</div>
+                  <div class="setting-switch-desc">???? Markdown ??</div>
+                </div>
+                <label class="toggle"><input id="chatLatexToggle" type="checkbox" checked><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div class="setting-switch-title">?????????</div>
+                <label class="toggle"><input id="chatSpellcheckToggle" type="checkbox"><span class="toggle-slider"></span></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>??</h4>
+            <div class="setting-switch-list">
+              <div class="setting-switch-item">
+                <div>
+                  <div class="setting-switch-title">????????</div>
+                  <div class="setting-switch-desc">???????????????</div>
+                </div>
+                <label class="toggle"><input id="chatAutoTitleToggle" type="checkbox" checked><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div>
+                  <div class="setting-switch-title">????????Artifacts?</div>
+                  <div class="setting-switch-desc">???????????????</div>
+                </div>
+                <label class="toggle"><input id="chatAutoPreviewArtifactToggle" type="checkbox" checked><span class="toggle-slider"></span></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>??</h4>
+            <div class="avatar-preview-row">
+              <div class="avatar-preview-item">
+                <span class="avatar-preview" id="userAvatarPreview">??</span>
+                <span class="muted">??</span>
+              </div>
+              <div class="avatar-preview-item">
+                <span class="avatar-preview" id="aiAvatarPreview">??</span>
+                <span class="muted">AI</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>????</label>
+              <div class="setting-control">
+                <input id="userAvatarInput" type="text" placeholder="emoji ? ??" maxlength="4">
+                <button id="userAvatarUploadBtn" class="btn ghost" type="button">????</button>
+                <input id="userAvatarFile" type="file" hidden accept="image/*">
+              </div>
+            </div>
+            <div class="setting-row">
+              <label>AI ??</label>
+              <div class="setting-control">
+                <input id="aiAvatarInput" type="text" placeholder="emoji ? ??" maxlength="4">
+                <button id="aiAvatarUploadBtn" class="btn ghost" type="button">????</button>
+                <input id="aiAvatarFile" type="file" hidden accept="image/*">
+              </div>
+            </div>
+            <div class="setting-row-actions">
+              <button id="saveAvatarBtn" class="btn primary" type="button">??</button>
+              <button id="resetAvatarBtn" class="btn ghost" type="button">????</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section hidden" data-section="personas">
+          <h3>????</h3>
+          <div class="tavern-import-row">
+            <button id="tavernImportBtn" class="btn ghost" type="button">?? ??????</button>
+            <input id="tavernImportFile" type="file" hidden accept=".png,.json">
+            <span id="tavernImportStatus" class="muted"></span>
+          </div>
+          <div id="avatarListWrap" class="avatar-list"></div>
+          <hr class="provider-divider">
+          <h4 id="avatarFormTitle">????</h4>
+          <input id="avatarEditId" type="hidden" value="">
+          <div class="setting-row">
+            <label>????</label>
+            <input id="avatarNameInput" type="text" placeholder="????????">
+          </div>
+          <div class="setting-row">
+            <label>?????</label>
+            <input id="avatarRelInput" type="text" placeholder="??????????????...">
+          </div>
+          <div class="setting-row">
+            <label>????</label>
+            <div class="setting-control avatar-icon-row">
+              <span id="avatarIconPreview" class="avatar-icon-preview">??</span>
+              <input id="avatarEmojiInput" type="text" placeholder="?? emoji" maxlength="4" class="avatar-emoji-input">
+              <button id="avatarIconUploadBtn" class="btn ghost" type="button">????</button>
+              <input id="avatarIconFile" type="file" hidden accept="image/*">
+            </div>
+          </div>
+          <div class="setting-row">
+            <label>??? Prompt</label>
+            <textarea id="avatarPromptInput" rows="4" placeholder="????????????...????"></textarea>
+          </div>
+          <div class="setting-row">
+            <label>??????</label>
+            <textarea id="avatarMemoryInput" rows="4" placeholder="???????????...????"></textarea>
+            <div class="setting-control">
+              <button id="avatarMemoryImportBtn" class="btn ghost" type="button">?????.txt / .md / .json?</button>
+              <input id="avatarMemoryFile" type="file" hidden accept=".txt,.md,.json">
+              <span id="avatarMemoryFileStatus" class="muted"></span>
+            </div>
+          </div>
+          <div class="setting-row-actions">
+            <button id="avatarCancelBtn" class="btn ghost hidden" type="button">??</button>
+            <button id="avatarSaveBtn" class="btn primary" type="button">??</button>
+          </div>
+          <p id="avatarStatus" class="muted"></p>
+        </div>
+        <div class="settings-section hidden" data-section="mcp">
+          <h3>MCP ????</h3>
+          <p class="muted">???? MCP Server?? AI ????????</p>
+          <div id="mcpServerListWrap" class="provider-list"></div>
+          <div id="mcpServerListWrap" class="provider-list"></div>
+          <hr class="provider-divider">
+          <h4>快速添加</h4>
+          <div id="presetMcpList" class="preset-provider-list"></div>
+          <hr class="provider-divider">
+          <h4 id="mcpFormTitle">自定义添加</h4>
+          <input id="mcpEditId" type="hidden" value="">
+          <div class="setting-row">
+            <label>名称</label>
+            <input id="mcpName" type="text" placeholder="如：计算器">
+          </div>
+          <div class="setting-row">
+            <label>命令</label>
+            <input id="mcpCommand" type="text" placeholder="npx / node / python">
+          </div>
+          <div class="setting-row">
+            <label>参数</label>
+            <input id="mcpArgs" type="text" placeholder="-y @some/mcp-server（空格分隔）">
+          </div>
+          <div class="setting-row">
+            <label>环境变量</label>
+            <input id="mcpEnv" type="text" placeholder="KEY=value KEY2=value2（可选）">
+          </div>
+          <div class="setting-row-actions">
+            <button id="mcpTestBtn" class="btn ghost" type="button">测试连接</button>
+            <button id="mcpSaveBtn" class="btn primary" type="button">保存</button>
+            <button id="mcpCancelBtn" class="btn ghost hidden" type="button">取消编辑</button>
+          </div>
+          <p id="mcpStatus" class="muted"></p>
+        </div>
+        <div class="settings-section hidden" data-section="knowledge">
+          <h3>知识库</h3>
+          <p class="muted">添加参考资料，聊天时 AI 会基于知识库内容回答</p>
+          <div id="kbListWrap" class="provider-list"></div>
+          <hr class="provider-divider">
+          <h4 id="kbFormTitle">添加知识</h4>
+          <input id="kbEditId" type="hidden" value="">
+          <div class="setting-row">
+            <label>名称</label>
+            <input id="kbName" type="text" placeholder="如：线性代数笔记">
+          </div>
+          <div class="setting-row">
+            <label>内容</label>
+            <textarea id="kbContent" rows="6" placeholder="粘贴或输入文本内容..."></textarea>
+          </div>
+          <div class="setting-row">
+            <label>或上传文件</label>
+            <div class="setting-control">
+              <button id="kbUploadBtn" class="btn ghost" type="button">上传文件（txt/md/pdf/docx）</button>
+              <input id="kbFileInput" type="file" hidden accept=".txt,.md,.pdf,.docx">
+              <span id="kbUploadStatus" class="muted"></span>
+            </div>
+          </div>
+          <div class="setting-row-actions">
+            <button id="kbSaveBtn" class="btn primary" type="button">保存</button>
+            <button id="kbCancelBtn" class="btn ghost hidden" type="button">取消编辑</button>
+          </div>
+          <p id="kbStatus" class="muted"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <dialog id="groupDialog" class="group-dialog">
+    <h3>新建群组</h3>
+    <div class="setting-row">
+      <label>群组名称</label>
+      <input id="groupNameInput" type="text" placeholder="给群组起一个名字">
+    </div>
+    <div class="setting-row">
+      <label>选择成员（至少 1 个）</label>
+      <div id="groupMemberList" class="group-member-list"></div>
+    </div>
+    <div class="setting-row-actions">
+      <button id="groupCancelBtn" class="btn ghost" type="button">取消</button>
+      <button id="groupSaveBtn" class="btn primary" type="button">创建</button>
+    </div>
+  </dialog>
+
+  <script src="/vendor/mammoth.browser.min.js"></script>
+  <script src="/vendor/jszip.min.js"></script>
+  <script src="/vendor/docx.umd.min.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

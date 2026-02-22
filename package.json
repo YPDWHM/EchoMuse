@@ -1,0 +1,32 @@
+{
+  "name": "offline-review-pack-local-ollama",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-cloud final-review pack generator powered by local Ollama",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "local": "node scripts/run-server.js local",
+    "share": "node scripts/run-server.js share",
+    "bootstrap:win": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\bootstrap-windows.ps1",
+    "bootstrap:unix": "bash ./bootstrap-unix.sh",
+    "win:local": "set HOST=127.0.0.1&& node server.js",
+    "win:share": "set HOST=0.0.0.0&& set SHARE_MODE=1&& node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "docx": "^9.5.3",
+    "express": "^4.19.2",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.0",
+    "katex": "^0.16.11",
+    "mammoth": "^1.11.0",
+    "multer": "^2.0.2",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^4.9.155",
+    "qrcode": "^1.5.4",
+    "zod": "^4.3.6"
+  }
+}

@@ -1,0 +1,26 @@
+AGENTS.md
+DEVLOG.md
+notes/
+
+# Local dependencies / binaries
+node_modules/
+/vendor/
+
+# Keep frontend vendor assets
+!/public/vendor/
+
+# Local backups / repair artifacts
+*.bak
+*.backup
+*.corrupt_backup
+*.before_*.bak
+fix_*.py
+scripts/repair_*.py
+scripts/__pycache__/
+
+# Local screenshots / temp captures
+/图*.png
+
+# OS/editor junk
+.DS_Store
+Thumbs.db

@@ -6,15 +6,123 @@ const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const connections = new Map();
 
+let _sseClientTransport = null;
+let _streamableHttpClientTransport = null;
+let _remoteTransportLoadTried = false;
+
+function loadRemoteTransportClasses() {
+  if (_remoteTransportLoadTried) {
+    return {
+      SSEClientTransport: _sseClientTransport,
+      StreamableHTTPClientTransport: _streamableHttpClientTransport
+    };
+  }
+  _remoteTransportLoadTried = true;
+
+  try {
+    const mod = require('@modelcontextprotocol/sdk/client/sse.js');
+    _sseClientTransport = mod.SSEClientTransport || mod.default || null;
+  } catch (_) {}
+
+  try {
+    const mod = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    _streamableHttpClientTransport = mod.StreamableHTTPClientTransport || mod.default || null;
+  } catch (_) {}
+
+  return {
+    SSEClientTransport: _sseClientTransport,
+    StreamableHTTPClientTransport: _streamableHttpClientTransport
+  };
+}
+
+function normalizeRemoteType(config) {
+  const raw = String(config?.type || config?.transport || 'stdio').toLowerCase();
+  if (raw.includes('sse')) return 'sse';
+  if (raw.includes('http')) return 'http';
+  return 'stdio';
+}
+
+function normalizeHeaders(headers) {
+  if (!headers) return {};
+  if (Array.isArray(headers)) {
+    const out = {};
+    for (const item of headers) {
+      const s = String(item || '');
+      const idx = s.indexOf(':');
+      if (idx > 0) out[s.slice(0, idx).trim()] = s.slice(idx + 1).trim();
+    }
+    return out;
+  }
+  if (typeof headers === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(headers)) {
+      if (!k) continue;
+      out[String(k)] = String(v ?? '');
+    }
+    return out;
+  }
+  if (typeof headers === 'string') {
+    const out = {};
+    String(headers).split(/\r?\n/).forEach((line) => {
+      const s = line.trim();
+      if (!s) return;
+      const idx = s.indexOf(':');
+      if (idx > 0) out[s.slice(0, idx).trim()] = s.slice(idx + 1).trim();
+    });
+    return out;
+  }
+  return {};
+}
+
+function createRemoteTransport(config) {
+  const type = normalizeRemoteType(config);
+  const urlRaw = String(config?.url || '').trim();
+  if (!urlRaw) throw new Error('Remote MCP requires url');
+  const url = new URL(urlRaw);
+  const headers = normalizeHeaders(config?.headers);
+  const { SSEClientTransport, StreamableHTTPClientTransport } = loadRemoteTransportClasses();
+
+  if (type === 'sse') {
+    if (!SSEClientTransport) {
+      throw new Error('SSE transport is not available in current MCP SDK build');
+    }
+    const attempts = [
+      () => new SSEClientTransport(url, { requestInit: { headers } }),
+      () => new SSEClientTransport(url, { headers }),
+      () => new SSEClientTransport(url)
+    ];
+    for (const fn of attempts) {
+      try { return fn(); } catch (_) {}
+    }
+    throw new Error('Failed to initialize SSE MCP transport');
+  }
+
+  if (!StreamableHTTPClientTransport) {
+    throw new Error('HTTP transport is not available in current MCP SDK build');
+  }
+  const attempts = [
+    () => new StreamableHTTPClientTransport(url, { requestInit: { headers } }),
+    () => new StreamableHTTPClientTransport(url, { headers }),
+    () => new StreamableHTTPClientTransport(url)
+  ];
+  for (const fn of attempts) {
+    try { return fn(); } catch (_) {}
+  }
+  throw new Error('Failed to initialize HTTP MCP transport');
+}
+
 async function connectServer(config) {
   const existing = connections.get(config.id);
   if (existing && existing.status === 'connected') return existing.tools;
 
-  const transport = new StdioClientTransport({
-    command: config.command,
-    args: config.args || [],
-    env: { ...process.env, ...(config.env || {}) }
-  });
+  const transportType = normalizeRemoteType(config);
+  const transport = transportType === 'stdio'
+    ? new StdioClientTransport({
+      command: config.command,
+      args: config.args || [],
+      env: { ...process.env, ...(config.env || {}) }
+    })
+    : createRemoteTransport(config);
 
   const client = new Client({ name: 'echomuse', version: '1.0.0' });
   await client.connect(transport);

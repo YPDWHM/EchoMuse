@@ -4464,11 +4464,15 @@ function renderMcpServerList(servers) {
   wrap.innerHTML = servers.map((s) => {
     const toolCount = s.toolCount || 0;
     const statusText = s.status === 'connected' ? `Connected · ${toolCount} tools` : 'Disconnected';
+    const mcpType = (s.type || 'stdio').toLowerCase();
+    const endpointText = mcpType === 'stdio'
+      ? `${escapeHtml(s.command || '')} ${escapeHtml((s.args || []).join(' '))}`.trim()
+      : `${mcpType.toUpperCase()} ${escapeHtml(s.url || '')}`.trim();
     return `
     <div class="provider-card${s.enabled ? '' : ' disabled'}">
       <div class="provider-card-info">
         <div class="provider-card-name">${escapeHtml(s.name)}</div>
-        <div class="provider-card-meta">${escapeHtml(s.command)} ${escapeHtml((s.args || []).join(' '))} · ${statusText}${s.enabled ? '' : ' · 已禁用'}</div>
+        <div class="provider-card-meta">${endpointText} · ${statusText}${s.enabled ? '' : ' · 已禁用'}</div>
       </div>
       <div class="provider-card-actions">
         <button onclick="toggleMcpServer('${escapeHtml(s.id)}')">${s.enabled ? '禁用' : '启用'}</button>
@@ -4572,6 +4576,10 @@ async function editMcpServer(id) {
     const data = await apiRequest('/api/mcp-servers', { method: 'GET' });
     const s = (data.servers || []).find((x) => x.id === id);
     if (!s) return;
+    if ((s.type || 'stdio') !== 'stdio') {
+      els.mcpStatus.textContent = '远程 MCP（HTTP/SSE）目前仅支持导入/启用/测试，表单编辑暂未开放。';
+      return;
+    }
     els.mcpEditId.value = s.id;
     els.mcpName.value = s.name || '';
     els.mcpCommand.value = s.command || '';
@@ -4656,6 +4664,38 @@ function parseMcpImportArgs(argsLike) {
   return [];
 }
 
+function parseMcpImportHeaders(headersLike) {
+  if (!headersLike) return {};
+  if (typeof headersLike === 'object' && !Array.isArray(headersLike)) {
+    const out = {};
+    Object.entries(headersLike).forEach(([k, v]) => {
+      if (!k) return;
+      out[String(k)] = String(v ?? '');
+    });
+    return out;
+  }
+  if (Array.isArray(headersLike)) {
+    const out = {};
+    headersLike.forEach((item) => {
+      const s = String(item || '');
+      const idx = s.indexOf(':');
+      if (idx > 0) out[s.slice(0, idx).trim()] = s.slice(idx + 1).trim();
+    });
+    return out;
+  }
+  if (typeof headersLike === 'string') {
+    const out = {};
+    String(headersLike).split(/\r?\n/).forEach((line) => {
+      const s = line.trim();
+      if (!s) return;
+      const idx = s.indexOf(':');
+      if (idx > 0) out[s.slice(0, idx).trim()] = s.slice(idx + 1).trim();
+    });
+    return out;
+  }
+  return {};
+}
+
 function collectMcpImportCandidates(parsed) {
   if (Array.isArray(parsed)) return parsed.map((raw, i) => ({ raw, nameHint: `MCP ${i + 1}` }));
   if (!parsed || typeof parsed !== 'object') return [];
@@ -4680,13 +4720,34 @@ function collectMcpImportCandidates(parsed) {
 
 function normalizeMcpImportCandidate(candidate) {
   const raw = candidate && candidate.raw && typeof candidate.raw === 'object' ? candidate.raw : {};
-  const transportType = String(raw.transport || raw.type || raw.transportType || '').toLowerCase();
-  const hasRemoteUrl = Boolean(raw.url || raw.sseUrl || raw.endpoint || raw.baseUrl);
+  const transportObj = raw.transport && typeof raw.transport === 'object' ? raw.transport : null;
+  const transportType = String(transportObj?.type || raw.transport || raw.type || raw.transportType || '').toLowerCase();
+  const remoteUrl = String(
+    raw.url || raw.sseUrl || raw.endpoint || raw.baseUrl ||
+    transportObj?.url || transportObj?.sseUrl || transportObj?.endpoint || ''
+  ).trim();
+  const hasRemoteUrl = Boolean(remoteUrl);
   if (hasRemoteUrl || transportType.includes('sse') || transportType.includes('http')) {
+    const remoteType = transportType.includes('sse') || raw.sseUrl ? 'sse' : 'http';
+    if (!remoteUrl) {
+      return {
+        ok: false,
+        name: String(raw.name || candidate.nameHint || 'MCP Server'),
+        reason: '缺少远程 MCP 的 url 字段'
+      };
+    }
     return {
-      ok: false,
-      name: String(raw.name || candidate.nameHint || 'MCP Server'),
-      reason: '当前版本暂不支持远程 MCP（HTTP/SSE）导入，请先使用本地 stdio MCP。'
+      ok: true,
+      server: {
+        name: String(raw.name || candidate.nameHint || 'MCP Server').trim() || 'MCP Server',
+        type: remoteType,
+        url: remoteUrl,
+        headers: parseMcpImportHeaders(
+          raw.headers ?? raw.httpHeaders ?? raw.requestHeaders ?? raw.header ??
+          transportObj?.headers ?? transportObj?.httpHeaders
+        ),
+        enabled: raw.enabled !== false
+      }
     };
   }
 
@@ -4717,6 +4778,9 @@ function normalizeMcpImportCandidate(candidate) {
 }
 
 function mcpImportSignature(server) {
+  if ((server.type || 'stdio') !== 'stdio') {
+    return `${server.name}||${server.type || 'http'}||${server.url || ''}`;
+  }
   return `${server.name}||${server.command}||${(server.args || []).join(' ')}`;
 }
 

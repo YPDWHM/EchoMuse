@@ -592,8 +592,8 @@ app.get('/api/mcp-servers', (req, res) => {
     const status = mcpManager.getStatus(s.id);
     const tools = mcpManager.getAllConnectedTools().filter(t => t.serverId === s.id);
     return {
-      id: s.id, name: s.name, command: s.command,
-      args: s.args || [], env: s.env || {}, enabled: s.enabled,
+      id: s.id, name: s.name, type: s.type || 'stdio', command: s.command,
+      args: s.args || [], env: s.env || {}, url: s.url || '', headers: s.headers || {}, enabled: s.enabled,
       status, toolCount: tools.length
     };
   });
@@ -602,8 +602,13 @@ app.get('/api/mcp-servers', (req, res) => {
 
 app.post('/api/mcp-servers', (req, res) => {
   const body = req.body || {};
-  if (!body.command || typeof body.command !== 'string') {
+  const rawType = String(body.type || body.transport || 'stdio').toLowerCase();
+  const type = rawType.includes('sse') ? 'sse' : (rawType.includes('http') ? 'http' : 'stdio');
+  if (type === 'stdio' && (!body.command || typeof body.command !== 'string')) {
     return res.status(400).json({ error: 'Bad Request', message: '需要 command 字段。' });
+  }
+  if (type !== 'stdio' && (!body.url || typeof body.url !== 'string')) {
+    return res.status(400).json({ error: 'Bad Request', message: '需要 url 字段。' });
   }
   const id = body.id || `mcp-${Date.now()}`;
   if (!appConfig.mcpServers) appConfig.mcpServers = [];
@@ -611,9 +616,12 @@ app.post('/api/mcp-servers', (req, res) => {
   const server = {
     id,
     name: String(body.name || 'MCP Server').trim(),
-    command: String(body.command).trim(),
-    args: Array.isArray(body.args) ? body.args.map(a => String(a)) : String(body.args || '').split(/\s+/).filter(Boolean),
-    env: body.env || {},
+    type,
+    command: type === 'stdio' ? String(body.command || '').trim() : '',
+    args: type === 'stdio' ? (Array.isArray(body.args) ? body.args.map(a => String(a)) : String(body.args || '').split(/\s+/).filter(Boolean)) : [],
+    env: type === 'stdio' ? (body.env || {}) : {},
+    url: type !== 'stdio' ? String(body.url || '').trim() : '',
+    headers: type !== 'stdio' ? (body.headers || {}) : {},
     enabled: body.enabled !== false
   };
   if (existing) {
@@ -656,11 +664,23 @@ app.post('/api/mcp-servers/:id/toggle', async (req, res) => {
 });
 
 app.post('/api/mcp-servers/test-connection', async (req, res) => {
-  const { command, args } = req.body || {};
-  if (!command) return res.status(400).json({ ok: false, message: '缺少 command' });
+  const body = req.body || {};
+  const rawType = String(body.type || body.transport || 'stdio').toLowerCase();
+  const type = rawType.includes('sse') ? 'sse' : (rawType.includes('http') ? 'http' : 'stdio');
+  const { command, args, url, headers } = body;
+  if (type === 'stdio' && !command) return res.status(400).json({ ok: false, message: '缺少 command' });
+  if (type !== 'stdio' && !url) return res.status(400).json({ ok: false, message: '缺少 url' });
   const tempId = `_test_${Date.now()}`;
   try {
-    const tools = await mcpManager.connectServer({ id: tempId, command, args: args || [], env: {} });
+    const tools = await mcpManager.connectServer({
+      id: tempId,
+      type,
+      command,
+      args: args || [],
+      env: {},
+      url,
+      headers: headers || {}
+    });
     await mcpManager.disconnectServer(tempId);
     res.json({ ok: true, tools: tools.map(t => ({ name: t.name, description: t.description })) });
   } catch (error) {

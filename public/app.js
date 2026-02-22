@@ -906,6 +906,14 @@ const sharedUtils = window.EchoMuseUtils;
 if (!sharedUtils) {
   throw new Error('EchoMuseUtils not loaded. Check script order in public/index.html.');
 }
+const sharedDomainCore = window.EchoMuseDomainCore;
+if (!sharedDomainCore) {
+  throw new Error('EchoMuseDomainCore not loaded. Check script order in public/index.html.');
+}
+const sharedChatRenderCore = window.EchoMuseChatRenderCore;
+if (!sharedChatRenderCore) {
+  throw new Error('EchoMuseChatRenderCore not loaded. Check script order in public/index.html.');
+}
 const {
   countQuestionTotal,
   toolName,
@@ -917,6 +925,22 @@ const {
   timestamp,
   downloadBlob
 } = sharedUtils;
+const {
+  isValidSession,
+  createSessionObject,
+  sortSessions,
+  getSessionPreview,
+  isValidAvatar,
+  derivePromptMode,
+  promptModeLabel,
+  parsePngCharaData,
+  normalizeTavernCard
+} = sharedDomainCore;
+const {
+  buildSessionListHtml,
+  renderMessageMetaHtml,
+  renderToolCardHtml
+} = sharedChatRenderCore;
 
 const els = {
   sessionSearch: document.getElementById('sessionSearch'),
@@ -1085,6 +1109,7 @@ const els = {
   mcpCommand: document.getElementById('mcpCommand'),
   mcpArgs: document.getElementById('mcpArgs'),
   mcpEnv: document.getElementById('mcpEnv'),
+  mcpImportJsonBtn: document.getElementById('mcpImportJsonBtn'),
   mcpTestBtn: document.getElementById('mcpTestBtn'),
   mcpSaveBtn: document.getElementById('mcpSaveBtn'),
   mcpCancelBtn: document.getElementById('mcpCancelBtn'),
@@ -2190,6 +2215,7 @@ function bindEvents() {
   /* MCP settings bindings */
   if (els.mcpSaveBtn) els.mcpSaveBtn.addEventListener('click', () => saveMcpServer());
   if (els.mcpTestBtn) els.mcpTestBtn.addEventListener('click', () => testMcpServer());
+  if (els.mcpImportJsonBtn) els.mcpImportJsonBtn.addEventListener('click', () => importMcpServersFromClipboard());
   if (els.mcpCancelBtn) els.mcpCancelBtn.addEventListener('click', () => resetMcpForm());
   if (els.presetMcpList) {
     els.presetMcpList.addEventListener('click', (e) => {
@@ -2346,30 +2372,6 @@ function persistSessionsState() {
   localStorage.setItem(STORAGE_ACTIVE_KEY, state.activeSessionId);
 }
 
-function isValidSession(item) {
-  return item
-    && typeof item.id === 'string'
-    && typeof item.title === 'string'
-    && Array.isArray(item.messages)
-    && Array.isArray(item.artifacts)
-    && typeof item.materialsText === 'string';
-}
-
-function createSessionObject(title) {
-  const now = Date.now();
-  return {
-    id: `s_${now}_${Math.random().toString(36).slice(2, 8)}`,
-    title: title || '新会话',
-    favorite: false,
-    createdAt: now,
-    updatedAt: now,
-    materialsText: '',
-    messages: [],
-    artifacts: [],
-    avatarId: null
-  };
-}
-
 function createSession(title) {
   const session = createSessionObject(title);
   state.sessions.unshift(session);
@@ -2406,15 +2408,6 @@ function touchSession(session) {
   session.updatedAt = Date.now();
 }
 
-function sortSessions(list) {
-  return list.slice().sort((a, b) => {
-    const af = a.favorite ? 1 : 0;
-    const bf = b.favorite ? 1 : 0;
-    if (af !== bf) return bf - af;
-    return Number(b.updatedAt || 0) - Number(a.updatedAt || 0);
-  });
-}
-
 /* ── Avatar (角色) CRUD ── */
 
 function loadAvatars() {
@@ -2424,10 +2417,6 @@ function loadAvatars() {
     const parsed = JSON.parse(raw);
     state.avatars = Array.isArray(parsed) ? parsed.filter(isValidAvatar) : [];
   } catch (_) { state.avatars = []; }
-}
-
-function isValidAvatar(a) {
-  return a && typeof a.id === 'string' && typeof a.name === 'string';
 }
 
 function persistAvatars() {
@@ -2474,54 +2463,7 @@ function deleteAvatar(id) {
   persistSessionsState();
 }
 
-function derivePromptMode(customPrompt, memoryText) {
-  const hasPrompt = Boolean(customPrompt && customPrompt.trim());
-  const hasMemory = Boolean(memoryText && memoryText.trim());
-  if (hasPrompt && hasMemory) return 'both';
-  if (hasMemory) return 'memory';
-  return 'custom';
-}
-
 /* ── Tavern Character Card Import (酒馆卡片导入) ── */
-
-function parsePngCharaData(buf) {
-  const view = new DataView(buf);
-  let offset = 8; // skip PNG signature
-  while (offset < buf.byteLength) {
-    const len = view.getUint32(offset);
-    const typeCode = String.fromCharCode(view.getUint8(offset + 4), view.getUint8(offset + 5), view.getUint8(offset + 6), view.getUint8(offset + 7));
-    if (typeCode === 'tEXt') {
-      const dataStart = offset + 8;
-      const dataBytes = new Uint8Array(buf, dataStart, len);
-      const nullIdx = dataBytes.indexOf(0);
-      if (nullIdx !== -1) {
-        const keyword = new TextDecoder('latin1').decode(dataBytes.slice(0, nullIdx));
-        if (keyword === 'chara') {
-          const b64 = new TextDecoder('latin1').decode(dataBytes.slice(nullIdx + 1));
-          const json = atob(b64);
-          return JSON.parse(json);
-        }
-      }
-    }
-    offset += 12 + len; // 4 len + 4 type + data + 4 crc
-  }
-  return null;
-}
-
-function normalizeTavernCard(raw) {
-  const d = (raw && raw.spec === 'chara_card_v2' && raw.data) ? raw.data : raw;
-  if (!d || !d.name) return null;
-  const parts = [];
-  if (d.description) parts.push(d.description.trim());
-  if (d.personality) parts.push('性格：' + d.personality.trim());
-  if (d.scenario) parts.push('场景：' + d.scenario.trim());
-  if (d.mes_example) parts.push('对话示例：\n' + d.mes_example.trim());
-  return {
-    name: d.name,
-    customPrompt: parts.join('\n\n'),
-    firstMessage: d.first_mes || ''
-  };
-}
 
 async function handleTavernImport(file) {
   const ext = file.name.split('.').pop().toLowerCase();
@@ -2697,12 +2639,6 @@ function saveGroup() {
 
 /* ── Avatar UI (设置面板 + 选择器) ── */
 
-function promptModeLabel(mode) {
-  if (mode === 'both') return '混合';
-  if (mode === 'memory') return '记忆';
-  return '自定义';
-}
-
 function renderAvatarList() {
   if (!els.avatarListWrap) return;
   if (!state.avatars.length) {
@@ -2794,44 +2730,16 @@ function updateAvatarBtnLabel() {
 }
 
 function renderSessionList() {
-  const activeId = state.activeSessionId;
-  const sorted = sortSessions(state.sessions);
-  const filtered = sorted.filter((session) => {
-    if (!state.search) return true;
-    const preview = getSessionPreview(session).toLowerCase();
-    return session.title.toLowerCase().includes(state.search) || preview.includes(state.search);
+  els.sessionList.innerHTML = buildSessionListHtml({
+    sessions: state.sessions,
+    activeId: state.activeSessionId,
+    search: state.search,
+    sortSessions,
+    getAvatarById,
+    escapeHtml,
+    formatTime,
+    getSessionPreview
   });
-
-  if (!filtered.length) {
-    els.sessionList.innerHTML = '<div class="muted">没有匹配会话</div>';
-    return;
-  }
-
-  els.sessionList.innerHTML = filtered.map((session) => {
-    const active = session.id === activeId ? 'active' : '';
-    const favorite = session.favorite ? 'on' : '';
-    const boundAvatar = session.avatarId ? getAvatarById(session.avatarId) : null;
-    const avatarTag = boundAvatar ? `<span class="session-avatar-tag">🎭 ${escapeHtml(boundAvatar.name)}</span>` : '';
-    return `
-      <button class="session-item ${active}" data-action="switch-session" data-sid="${session.id}" type="button">
-        <div class="session-top">
-          <span class="session-title">${escapeHtml(session.title)}${avatarTag}</span>
-          <button class="session-fav ${favorite}" data-action="toggle-fav" data-sid="${session.id}" type="button">${session.favorite ? "★" : "☆"}</button>
-        </div>
-        <div class="session-preview">${escapeHtml(getSessionPreview(session))}</div>
-        <div class="session-time">${formatTime(session.updatedAt)}</div>
-      </button>
-    `;
-  }).join('');
-}
-
-function getSessionPreview(session) {
-  if (!session.messages.length) return '暂无消息';
-  const last = session.messages[session.messages.length - 1];
-  if (last.kind === 'tool') {
-    return `${toolName(last.tool)}：${last.status === 'done' ? '已完成' : last.status === 'running' ? '进行中' : '失败'}`;
-  }
-  return String(last.content || '').replace(/\s+/g, ' ').slice(0, 44) || '暂无消息';
 }
 
 function syncMaterialsFromSession() {}
@@ -2919,72 +2827,29 @@ function estimateTokenUsage(text) {
 }
 
 function renderMessageMeta(message, role) {
-  const parts = [];
-  if (state.settings.chatShowTimestamp) {
-    parts.push(formatTime(message.createdAt));
-  }
-  if (state.settings.chatShowModel && role === 'assistant') {
-    parts.push(message.modelName || getChatModelName());
-  }
-  if (state.settings.chatShowCharCount) {
-    parts.push(`${String(message.content || '').length} chars`);
-  }
-  if (state.settings.chatShowTokenUsage) {
-    parts.push(`~${estimateTokenUsage(message.content || '')} tok`);
-  }
-  if (state.settings.chatShowFirstTokenLatency && role === 'assistant' && Number.isFinite(message.firstTokenLatencyMs)) {
-    parts.push(`TTFT ${Math.max(0, Math.round(message.firstTokenLatencyMs))}ms`);
-  }
-  if (!parts.length) return '';
-  return `<div class="msg-meta">${escapeHtml(parts.join(' · '))}</div>`;
+  return renderMessageMetaHtml({
+    message,
+    role,
+    settings: state.settings,
+    formatTime,
+    getChatModelName,
+    estimateTokenUsage,
+    escapeHtml
+  });
 }
 
 function renderToolCard(message) {
-  const statusClass = message.status || 'running';
-  const statusText = statusClass === 'done'
-    ? '已完成'
-    : statusClass === 'error'
-      ? '失败'
-      : '进行中';
-
-  let action = '';
-  let inlineArtifact = '';
-  if (statusClass === 'done' && message.artifactId) {
-    const expanded = state.ui.expandedArtifacts && state.ui.expandedArtifacts[message.artifactId];
-    action = `<button class="btn" data-action="toggle-inline-artifact" data-artifact-id="${message.artifactId}" type="button">${expanded ? '收起产物' : '查看产物'}</button>`;
-    if (expanded) {
-      const session = getActiveSession();
-      const artifact = session && session.artifacts.find((a) => a.id === message.artifactId);
-      if (artifact) {
-        const tab = (state.ui.inlineArtifactTabs && state.ui.inlineArtifactTabs[message.artifactId]) || 'overview';
-        const tabs = getArtifactTabs(artifact.tool);
-        const tabsHtml = tabs.map((t) =>
-          `<button class="artifact-tab ${t.id === tab ? 'active' : ''}" data-action="switch-inline-tab" data-artifact-id="${message.artifactId}" data-tab="${t.id}" type="button">${escapeHtml(t.label)}</button>`
-        ).join('');
-        let contentHtml = '';
-        if (artifact.tool === 'paper_report') {
-          contentHtml = renderPaperArtifact(artifact.data || {}, tab);
-        } else {
-          contentHtml = renderReviewArtifact(artifact.data || {}, tab);
-        }
-        inlineArtifact = `<div class="inline-artifact"><div class="inline-artifact-tabs">${tabsHtml}</div><div class="inline-artifact-content">${contentHtml}</div></div>`;
-      }
-    }
-  } else if (statusClass === 'error') {
-    action = `<button class="btn" data-action="retry-tool" data-tool="${message.tool}" type="button">重试</button>`;
-  }
-
-  return `
-    <div class="tool-card ${statusClass}" data-mid="${message.id}">
-      <div class="tool-card-head">
-        <span class="tool-card-title">${escapeHtml(message.title || toolName(message.tool))}</span>
-        <span class="tool-card-meta">${statusText} · ${formatTime(message.createdAt)}</span>
-      </div>
-      <div class="tool-card-meta">${escapeHtml(message.detail || '')}</div>
-      ${action}
-      ${inlineArtifact}
-    </div>
-  `;
+  return renderToolCardHtml({
+    message,
+    stateUi: state.ui,
+    getActiveSession,
+    getArtifactTabs,
+    renderPaperArtifact,
+    renderReviewArtifact,
+    escapeHtml,
+    toolName,
+    formatTime
+  });
 }
 
 function appendChatMessage(role, content, extra) {
@@ -4735,6 +4600,203 @@ async function testMcpServer() {
   } catch (e) {
     els.mcpStatus.textContent = `测试失败：${e.message || e}`;
   }
+}
+
+function extractJsonFromClipboardText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && fence[1]) return fence[1].trim();
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  const firstBracket = raw.indexOf('[');
+  const lastBracket = raw.lastIndexOf(']');
+  if (firstBrace >= 0 && lastBrace > firstBrace && (firstBracket < 0 || firstBrace < firstBracket)) {
+    return raw.slice(firstBrace, lastBrace + 1).trim();
+  }
+  if (firstBracket >= 0 && lastBracket > firstBracket) {
+    return raw.slice(firstBracket, lastBracket + 1).trim();
+  }
+  return raw;
+}
+
+function parseMcpImportEnv(envLike) {
+  if (!envLike) return {};
+  if (typeof envLike === 'object' && !Array.isArray(envLike)) {
+    const out = {};
+    Object.entries(envLike).forEach(([k, v]) => {
+      if (!k) return;
+      out[String(k)] = String(v ?? '');
+    });
+    return out;
+  }
+  if (Array.isArray(envLike)) {
+    const out = {};
+    envLike.forEach((item) => {
+      const s = String(item || '');
+      const idx = s.indexOf('=');
+      if (idx > 0) out[s.slice(0, idx)] = s.slice(idx + 1);
+    });
+    return out;
+  }
+  if (typeof envLike === 'string') {
+    const out = {};
+    envLike.trim().split(/\s+/).forEach((pair) => {
+      const idx = pair.indexOf('=');
+      if (idx > 0) out[pair.slice(0, idx)] = pair.slice(idx + 1);
+    });
+    return out;
+  }
+  return {};
+}
+
+function parseMcpImportArgs(argsLike) {
+  if (Array.isArray(argsLike)) return argsLike.map((a) => String(a));
+  if (typeof argsLike === 'string') return argsLike.trim() ? argsLike.trim().split(/\s+/) : [];
+  return [];
+}
+
+function collectMcpImportCandidates(parsed) {
+  if (Array.isArray(parsed)) return parsed.map((raw, i) => ({ raw, nameHint: `MCP ${i + 1}` }));
+  if (!parsed || typeof parsed !== 'object') return [];
+
+  if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+    return Object.entries(parsed.mcpServers).map(([name, raw]) => ({ raw, nameHint: name }));
+  }
+  if (parsed.servers && typeof parsed.servers === 'object') {
+    if (Array.isArray(parsed.servers)) {
+      return parsed.servers.map((raw, i) => ({ raw, nameHint: `MCP ${i + 1}` }));
+    }
+    return Object.entries(parsed.servers).map(([name, raw]) => ({ raw, nameHint: name }));
+  }
+  if (parsed.command || parsed.cmd || parsed.url) {
+    return [{ raw: parsed, nameHint: parsed.name || 'MCP Server' }];
+  }
+
+  const entries = Object.entries(parsed).filter(([, v]) => v && typeof v === 'object');
+  if (entries.length) return entries.map(([name, raw]) => ({ raw, nameHint: name }));
+  return [];
+}
+
+function normalizeMcpImportCandidate(candidate) {
+  const raw = candidate && candidate.raw && typeof candidate.raw === 'object' ? candidate.raw : {};
+  const transportType = String(raw.transport || raw.type || raw.transportType || '').toLowerCase();
+  const hasRemoteUrl = Boolean(raw.url || raw.sseUrl || raw.endpoint || raw.baseUrl);
+  if (hasRemoteUrl || transportType.includes('sse') || transportType.includes('http')) {
+    return {
+      ok: false,
+      name: String(raw.name || candidate.nameHint || 'MCP Server'),
+      reason: '当前版本暂不支持远程 MCP（HTTP/SSE）导入，请先使用本地 stdio MCP。'
+    };
+  }
+
+  const stdio = raw.stdio && typeof raw.stdio === 'object' ? raw.stdio : null;
+  const command = String(raw.command || raw.cmd || stdio?.command || '').trim();
+  if (!command) {
+    return {
+      ok: false,
+      name: String(raw.name || candidate.nameHint || 'MCP Server'),
+      reason: '缺少 command 字段'
+    };
+  }
+
+  const args = parseMcpImportArgs(raw.args ?? raw.arguments ?? stdio?.args);
+  const env = parseMcpImportEnv(raw.env ?? raw.environment ?? stdio?.env);
+  const name = String(raw.name || candidate.nameHint || command).trim() || 'MCP Server';
+
+  return {
+    ok: true,
+    server: {
+      name,
+      command,
+      args,
+      env,
+      enabled: raw.enabled !== false
+    }
+  };
+}
+
+function mcpImportSignature(server) {
+  return `${server.name}||${server.command}||${(server.args || []).join(' ')}`;
+}
+
+async function importMcpServersFromClipboard() {
+  if (!els.mcpStatus) return;
+
+  let rawText = '';
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('clipboard_unavailable');
+    rawText = await navigator.clipboard.readText();
+  } catch (_) {
+    rawText = window.prompt('请粘贴 MCP JSON 配置', '') || '';
+  }
+
+  if (!String(rawText || '').trim()) {
+    els.mcpStatus.textContent = '未读取到 JSON 内容';
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(extractJsonFromClipboardText(rawText));
+  } catch (e) {
+    els.mcpStatus.textContent = `JSON 解析失败：${e.message || e}`;
+    return;
+  }
+
+  const candidates = collectMcpImportCandidates(parsed);
+  if (!candidates.length) {
+    els.mcpStatus.textContent = '未识别到可导入的 MCP 配置（支持 mcpServers 对象或配置数组）';
+    return;
+  }
+
+  let existingServers = [];
+  try {
+    const data = await apiRequest('/api/mcp-servers', { method: 'GET' });
+    existingServers = Array.isArray(data.servers) ? data.servers : [];
+  } catch (_) {}
+  const seen = new Set(existingServers.map((s) => mcpImportSignature(s)));
+
+  let imported = 0;
+  let duplicate = 0;
+  const skipped = [];
+  const failed = [];
+
+  for (const item of candidates) {
+    const normalized = normalizeMcpImportCandidate(item);
+    if (!normalized.ok) {
+      skipped.push(`${normalized.name}（${normalized.reason}）`);
+      continue;
+    }
+    const sig = mcpImportSignature(normalized.server);
+    if (seen.has(sig)) {
+      duplicate += 1;
+      continue;
+    }
+    try {
+      await apiRequest('/api/mcp-servers', {
+        method: 'POST',
+        body: JSON.stringify(normalized.server)
+      });
+      seen.add(sig);
+      imported += 1;
+    } catch (e) {
+      failed.push(`${normalized.server.name}（${e.message || e}）`);
+    }
+  }
+
+  await loadMcpServerList();
+  await refreshMcpQuickPanel();
+
+  const summary = [];
+  summary.push(`导入 ${imported} 个`);
+  if (duplicate) summary.push(`重复跳过 ${duplicate} 个`);
+  if (skipped.length) summary.push(`不支持/无效 ${skipped.length} 个`);
+  if (failed.length) summary.push(`失败 ${failed.length} 个`);
+  let text = summary.join('，');
+  const detailLines = [...skipped.slice(0, 2), ...failed.slice(0, 2)];
+  if (detailLines.length) text += `：${detailLines.join('；')}`;
+  els.mcpStatus.textContent = text;
 }
 
 /* ── MCP Quick Panel (composer bar) ── */

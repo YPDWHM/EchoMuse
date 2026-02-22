@@ -12,9 +12,10 @@ const MAX_ARTIFACTS_PER_SESSION = 10;
 const DEFAULT_SETTINGS = {
   language: 'zh-CN',
   globalDefense: false,
+  translateEnabled: false,
   translateFrom: 'auto',
   translateTo: 'zh-CN',
-  fontSize: 'md',
+  fontSize: 14,
   theme: 'system',
   proxyEnabled: false,
   proxyType: 'socks5',
@@ -32,6 +33,8 @@ const DEFAULT_SETTINGS = {
   chatShowTimestamp: true,
   chatShowModel: false,
   chatShowCharCount: false,
+  chatShowTokenUsage: false,
+  chatShowFirstTokenLatency: false,
   chatMarkdownRender: true,
   chatLatexRender: true,
   chatSpellcheck: false,
@@ -40,10 +43,820 @@ const DEFAULT_SETTINGS = {
 };
 
 const FONT_SIZE_MAP = {
-  sm: '13px',
-  md: '14px',
-  lg: '16px',
-  xl: '18px'
+  sm: 13,
+  md: 14,
+  lg: 16,
+  xl: 18
+};
+
+const UI_PACK_ZH = {
+  newSession: '新建会话',
+  send: '发送',
+  sessions: '会话',
+  contacts: '联系人',
+  searchSessionsPlaceholder: '搜索会话',
+  chatPlaceholder: '输入问题，Ctrl+Enter 发送',
+  settingsTitle: '设置',
+  navGeneral: '通用',
+  navProvider: '模型',
+  navMcp: 'MCP 工具',
+  navKnowledge: '知识库',
+  closeSettings: '返回聊天',
+  generalTitle: '通用设置',
+  displaySettings: '显示设置',
+  uiLanguage: '界面语言',
+  globalDefense: '全局防御',
+  globalDefenseDesc: '用于降低提示注入与不安全输出风险',
+  translateEnabled: '启用翻译',
+  translateEnabledDesc: '仅在聊天内容中生效（含角色卡/记忆等上下文）',
+  translateDirection: '翻译方向',
+  fontSize: '字体大小',
+  theme: '主题',
+  themeSystem: '跟随系统',
+  themeLight: '浅色',
+  themeDark: '深色',
+  autoDetect: '自动检测'
+};
+
+const UI_PACK_EN = {
+  newSession: 'New Chat',
+  send: 'Send',
+  sessions: 'Chats',
+  contacts: 'Contacts',
+  searchSessionsPlaceholder: 'Search chats',
+  chatPlaceholder: 'Type a message, Ctrl+Enter to send',
+  settingsTitle: 'Settings',
+  navGeneral: 'General',
+  navProvider: 'Models',
+  navMcp: 'MCP Tools',
+  navKnowledge: 'Knowledge Base',
+  closeSettings: 'Back to Chat',
+  generalTitle: 'General Settings',
+  displaySettings: 'Display',
+  uiLanguage: 'Interface Language',
+  globalDefense: 'Global Defense',
+  globalDefenseDesc: 'Reduce prompt injection and unsafe output risk',
+  translateEnabled: 'Enable Translation',
+  translateEnabledDesc: 'Only affects chat content (including avatar cards/memory context)',
+  translateDirection: 'Translation Direction',
+  fontSize: 'Font Size',
+  theme: 'Theme',
+  themeSystem: 'Follow System',
+  themeLight: 'Light',
+  themeDark: 'Dark',
+  autoDetect: 'Auto Detect'
+};
+
+const UI_PACK_JA = {
+  newSession: '新しい会話',
+  send: '送信',
+  sessions: '会話',
+  contacts: '連絡先',
+  searchSessionsPlaceholder: '会話を検索',
+  chatPlaceholder: 'メッセージを入力、Ctrl+Enter で送信',
+  settingsTitle: '設定',
+  navGeneral: '一般',
+  navProvider: 'モデル',
+  navMcp: 'MCP ツール',
+  navKnowledge: 'ナレッジベース',
+  closeSettings: 'チャットに戻る',
+  generalTitle: '一般設定',
+  displaySettings: '表示',
+  uiLanguage: '表示言語',
+  globalDefense: '全体防御',
+  globalDefenseDesc: 'プロンプトインジェクションや危険な出力のリスクを低減',
+  translateEnabled: '翻訳を有効化',
+  translateEnabledDesc: 'チャット内容にのみ適用（角色カード/記憶コンテキストを含む）',
+  translateDirection: '翻訳方向',
+  fontSize: '文字サイズ',
+  theme: 'テーマ',
+  themeSystem: 'システムに従う',
+  themeLight: 'ライト',
+  themeDark: 'ダーク',
+  autoDetect: '自動検出'
+};
+
+const UI_PACK_KO = {
+  newSession: '새 대화',
+  send: '보내기',
+  sessions: '대화',
+  contacts: '연락처',
+  searchSessionsPlaceholder: '대화 검색',
+  chatPlaceholder: '메시지를 입력하세요, Ctrl+Enter 전송',
+  settingsTitle: '설정',
+  navGeneral: '일반',
+  navProvider: '모델',
+  navMcp: 'MCP 도구',
+  navKnowledge: '지식베이스',
+  closeSettings: '채팅으로 돌아가기',
+  generalTitle: '일반 설정',
+  displaySettings: '표시',
+  uiLanguage: '인터페이스 언어',
+  globalDefense: '전역 방어',
+  globalDefenseDesc: '프롬프트 인젝션 및 위험한 출력 위험 감소',
+  translateEnabled: '번역 사용',
+  translateEnabledDesc: '채팅 내용에만 적용 (캐릭터 카드/메모리 문맥 포함)',
+  translateDirection: '번역 방향',
+  fontSize: '글자 크기',
+  theme: '테마',
+  themeSystem: '시스템 따라가기',
+  themeLight: '라이트',
+  themeDark: '다크',
+  autoDetect: '자동 감지'
+};
+
+const UI_PACK_FR = {
+  newSession: 'Nouveau chat',
+  send: 'Envoyer',
+  sessions: 'Chats',
+  contacts: 'Contacts',
+  searchSessionsPlaceholder: 'Rechercher des chats',
+  chatPlaceholder: 'Saisir un message, Ctrl+Entrée pour envoyer',
+  settingsTitle: 'Paramètres',
+  navGeneral: 'Général',
+  navProvider: 'Modèles',
+  navMcp: 'Outils MCP',
+  navKnowledge: 'Base de connaissances',
+  closeSettings: 'Retour au chat',
+  generalTitle: 'Paramètres généraux',
+  displaySettings: 'Affichage',
+  uiLanguage: 'Langue de l’interface',
+  globalDefense: 'Protection globale',
+  globalDefenseDesc: 'Réduit les risques d’injection de prompt et de sorties dangereuses',
+  translateEnabled: 'Activer la traduction',
+  translateEnabledDesc: 'Agit surtout sur le contenu du chat (cartes/avatar/mémoire compris)',
+  translateDirection: 'Sens de traduction',
+  fontSize: 'Taille de police',
+  theme: 'Thème',
+  themeSystem: 'Suivre le système',
+  themeLight: 'Clair',
+  themeDark: 'Sombre',
+  autoDetect: 'Détection auto'
+};
+
+const UI_PACK_DE = {
+  newSession: 'Neuer Chat',
+  send: 'Senden',
+  sessions: 'Chats',
+  contacts: 'Kontakte',
+  searchSessionsPlaceholder: 'Chats suchen',
+  chatPlaceholder: 'Nachricht eingeben, Strg+Enter zum Senden',
+  settingsTitle: 'Einstellungen',
+  navGeneral: 'Allgemein',
+  navProvider: 'Modelle',
+  navMcp: 'MCP-Tools',
+  navKnowledge: 'Wissensbasis',
+  closeSettings: 'Zurück zum Chat',
+  generalTitle: 'Allgemeine Einstellungen',
+  displaySettings: 'Anzeige',
+  uiLanguage: 'Oberflächensprache',
+  globalDefense: 'Globaler Schutz',
+  globalDefenseDesc: 'Reduziert Risiken durch Prompt-Injection und unsichere Ausgaben',
+  translateEnabled: 'Übersetzung aktivieren',
+  translateEnabledDesc: 'Wirkt hauptsächlich auf Chat-Inhalte (inkl. Rollenkarte/Speicher)',
+  translateDirection: 'Übersetzungsrichtung',
+  fontSize: 'Schriftgröße',
+  theme: 'Thema',
+  themeSystem: 'System folgen',
+  themeLight: 'Hell',
+  themeDark: 'Dunkel',
+  autoDetect: 'Automatisch erkennen'
+};
+
+const UI_PACK_ES = {
+  newSession: 'Nuevo chat',
+  send: 'Enviar',
+  sessions: 'Chats',
+  contacts: 'Contactos',
+  searchSessionsPlaceholder: 'Buscar chats',
+  chatPlaceholder: 'Escribe un mensaje, Ctrl+Enter para enviar',
+  settingsTitle: 'Configuración',
+  navGeneral: 'General',
+  navProvider: 'Modelos',
+  navMcp: 'Herramientas MCP',
+  navKnowledge: 'Base de conocimiento',
+  closeSettings: 'Volver al chat',
+  generalTitle: 'Configuración general',
+  displaySettings: 'Pantalla',
+  uiLanguage: 'Idioma de la interfaz',
+  globalDefense: 'Defensa global',
+  globalDefenseDesc: 'Reduce riesgos de prompt injection y salidas inseguras',
+  translateEnabled: 'Activar traducción',
+  translateEnabledDesc: 'Afecta principalmente al chat (incluye tarjeta de rol/memoria)',
+  translateDirection: 'Dirección de traducción',
+  fontSize: 'Tamaño de fuente',
+  theme: 'Tema',
+  themeSystem: 'Seguir sistema',
+  themeLight: 'Claro',
+  themeDark: 'Oscuro',
+  autoDetect: 'Detección automática'
+};
+
+const UI_PACK_RU = {
+  newSession: 'Новый чат',
+  send: 'Отправить',
+  sessions: 'Чаты',
+  contacts: 'Контакты',
+  searchSessionsPlaceholder: 'Поиск чатов',
+  chatPlaceholder: 'Введите сообщение, Ctrl+Enter для отправки',
+  settingsTitle: 'Настройки',
+  navGeneral: 'Общие',
+  navProvider: 'Модели',
+  navMcp: 'Инструменты MCP',
+  navKnowledge: 'База знаний',
+  closeSettings: 'Назад в чат',
+  generalTitle: 'Общие настройки',
+  displaySettings: 'Отображение',
+  uiLanguage: 'Язык интерфейса',
+  globalDefense: 'Глобальная защита',
+  globalDefenseDesc: 'Снижает риск prompt injection и небезопасных ответов',
+  translateEnabled: 'Включить перевод',
+  translateEnabledDesc: 'В основном влияет на содержимое чата (включая карту роли/память)',
+  translateDirection: 'Направление перевода',
+  fontSize: 'Размер шрифта',
+  theme: 'Тема',
+  themeSystem: 'Как в системе',
+  themeLight: 'Светлая',
+  themeDark: 'Тёмная',
+  autoDetect: 'Автоопределение'
+};
+
+const UI_PACKS = {
+  'zh-CN': UI_PACK_ZH,
+  'en-US': UI_PACK_EN,
+  'ja-JP': UI_PACK_JA,
+  'ko-KR': UI_PACK_KO,
+  'fr-FR': UI_PACK_FR,
+  'de-DE': UI_PACK_DE,
+  'es-ES': UI_PACK_ES,
+  'ru-RU': UI_PACK_RU
+};
+
+const UI_PACK_EXTRAS = {
+  'zh-CN': {
+    basicSettings: '基础设置',
+    mobileAccess: '手机访问',
+    viewLanQr: '查看局域网地址 / 二维码',
+    importTavernCard: '🃏 导入酒馆卡片',
+    newGroup: '新建群组',
+    accessDialogTitle: '手机访问',
+    close: '关闭',
+    groupDialogTitle: '新建群组',
+    connected: '已连接',
+    disconnected: '未连接',
+    startLocalService: '请先启动本地服务',
+    serviceUnavailable: '服务不可用',
+    accessTokenLabel: '访问口令',
+    accessTokenPlaceholder: '留空则无口令',
+    dataSettingsGroupTitle: '数据设置',
+    exportArtifactsBtn: '导出产物',
+    clearCurrentSessionBtn: '清空当前会话',
+    proxyGroupTitle: '网络代理',
+    proxyEnableLabel: '启用代理',
+    proxyEnableDesc: '默认关闭，开启后填写代理信息',
+    proxyTypeLabel: '代理类型',
+    proxyHostLabel: '代理主机',
+    proxyPortLabel: '代理端口',
+    proxyUserLabel: '代理用户名',
+    proxyPassLabel: '代理密码',
+    chatSettingsSectionTitle: '对话设置',
+    chatContextGroupTitle: '上下文管理',
+    chatContextLimitLabel: '上下文的消息数量上限',
+    chatUnlimited: '不限制',
+    chatContextNote: '控制发送给模型的历史消息条数；越大越完整，但越慢。',
+    chatGenerationGroupTitle: '生成参数',
+    chatTemperatureSettingLabel: '温度（Temperature）',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: '使用默认',
+    chatStreamOutputTitle: '流式输出',
+    chatStreamOutputDesc: '开启后逐字显示回复，关闭后等待完整回复再显示',
+    chatDisplayGroupTitle: '显示',
+    chatShowTimestampTitle: '显示消息的时间戳',
+    chatShowModelTitle: '显示模型名称',
+    chatShowCharCountTitle: '显示消息的字数统计',
+    chatShowTokenUsageTitle: '显示消息的 token 消耗（估算）',
+    chatShowFirstTokenLatencyTitle: '显示首字耗时（TTFT）',
+    chatMarkdownRenderTitle: 'Markdown 渲染',
+    chatMarkdownRenderDesc: '关闭后助手回复按纯文本显示',
+    chatLatexRenderTitle: 'LaTeX 公式渲染',
+    chatLatexRenderDesc: '需要开启 Markdown 渲染',
+    chatSpellcheckTitle: '拼写检查（输入框）',
+    chatFeatureGroupTitle: '功能',
+    chatAutoTitleTitle: '自动生成聊天标题',
+    chatAutoTitleDesc: '根据第一条用户消息自动命名会话',
+    chatAutoPreviewArtifactTitle: '自动预览生成物（Artifacts）',
+    chatAutoPreviewArtifactDesc: '工具生成完成后自动展开卡片预览',
+    avatarGroupTitle: '头像',
+    avatarPreviewUser: '用户',
+    avatarPreviewAi: 'AI',
+    avatarUserLabel: '用户头像',
+    avatarAiLabel: 'AI 头像',
+    uploadImage: '上传图片',
+    save: '保存',
+    resetDefault: '恢复默认',
+    avatarUserPlaceholder: 'emoji 如 😀',
+    avatarAiPlaceholder: 'emoji 如 🤖',
+    labelUnset: '未设置',
+    labelMessagesUnit: '条'
+  },
+  'en-US': {
+    basicSettings: 'Basic Settings',
+    mobileAccess: 'Mobile Access',
+    viewLanQr: 'View LAN Address / QR Code',
+    importTavernCard: '🃏 Import Tavern Card',
+    newGroup: 'New Group',
+    accessDialogTitle: 'Mobile Access',
+    close: 'Close',
+    groupDialogTitle: 'Create Group',
+    connected: 'Connected',
+    disconnected: 'Disconnected',
+    startLocalService: 'Please start the local service first',
+    serviceUnavailable: 'Service unavailable',
+    accessTokenLabel: 'Access Token',
+    accessTokenPlaceholder: 'Leave empty to disable token',
+    dataSettingsGroupTitle: 'Data Settings',
+    exportArtifactsBtn: 'Export Artifacts',
+    clearCurrentSessionBtn: 'Clear Current Session',
+    proxyGroupTitle: 'Network Proxy',
+    proxyEnableLabel: 'Enable Proxy',
+    proxyEnableDesc: 'Disabled by default. Fill in proxy details after enabling.',
+    proxyTypeLabel: 'Proxy Type',
+    proxyHostLabel: 'Proxy Host',
+    proxyPortLabel: 'Proxy Port',
+    proxyUserLabel: 'Proxy Username',
+    proxyPassLabel: 'Proxy Password',
+    chatSettingsSectionTitle: 'Chat Settings',
+    chatContextGroupTitle: 'Context Management',
+    chatContextLimitLabel: 'Context message limit',
+    chatUnlimited: 'Unlimited',
+    chatContextNote: 'Controls how many recent messages are sent to the model. More context improves continuity but may slow responses.',
+    chatGenerationGroupTitle: 'Generation Parameters',
+    chatTemperatureSettingLabel: 'Temperature',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'Use default',
+    chatStreamOutputTitle: 'Streaming output',
+    chatStreamOutputDesc: 'Show response incrementally while generating',
+    chatDisplayGroupTitle: 'Display',
+    chatShowTimestampTitle: 'Show message timestamps',
+    chatShowModelTitle: 'Show model name',
+    chatShowCharCountTitle: 'Show character count',
+    chatShowTokenUsageTitle: 'Show token usage (estimated)',
+    chatShowFirstTokenLatencyTitle: 'Show first-token latency (TTFT)',
+    chatMarkdownRenderTitle: 'Markdown rendering',
+    chatMarkdownRenderDesc: 'Render assistant replies with markdown styling',
+    chatLatexRenderTitle: 'LaTeX rendering',
+    chatLatexRenderDesc: 'Requires Markdown rendering',
+    chatSpellcheckTitle: 'Spellcheck (input box)',
+    chatFeatureGroupTitle: 'Features',
+    chatAutoTitleTitle: 'Auto-generate chat title',
+    chatAutoTitleDesc: 'Name conversations from the first user message',
+    chatAutoPreviewArtifactTitle: 'Auto-preview artifacts',
+    chatAutoPreviewArtifactDesc: 'Expand tool result preview automatically after generation',
+    avatarGroupTitle: 'Avatars',
+    avatarPreviewUser: 'User',
+    avatarPreviewAi: 'AI',
+    avatarUserLabel: 'User Avatar',
+    avatarAiLabel: 'AI Avatar',
+    uploadImage: 'Upload Image',
+    save: 'Save',
+    resetDefault: 'Reset Default',
+    avatarUserPlaceholder: 'emoji e.g. 😀',
+    avatarAiPlaceholder: 'emoji e.g. 🤖',
+    labelUnset: 'Unset',
+    labelMessagesUnit: 'msgs'
+  },
+  'ja-JP': {
+    basicSettings: '基本設定',
+    mobileAccess: 'スマホアクセス',
+    viewLanQr: 'LAN アドレス / QR コードを見る',
+    importTavernCard: '🃏 酒館カードを読み込む',
+    newGroup: '新しいグループ',
+    accessDialogTitle: 'スマホアクセス',
+    close: '閉じる',
+    groupDialogTitle: '新規グループ',
+    connected: '接続済み',
+    disconnected: '未接続',
+    startLocalService: '先にローカルサービスを起動してください',
+    serviceUnavailable: 'サービスを利用できません',
+    accessTokenLabel: 'アクセス口令',
+    accessTokenPlaceholder: '空欄で口令なし',
+    dataSettingsGroupTitle: 'データ設定',
+    exportArtifactsBtn: '生成物をエクスポート',
+    clearCurrentSessionBtn: '現在の会話をクリア',
+    proxyGroupTitle: 'ネットワークプロキシ',
+    proxyEnableLabel: 'プロキシを有効化',
+    proxyEnableDesc: '既定では無効です。有効化後にプロキシ情報を入力してください。',
+    proxyTypeLabel: 'プロキシ種別',
+    proxyHostLabel: 'プロキシホスト',
+    proxyPortLabel: 'プロキシポート',
+    proxyUserLabel: 'プロキシユーザー名',
+    proxyPassLabel: 'プロキシパスワード',
+    chatSettingsSectionTitle: 'チャット設定',
+    chatContextGroupTitle: 'コンテキスト管理',
+    chatContextLimitLabel: 'コンテキストのメッセージ数上限',
+    chatUnlimited: '無制限',
+    chatContextNote: 'モデルに送る履歴メッセージ数を制御します。多いほど文脈は保たれますが、遅くなる場合があります。',
+    chatGenerationGroupTitle: '生成パラメータ',
+    chatTemperatureSettingLabel: '温度（Temperature）',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'デフォルトを使用',
+    chatStreamOutputTitle: 'ストリーミング出力',
+    chatStreamOutputDesc: '生成中に返信を逐次表示します',
+    chatDisplayGroupTitle: '表示',
+    chatShowTimestampTitle: 'メッセージ時刻を表示',
+    chatShowModelTitle: 'モデル名を表示',
+    chatShowCharCountTitle: '文字数を表示',
+    chatShowTokenUsageTitle: 'トークン消費を表示（推定）',
+    chatShowFirstTokenLatencyTitle: '初回トークン遅延を表示（TTFT）',
+    chatMarkdownRenderTitle: 'Markdown レンダリング',
+    chatMarkdownRenderDesc: 'アシスタント返信を Markdown で表示',
+    chatLatexRenderTitle: 'LaTeX 数式レンダリング',
+    chatLatexRenderDesc: 'Markdown の有効化が必要',
+    chatSpellcheckTitle: 'スペルチェック（入力欄）',
+    chatFeatureGroupTitle: '機能',
+    chatAutoTitleTitle: 'チャットタイトルを自動生成',
+    chatAutoTitleDesc: '最初のユーザーメッセージから会話名を付けます',
+    chatAutoPreviewArtifactTitle: '生成物を自動プレビュー（Artifacts）',
+    chatAutoPreviewArtifactDesc: '生成完了後にツール結果カードを自動展開',
+    avatarGroupTitle: 'アバター',
+    avatarPreviewUser: 'ユーザー',
+    avatarPreviewAi: 'AI',
+    avatarUserLabel: 'ユーザーアバター',
+    avatarAiLabel: 'AI アバター',
+    uploadImage: '画像をアップロード',
+    save: '保存',
+    resetDefault: '既定に戻す',
+    avatarUserPlaceholder: 'emoji 例 😀',
+    avatarAiPlaceholder: 'emoji 例 🤖',
+    labelUnset: '未設定',
+    labelMessagesUnit: '件'
+  },
+  'ko-KR': {
+    basicSettings: '기본 설정',
+    mobileAccess: '모바일 접속',
+    viewLanQr: 'LAN 주소 / QR 코드 보기',
+    importTavernCard: '🃏 타번 카드 가져오기',
+    newGroup: '새 그룹',
+    accessDialogTitle: '모바일 접속',
+    close: '닫기',
+    groupDialogTitle: '새 그룹',
+    connected: '연결됨',
+    disconnected: '연결 안 됨',
+    startLocalService: '먼저 로컬 서비스를 실행하세요',
+    serviceUnavailable: '서비스를 사용할 수 없습니다',
+    accessTokenLabel: '접근 토큰',
+    accessTokenPlaceholder: '비워두면 토큰 없음',
+    dataSettingsGroupTitle: '데이터 설정',
+    exportArtifactsBtn: '산출물 내보내기',
+    clearCurrentSessionBtn: '현재 대화 지우기',
+    proxyGroupTitle: '네트워크 프록시',
+    proxyEnableLabel: '프록시 사용',
+    proxyEnableDesc: '기본은 꺼짐입니다. 켠 뒤 프록시 정보를 입력하세요.',
+    proxyTypeLabel: '프록시 유형',
+    proxyHostLabel: '프록시 호스트',
+    proxyPortLabel: '프록시 포트',
+    proxyUserLabel: '프록시 사용자명',
+    proxyPassLabel: '프록시 비밀번호',
+    chatSettingsSectionTitle: '대화 설정',
+    chatContextGroupTitle: '컨텍스트 관리',
+    chatContextLimitLabel: '컨텍스트 메시지 수 상한',
+    chatUnlimited: '제한 없음',
+    chatContextNote: '모델에 보낼 최근 메시지 수를 조절합니다. 많을수록 문맥이 유지되지만 느려질 수 있습니다.',
+    chatGenerationGroupTitle: '생성 파라미터',
+    chatTemperatureSettingLabel: '온도 (Temperature)',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: '기본값 사용',
+    chatStreamOutputTitle: '스트리밍 출력',
+    chatStreamOutputDesc: '생성 중 답변을 순차적으로 표시합니다',
+    chatDisplayGroupTitle: '표시',
+    chatShowTimestampTitle: '메시지 시간 표시',
+    chatShowModelTitle: '모델 이름 표시',
+    chatShowCharCountTitle: '문자 수 표시',
+    chatShowTokenUsageTitle: '토큰 사용량 표시 (추정)',
+    chatShowFirstTokenLatencyTitle: '첫 토큰 지연 표시 (TTFT)',
+    chatMarkdownRenderTitle: 'Markdown 렌더링',
+    chatMarkdownRenderDesc: '어시스턴트 답변을 Markdown으로 렌더링',
+    chatLatexRenderTitle: 'LaTeX 수식 렌더링',
+    chatLatexRenderDesc: 'Markdown 렌더링 필요',
+    chatSpellcheckTitle: '맞춤법 검사 (입력창)',
+    chatFeatureGroupTitle: '기능',
+    chatAutoTitleTitle: '채팅 제목 자동 생성',
+    chatAutoTitleDesc: '첫 사용자 메시지로 대화 제목을 자동 지정',
+    chatAutoPreviewArtifactTitle: '생성물 자동 미리보기 (Artifacts)',
+    chatAutoPreviewArtifactDesc: '생성 완료 후 결과 카드를 자동 펼침',
+    avatarGroupTitle: '아바타',
+    avatarPreviewUser: '사용자',
+    avatarPreviewAi: 'AI',
+    avatarUserLabel: '사용자 아바타',
+    avatarAiLabel: 'AI 아바타',
+    uploadImage: '이미지 업로드',
+    save: '저장',
+    resetDefault: '기본값으로 복원',
+    avatarUserPlaceholder: 'emoji 예: 😀',
+    avatarAiPlaceholder: 'emoji 예: 🤖',
+    labelUnset: '미설정',
+    labelMessagesUnit: '개'
+  },
+  'fr-FR': {
+    basicSettings: 'Paramètres de base',
+    mobileAccess: 'Accès mobile',
+    viewLanQr: 'Voir l’adresse LAN / QR code',
+    importTavernCard: '🃏 Importer une carte Tavern',
+    newGroup: 'Nouveau groupe',
+    accessDialogTitle: 'Accès mobile',
+    close: 'Fermer',
+    groupDialogTitle: 'Nouveau groupe',
+    connected: 'Connecté',
+    disconnected: 'Déconnecté',
+    startLocalService: 'Veuillez d’abord démarrer le service local',
+    serviceUnavailable: 'Service indisponible',
+    accessTokenLabel: 'Jeton d’accès',
+    accessTokenPlaceholder: 'Laisser vide pour désactiver le jeton',
+    dataSettingsGroupTitle: 'Paramètres de données',
+    exportArtifactsBtn: 'Exporter les artefacts',
+    clearCurrentSessionBtn: 'Effacer le chat actuel',
+    proxyGroupTitle: 'Proxy réseau',
+    proxyEnableLabel: 'Activer le proxy',
+    proxyEnableDesc: 'Désactivé par défaut. Saisissez les infos du proxy après activation.',
+    proxyTypeLabel: 'Type de proxy',
+    proxyHostLabel: 'Hôte proxy',
+    proxyPortLabel: 'Port proxy',
+    proxyUserLabel: 'Nom d’utilisateur proxy',
+    proxyPassLabel: 'Mot de passe proxy',
+    chatSettingsSectionTitle: 'Paramètres du chat',
+    chatContextGroupTitle: 'Gestion du contexte',
+    chatContextLimitLabel: 'Limite de messages de contexte',
+    chatUnlimited: 'Illimité',
+    chatContextNote: 'Contrôle le nombre de messages récents envoyés au modèle. Plus il y en a, meilleure est la continuité, mais cela peut ralentir la réponse.',
+    chatGenerationGroupTitle: 'Paramètres de génération',
+    chatTemperatureSettingLabel: 'Température',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'Utiliser la valeur par défaut',
+    chatStreamOutputTitle: 'Sortie en flux',
+    chatStreamOutputDesc: 'Affiche la réponse progressivement pendant la génération',
+    chatDisplayGroupTitle: 'Affichage',
+    chatShowTimestampTitle: 'Afficher l’horodatage des messages',
+    chatShowModelTitle: 'Afficher le nom du modèle',
+    chatShowCharCountTitle: 'Afficher le nombre de caractères',
+    chatShowTokenUsageTitle: 'Afficher l’usage des tokens (estimé)',
+    chatShowFirstTokenLatencyTitle: 'Afficher la latence du 1er token (TTFT)',
+    chatMarkdownRenderTitle: 'Rendu Markdown',
+    chatMarkdownRenderDesc: 'Afficher les réponses de l’assistant avec style Markdown',
+    chatLatexRenderTitle: 'Rendu LaTeX',
+    chatLatexRenderDesc: 'Nécessite le rendu Markdown',
+    chatSpellcheckTitle: 'Vérification orthographique (saisie)',
+    chatFeatureGroupTitle: 'Fonctions',
+    chatAutoTitleTitle: 'Générer automatiquement le titre du chat',
+    chatAutoTitleDesc: 'Nommer la conversation à partir du premier message utilisateur',
+    chatAutoPreviewArtifactTitle: 'Aperçu automatique des artefacts',
+    chatAutoPreviewArtifactDesc: 'Déployer automatiquement la carte du résultat après génération',
+    avatarGroupTitle: 'Avatars',
+    avatarPreviewUser: 'Utilisateur',
+    avatarPreviewAi: 'IA',
+    avatarUserLabel: 'Avatar utilisateur',
+    avatarAiLabel: 'Avatar IA',
+    uploadImage: 'Téléverser une image',
+    save: 'Enregistrer',
+    resetDefault: 'Réinitialiser',
+    avatarUserPlaceholder: 'emoji ex. 😀',
+    avatarAiPlaceholder: 'emoji ex. 🤖',
+    labelUnset: 'Non défini',
+    labelMessagesUnit: 'msg'
+  },
+  'de-DE': {
+    basicSettings: 'Grundeinstellungen',
+    mobileAccess: 'Mobiler Zugriff',
+    viewLanQr: 'LAN-Adresse / QR-Code anzeigen',
+    importTavernCard: '🃏 Tavern-Karte importieren',
+    newGroup: 'Neue Gruppe',
+    accessDialogTitle: 'Mobiler Zugriff',
+    close: 'Schließen',
+    groupDialogTitle: 'Neue Gruppe',
+    connected: 'Verbunden',
+    disconnected: 'Nicht verbunden',
+    startLocalService: 'Bitte zuerst den lokalen Dienst starten',
+    serviceUnavailable: 'Dienst nicht verfügbar',
+    accessTokenLabel: 'Zugriffstoken',
+    accessTokenPlaceholder: 'Leer lassen für kein Token',
+    dataSettingsGroupTitle: 'Dateneinstellungen',
+    exportArtifactsBtn: 'Artefakte exportieren',
+    clearCurrentSessionBtn: 'Aktuellen Chat leeren',
+    proxyGroupTitle: 'Netzwerk-Proxy',
+    proxyEnableLabel: 'Proxy aktivieren',
+    proxyEnableDesc: 'Standardmäßig aus. Nach Aktivierung Proxy-Daten eintragen.',
+    proxyTypeLabel: 'Proxy-Typ',
+    proxyHostLabel: 'Proxy-Host',
+    proxyPortLabel: 'Proxy-Port',
+    proxyUserLabel: 'Proxy-Benutzername',
+    proxyPassLabel: 'Proxy-Passwort',
+    chatSettingsSectionTitle: 'Chat-Einstellungen',
+    chatContextGroupTitle: 'Kontextverwaltung',
+    chatContextLimitLabel: 'Limit für Kontextnachrichten',
+    chatUnlimited: 'Unbegrenzt',
+    chatContextNote: 'Steuert, wie viele frühere Nachrichten an das Modell gesendet werden. Mehr Kontext verbessert die Kontinuität, kann aber langsamer sein.',
+    chatGenerationGroupTitle: 'Generierungsparameter',
+    chatTemperatureSettingLabel: 'Temperatur',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'Standard verwenden',
+    chatStreamOutputTitle: 'Streaming-Ausgabe',
+    chatStreamOutputDesc: 'Antwort während der Generierung schrittweise anzeigen',
+    chatDisplayGroupTitle: 'Anzeige',
+    chatShowTimestampTitle: 'Zeitstempel anzeigen',
+    chatShowModelTitle: 'Modellname anzeigen',
+    chatShowCharCountTitle: 'Zeichenanzahl anzeigen',
+    chatShowTokenUsageTitle: 'Token-Verbrauch anzeigen (geschätzt)',
+    chatShowFirstTokenLatencyTitle: 'Erst-Token-Latenz anzeigen (TTFT)',
+    chatMarkdownRenderTitle: 'Markdown-Rendering',
+    chatMarkdownRenderDesc: 'Assistentenantworten mit Markdown formatieren',
+    chatLatexRenderTitle: 'LaTeX-Rendering',
+    chatLatexRenderDesc: 'Erfordert Markdown-Rendering',
+    chatSpellcheckTitle: 'Rechtschreibprüfung (Eingabefeld)',
+    chatFeatureGroupTitle: 'Funktionen',
+    chatAutoTitleTitle: 'Chat-Titel automatisch erzeugen',
+    chatAutoTitleDesc: 'Konversation anhand der ersten Nutzernachricht benennen',
+    chatAutoPreviewArtifactTitle: 'Artefakte automatisch vorschauen',
+    chatAutoPreviewArtifactDesc: 'Ergebniskarte nach der Generierung automatisch aufklappen',
+    avatarGroupTitle: 'Avatare',
+    avatarPreviewUser: 'Benutzer',
+    avatarPreviewAi: 'KI',
+    avatarUserLabel: 'Benutzer-Avatar',
+    avatarAiLabel: 'KI-Avatar',
+    uploadImage: 'Bild hochladen',
+    save: 'Speichern',
+    resetDefault: 'Zurücksetzen',
+    avatarUserPlaceholder: 'Emoji z. B. 😀',
+    avatarAiPlaceholder: 'Emoji z. B. 🤖',
+    labelUnset: 'Nicht gesetzt',
+    labelMessagesUnit: 'Nachr.'
+  },
+  'es-ES': {
+    basicSettings: 'Configuración básica',
+    mobileAccess: 'Acceso móvil',
+    viewLanQr: 'Ver dirección LAN / código QR',
+    importTavernCard: '🃏 Importar tarjeta Tavern',
+    newGroup: 'Nuevo grupo',
+    accessDialogTitle: 'Acceso móvil',
+    close: 'Cerrar',
+    groupDialogTitle: 'Nuevo grupo',
+    connected: 'Conectado',
+    disconnected: 'Desconectado',
+    startLocalService: 'Inicia primero el servicio local',
+    serviceUnavailable: 'Servicio no disponible',
+    accessTokenLabel: 'Token de acceso',
+    accessTokenPlaceholder: 'Déjalo vacío para desactivar el token',
+    dataSettingsGroupTitle: 'Configuración de datos',
+    exportArtifactsBtn: 'Exportar artefactos',
+    clearCurrentSessionBtn: 'Limpiar chat actual',
+    proxyGroupTitle: 'Proxy de red',
+    proxyEnableLabel: 'Activar proxy',
+    proxyEnableDesc: 'Desactivado por defecto. Completa los datos del proxy al activarlo.',
+    proxyTypeLabel: 'Tipo de proxy',
+    proxyHostLabel: 'Host del proxy',
+    proxyPortLabel: 'Puerto del proxy',
+    proxyUserLabel: 'Usuario del proxy',
+    proxyPassLabel: 'Contraseña del proxy',
+    chatSettingsSectionTitle: 'Configuración del chat',
+    chatContextGroupTitle: 'Gestión de contexto',
+    chatContextLimitLabel: 'Límite de mensajes de contexto',
+    chatUnlimited: 'Sin límite',
+    chatContextNote: 'Controla cuántos mensajes recientes se envían al modelo. Más contexto mejora la continuidad, pero puede ralentizar la respuesta.',
+    chatGenerationGroupTitle: 'Parámetros de generación',
+    chatTemperatureSettingLabel: 'Temperatura',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'Usar valor predeterminado',
+    chatStreamOutputTitle: 'Salida en streaming',
+    chatStreamOutputDesc: 'Muestra la respuesta de forma progresiva mientras se genera',
+    chatDisplayGroupTitle: 'Visualización',
+    chatShowTimestampTitle: 'Mostrar marca de tiempo',
+    chatShowModelTitle: 'Mostrar nombre del modelo',
+    chatShowCharCountTitle: 'Mostrar conteo de caracteres',
+    chatShowTokenUsageTitle: 'Mostrar uso de tokens (estimado)',
+    chatShowFirstTokenLatencyTitle: 'Mostrar latencia del primer token (TTFT)',
+    chatMarkdownRenderTitle: 'Renderizado Markdown',
+    chatMarkdownRenderDesc: 'Mostrar respuestas del asistente con formato Markdown',
+    chatLatexRenderTitle: 'Renderizado LaTeX',
+    chatLatexRenderDesc: 'Requiere renderizado Markdown',
+    chatSpellcheckTitle: 'Corrección ortográfica (entrada)',
+    chatFeatureGroupTitle: 'Funciones',
+    chatAutoTitleTitle: 'Generar título del chat automáticamente',
+    chatAutoTitleDesc: 'Nombrar la conversación según el primer mensaje del usuario',
+    chatAutoPreviewArtifactTitle: 'Vista previa automática de artefactos',
+    chatAutoPreviewArtifactDesc: 'Expandir automáticamente la tarjeta del resultado tras generarlo',
+    avatarGroupTitle: 'Avatares',
+    avatarPreviewUser: 'Usuario',
+    avatarPreviewAi: 'IA',
+    avatarUserLabel: 'Avatar del usuario',
+    avatarAiLabel: 'Avatar de IA',
+    uploadImage: 'Subir imagen',
+    save: 'Guardar',
+    resetDefault: 'Restablecer',
+    avatarUserPlaceholder: 'emoji p. ej. 😀',
+    avatarAiPlaceholder: 'emoji p. ej. 🤖',
+    labelUnset: 'Sin definir',
+    labelMessagesUnit: 'mens.'
+  },
+  'ru-RU': {
+    basicSettings: 'Базовые настройки',
+    mobileAccess: 'Доступ с телефона',
+    viewLanQr: 'Показать LAN-адрес / QR-код',
+    importTavernCard: '🃏 Импорт карты Tavern',
+    newGroup: 'Новая группа',
+    accessDialogTitle: 'Доступ с телефона',
+    close: 'Закрыть',
+    groupDialogTitle: 'Новая группа',
+    connected: 'Подключено',
+    disconnected: 'Не подключено',
+    startLocalService: 'Сначала запустите локальный сервис',
+    serviceUnavailable: 'Сервис недоступен',
+    accessTokenLabel: 'Токен доступа',
+    accessTokenPlaceholder: 'Оставьте пустым, чтобы отключить токен',
+    dataSettingsGroupTitle: 'Настройки данных',
+    exportArtifactsBtn: 'Экспорт артефактов',
+    clearCurrentSessionBtn: 'Очистить текущий чат',
+    proxyGroupTitle: 'Сетевой прокси',
+    proxyEnableLabel: 'Включить прокси',
+    proxyEnableDesc: 'По умолчанию выключено. После включения заполните параметры прокси.',
+    proxyTypeLabel: 'Тип прокси',
+    proxyHostLabel: 'Хост прокси',
+    proxyPortLabel: 'Порт прокси',
+    proxyUserLabel: 'Имя пользователя прокси',
+    proxyPassLabel: 'Пароль прокси',
+    chatSettingsSectionTitle: 'Настройки чата',
+    chatContextGroupTitle: 'Управление контекстом',
+    chatContextLimitLabel: 'Лимит сообщений в контексте',
+    chatUnlimited: 'Без ограничений',
+    chatContextNote: 'Определяет, сколько последних сообщений отправляется модели. Больше контекста улучшает связность, но может замедлять ответ.',
+    chatGenerationGroupTitle: 'Параметры генерации',
+    chatTemperatureSettingLabel: 'Температура',
+    chatTopPSettingLabel: 'Top P',
+    useDefault: 'Использовать по умолчанию',
+    chatStreamOutputTitle: 'Потоковый вывод',
+    chatStreamOutputDesc: 'Показывать ответ постепенно во время генерации',
+    chatDisplayGroupTitle: 'Отображение',
+    chatShowTimestampTitle: 'Показывать время сообщения',
+    chatShowModelTitle: 'Показывать имя модели',
+    chatShowCharCountTitle: 'Показывать число символов',
+    chatShowTokenUsageTitle: 'Показывать расход токенов (оценка)',
+    chatShowFirstTokenLatencyTitle: 'Показывать задержку первого токена (TTFT)',
+    chatMarkdownRenderTitle: 'Рендеринг Markdown',
+    chatMarkdownRenderDesc: 'Отображать ответы ассистента с форматированием Markdown',
+    chatLatexRenderTitle: 'Рендеринг LaTeX',
+    chatLatexRenderDesc: 'Требуется включённый Markdown',
+    chatSpellcheckTitle: 'Проверка орфографии (поле ввода)',
+    chatFeatureGroupTitle: 'Функции',
+    chatAutoTitleTitle: 'Автогенерация названия чата',
+    chatAutoTitleDesc: 'Называть диалог по первому сообщению пользователя',
+    chatAutoPreviewArtifactTitle: 'Автопросмотр артефактов',
+    chatAutoPreviewArtifactDesc: 'Автоматически раскрывать карточку результата после генерации',
+    avatarGroupTitle: 'Аватары',
+    avatarPreviewUser: 'Пользователь',
+    avatarPreviewAi: 'ИИ',
+    avatarUserLabel: 'Аватар пользователя',
+    avatarAiLabel: 'Аватар ИИ',
+    uploadImage: 'Загрузить изображение',
+    save: 'Сохранить',
+    resetDefault: 'Сбросить',
+    avatarUserPlaceholder: 'emoji напр. 😀',
+    avatarAiPlaceholder: 'emoji напр. 🤖',
+    labelUnset: 'Не задано',
+    labelMessagesUnit: 'сообщ.'
+  }
+};
+
+const LANG_LABELS_ZH = {
+  auto: '自动检测',
+  'zh-CN': '中文',
+  'en-US': 'English',
+  'ja-JP': '日本語',
+  'ko-KR': '한국어',
+  'fr-FR': 'Français',
+  'de-DE': 'Deutsch',
+  'es-ES': 'Español',
+  'ru-RU': 'Русский'
+};
+
+const LANG_LABELS_EN = {
+  auto: 'Auto Detect',
+  'zh-CN': 'Chinese',
+  'en-US': 'English',
+  'ja-JP': 'Japanese',
+  'ko-KR': 'Korean',
+  'fr-FR': 'French',
+  'de-DE': 'German',
+  'es-ES': 'Spanish',
+  'ru-RU': 'Russian'
+};
+
+const LANG_LABELS_NATIVE = {
+  auto: 'Auto Detect',
+  'zh-CN': '简体中文',
+  'en-US': 'English',
+  'ja-JP': '日本語',
+  'ko-KR': '한국어',
+  'fr-FR': 'Français',
+  'de-DE': 'Deutsch',
+  'es-ES': 'Español',
+  'ru-RU': 'Русский'
 };
 
 const state = {
@@ -88,6 +901,22 @@ const state = {
   },
   pdfjsLib: null
 };
+
+const sharedUtils = window.EchoMuseUtils;
+if (!sharedUtils) {
+  throw new Error('EchoMuseUtils not loaded. Check script order in public/index.html.');
+}
+const {
+  countQuestionTotal,
+  toolName,
+  formatTime,
+  escapeHtml,
+  countChineseChars,
+  fallbackCopy,
+  csvEscape,
+  timestamp,
+  downloadBlob
+} = sharedUtils;
 
 const els = {
   sessionSearch: document.getElementById('sessionSearch'),
@@ -142,9 +971,11 @@ const els = {
   saveTokenBtn: document.getElementById('saveTokenBtn'),
   uiLangSelect: document.getElementById('uiLangSelect'),
   globalDefenseToggle: document.getElementById('globalDefenseToggle'),
+  translateEnableToggle: document.getElementById('translateEnableToggle'),
   translateFromSelect: document.getElementById('translateFromSelect'),
   translateToSelect: document.getElementById('translateToSelect'),
   fontSizeSelect: document.getElementById('fontSizeSelect'),
+  fontSizeValueLabel: document.getElementById('fontSizeValueLabel'),
   themeSelect: document.getElementById('themeSelect'),
   proxyEnableToggle: document.getElementById('proxyEnableToggle'),
   proxyFields: document.getElementById('proxyFields'),
@@ -166,6 +997,8 @@ const els = {
   chatShowTimestampToggle: document.getElementById('chatShowTimestampToggle'),
   chatShowModelToggle: document.getElementById('chatShowModelToggle'),
   chatShowCharCountToggle: document.getElementById('chatShowCharCountToggle'),
+  chatShowTokenUsageToggle: document.getElementById('chatShowTokenUsageToggle'),
+  chatShowFirstTokenLatencyToggle: document.getElementById('chatShowFirstTokenLatencyToggle'),
   chatMarkdownToggle: document.getElementById('chatMarkdownToggle'),
   chatLatexToggle: document.getElementById('chatLatexToggle'),
   chatSpellcheckToggle: document.getElementById('chatSpellcheckToggle'),
@@ -319,6 +1152,7 @@ function saveSettings() {
 function applySettings() {
   applyTheme(state.settings.theme);
   applyFontSize(state.settings.fontSize);
+  applyLanguage();
   applyChatUiSettings();
   updateProxyFieldsUI();
 }
@@ -343,16 +1177,19 @@ function applyTheme(theme) {
 }
 
 function applyFontSize(sizeKey) {
-  const size = FONT_SIZE_MAP[sizeKey] || FONT_SIZE_MAP.md;
-  document.documentElement.style.setProperty('--ui-font-size', size);
+  const px = normalizeFontSizePx(sizeKey);
+  document.documentElement.style.setProperty('--ui-font-size', `${px}px`);
+  updateFontSizeValueLabel(px);
 }
 
 function syncSettingsUI() {
   if (els.uiLangSelect) els.uiLangSelect.value = state.settings.language || 'zh-CN';
   if (els.globalDefenseToggle) els.globalDefenseToggle.checked = Boolean(state.settings.globalDefense);
+  if (els.translateEnableToggle) els.translateEnableToggle.checked = Boolean(state.settings.translateEnabled);
   if (els.translateFromSelect) els.translateFromSelect.value = state.settings.translateFrom || 'auto';
   if (els.translateToSelect) els.translateToSelect.value = state.settings.translateTo || 'zh-CN';
-  if (els.fontSizeSelect) els.fontSizeSelect.value = state.settings.fontSize || 'md';
+  if (els.fontSizeSelect) els.fontSizeSelect.value = String(normalizeFontSizePx(state.settings.fontSize));
+  updateFontSizeValueLabel();
   if (els.themeSelect) els.themeSelect.value = state.settings.theme || 'system';
   if (els.proxyEnableToggle) els.proxyEnableToggle.checked = Boolean(state.settings.proxyEnabled);
   if (els.proxyTypeSelect) els.proxyTypeSelect.value = state.settings.proxyType || 'socks5';
@@ -370,13 +1207,271 @@ function syncSettingsUI() {
   if (els.chatShowTimestampToggle) els.chatShowTimestampToggle.checked = Boolean(state.settings.chatShowTimestamp);
   if (els.chatShowModelToggle) els.chatShowModelToggle.checked = Boolean(state.settings.chatShowModel);
   if (els.chatShowCharCountToggle) els.chatShowCharCountToggle.checked = Boolean(state.settings.chatShowCharCount);
+  if (els.chatShowTokenUsageToggle) els.chatShowTokenUsageToggle.checked = Boolean(state.settings.chatShowTokenUsage);
+  if (els.chatShowFirstTokenLatencyToggle) els.chatShowFirstTokenLatencyToggle.checked = Boolean(state.settings.chatShowFirstTokenLatency);
   if (els.chatMarkdownToggle) els.chatMarkdownToggle.checked = Boolean(state.settings.chatMarkdownRender);
   if (els.chatLatexToggle) els.chatLatexToggle.checked = Boolean(state.settings.chatLatexRender);
   if (els.chatSpellcheckToggle) els.chatSpellcheckToggle.checked = Boolean(state.settings.chatSpellcheck);
   if (els.chatAutoTitleToggle) els.chatAutoTitleToggle.checked = Boolean(state.settings.chatAutoTitle);
   if (els.chatAutoPreviewArtifactToggle) els.chatAutoPreviewArtifactToggle.checked = Boolean(state.settings.chatAutoPreviewArtifact);
+  applyLanguage();
   updateChatSettingsUI();
+  updateTranslateSettingsUI();
   updateProxyFieldsUI();
+}
+
+function normalizeFontSizePx(value) {
+  if (typeof value === 'string' && Object.prototype.hasOwnProperty.call(FONT_SIZE_MAP, value)) {
+    return FONT_SIZE_MAP[value];
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return FONT_SIZE_MAP.md;
+  return Math.max(12, Math.min(20, Math.round(parsed)));
+}
+
+function updateFontSizeValueLabel(px) {
+  if (!els.fontSizeValueLabel) return;
+  const resolved = Number.isFinite(px) ? px : normalizeFontSizePx(state.settings.fontSize);
+  els.fontSizeValueLabel.textContent = `${resolved}px`;
+}
+
+function getUiPack() {
+  const lang = String(state.settings.language || 'zh-CN');
+  const base = UI_PACKS[lang] || (lang.startsWith('zh') ? UI_PACK_ZH : UI_PACK_EN);
+  const extrasDefault = UI_PACK_EXTRAS['en-US'] || {};
+  const extras = UI_PACK_EXTRAS[lang] || {};
+  return { ...base, ...extrasDefault, ...extras };
+}
+
+function getLangLabelMap() {
+  const lang = String(state.settings.language || 'zh-CN');
+  if (lang.startsWith('zh')) return LANG_LABELS_ZH;
+  if (lang.startsWith('en')) return LANG_LABELS_EN;
+  const pack = getUiPack();
+  return { ...LANG_LABELS_NATIVE, auto: pack.autoDetect || LANG_LABELS_NATIVE.auto };
+}
+
+function setSettingRowLabel(controlEl, text) {
+  if (!controlEl || !text) return;
+  const row = controlEl.closest('.setting-row');
+  const label = row ? row.querySelector('label') : null;
+  if (label) label.textContent = text;
+}
+
+function setSelectOptionText(selectEl, value, text) {
+  if (!selectEl) return;
+  const option = Array.from(selectEl.options || []).find((opt) => opt.value === value);
+  if (option && text) option.textContent = text;
+}
+
+function setGroupTitleByChild(childEl, text) {
+  if (!childEl || !text) return;
+  const group = childEl.closest('.settings-group');
+  const h4 = group ? group.querySelector('h4') : null;
+  if (h4) h4.textContent = text;
+}
+
+function setSwitchItemTextByToggle(toggleEl, title, desc) {
+  if (!toggleEl) return;
+  const item = toggleEl.closest('.setting-switch-item');
+  if (!item) return;
+  const titleEl = item.querySelector('.setting-switch-title');
+  const descEl = item.querySelector('.setting-switch-desc');
+  if (titleEl && title) titleEl.textContent = title;
+  if (descEl && typeof desc === 'string') descEl.textContent = desc;
+}
+
+function setInlineCheckLabel(inputEl, text) {
+  if (!inputEl || !text) return;
+  const label = inputEl.closest('.inline-check');
+  if (!label) return;
+  const textNodeType = (window.Node && window.Node.TEXT_NODE) || 3;
+  const nodes = Array.from(label.childNodes || []);
+  const existing = nodes.find((n) => n.nodeType === textNodeType && String(n.textContent || '').trim().length);
+  if (existing) {
+    existing.textContent = ` ${text}`;
+  } else {
+    label.appendChild(document.createTextNode(` ${text}`));
+  }
+}
+
+function setSettingNoteByControl(controlEl, text) {
+  if (!controlEl || !text) return;
+  const row = controlEl.closest('.setting-row');
+  const note = row ? row.querySelector('.setting-note') : null;
+  if (note) note.textContent = text;
+}
+
+function applyLanguage() {
+  const pack = getUiPack();
+  const langLabels = getLangLabelMap();
+  const uiLang = String(state.settings.language || 'zh-CN');
+  document.documentElement.lang = uiLang;
+
+  if (els.newSessionBtn) els.newSessionBtn.textContent = pack.newSession;
+  if (els.sendBtn) els.sendBtn.textContent = pack.send;
+  if (els.tabSessions) els.tabSessions.textContent = pack.sessions;
+  if (els.tabContacts) els.tabContacts.textContent = pack.contacts;
+  if (els.sessionSearch) els.sessionSearch.placeholder = pack.searchSessionsPlaceholder;
+  if (els.chatInput) els.chatInput.placeholder = pack.chatPlaceholder;
+  if (els.closeSettingsBtn) els.closeSettingsBtn.textContent = pack.closeSettings;
+  if (els.showAccessBtn) els.showAccessBtn.textContent = pack.viewLanQr;
+  if (els.importTavernContactBtn) els.importTavernContactBtn.textContent = pack.importTavernCard;
+  if (els.tavernImportBtn) els.tavernImportBtn.textContent = pack.importTavernCard;
+  if (els.newGroupBtn) els.newGroupBtn.textContent = pack.newGroup;
+  if (els.closeAccessBtn) els.closeAccessBtn.textContent = pack.close;
+
+  if (els.settingsPanel) {
+    const navGeneral = els.settingsPanel.querySelector('.settings-nav-item[data-section="general"]');
+    const navProvider = els.settingsPanel.querySelector('.settings-nav-item[data-section="provider"]');
+    const navMcp = els.settingsPanel.querySelector('.settings-nav-item[data-section="mcp"]');
+    const navKnowledge = els.settingsPanel.querySelector('.settings-nav-item[data-section="knowledge"]');
+    const navTitle = els.settingsPanel.querySelector('.settings-nav h2');
+    const generalTitle = els.settingsPanel.querySelector('.settings-section[data-section="general"] > h3');
+    if (navTitle) navTitle.textContent = pack.settingsTitle;
+    if (navGeneral) navGeneral.textContent = pack.navGeneral;
+    if (navProvider) navProvider.textContent = pack.navProvider;
+    if (navMcp) navMcp.textContent = pack.navMcp;
+    if (navKnowledge) navKnowledge.textContent = pack.navKnowledge;
+    if (generalTitle) generalTitle.textContent = pack.generalTitle;
+
+    const basicGroupTitle = els.settingsPanel.querySelector('.settings-section[data-section="general"] .settings-group h4');
+    if (basicGroupTitle) basicGroupTitle.textContent = pack.basicSettings;
+  }
+
+  setSettingRowLabel(els.tokenInput, pack.accessTokenLabel);
+  if (els.tokenInput && pack.accessTokenPlaceholder) els.tokenInput.placeholder = pack.accessTokenPlaceholder;
+  if (els.saveTokenBtn && pack.save) els.saveTokenBtn.textContent = pack.save;
+
+  if (els.uiLangSelect) {
+    const group = els.uiLangSelect.closest('.settings-group');
+    const h4 = group ? group.querySelector('h4') : null;
+    if (h4) h4.textContent = pack.displaySettings;
+  }
+  setSettingRowLabel(els.uiLangSelect, pack.uiLanguage);
+  setSettingRowLabel(els.showAccessBtn, pack.mobileAccess);
+  setSettingRowLabel(els.globalDefenseToggle, pack.globalDefense);
+  setSettingRowLabel(els.translateEnableToggle, pack.translateEnabled);
+  setSettingRowLabel(els.translateFromSelect, pack.translateDirection);
+  setSettingRowLabel(els.fontSizeSelect, pack.fontSize);
+  setSettingRowLabel(els.themeSelect, pack.theme);
+
+  if (els.globalDefenseToggle) {
+    const row = els.globalDefenseToggle.closest('.setting-row');
+    const desc = row ? row.querySelector('.muted') : null;
+    if (desc) desc.textContent = pack.globalDefenseDesc;
+  }
+  if (els.translateEnableToggle) {
+    const row = els.translateEnableToggle.closest('.setting-row');
+    const desc = row ? row.querySelector('.muted') : null;
+    if (desc) desc.textContent = pack.translateEnabledDesc;
+  }
+
+  setGroupTitleByChild(els.openExportBtn, pack.dataSettingsGroupTitle);
+  if (els.openExportBtn && pack.exportArtifactsBtn) els.openExportBtn.textContent = pack.exportArtifactsBtn;
+  if (els.clearChatBtn && pack.clearCurrentSessionBtn) els.clearChatBtn.textContent = pack.clearCurrentSessionBtn;
+
+  setGroupTitleByChild(els.proxyEnableToggle, pack.proxyGroupTitle);
+  setSettingRowLabel(els.proxyEnableToggle, pack.proxyEnableLabel);
+  setSettingRowLabel(els.proxyTypeSelect, pack.proxyTypeLabel);
+  setSettingRowLabel(els.proxyHostInput, pack.proxyHostLabel);
+  setSettingRowLabel(els.proxyPortInput, pack.proxyPortLabel);
+  setSettingRowLabel(els.proxyUserInput, pack.proxyUserLabel);
+  setSettingRowLabel(els.proxyPassInput, pack.proxyPassLabel);
+  if (els.proxyEnableToggle) {
+    const row = els.proxyEnableToggle.closest('.setting-row');
+    const desc = row ? row.querySelector('.muted') : null;
+    if (desc && pack.proxyEnableDesc) desc.textContent = pack.proxyEnableDesc;
+  }
+
+  setSelectOptionText(els.themeSelect, 'system', pack.themeSystem);
+  setSelectOptionText(els.themeSelect, 'light', pack.themeLight);
+  setSelectOptionText(els.themeSelect, 'dark', pack.themeDark);
+
+  if (els.uiLangSelect) {
+    Object.entries(langLabels).forEach(([code, label]) => {
+      if (code === 'auto') return;
+      setSelectOptionText(els.uiLangSelect, code, label);
+    });
+  }
+  if (els.translateFromSelect) {
+    Object.entries(langLabels).forEach(([code, label]) => {
+      setSelectOptionText(els.translateFromSelect, code, label);
+    });
+  }
+  if (els.translateToSelect) {
+    Object.entries(langLabels).forEach(([code, label]) => {
+      if (code === 'auto') return;
+      setSelectOptionText(els.translateToSelect, code, label);
+    });
+  }
+  if (els.accessDialog) {
+    const title = els.accessDialog.querySelector('h3');
+    if (title) title.textContent = pack.accessDialogTitle;
+  }
+  if (els.groupDialog) {
+    const title = els.groupDialog.querySelector('h3');
+    if (title) title.textContent = pack.groupDialogTitle;
+  }
+
+  if (els.settingsPanel) {
+    const chatSection = els.settingsPanel.querySelector('.settings-section[data-section="avatar"]');
+    if (chatSection) {
+      const chatSectionTitle = chatSection.querySelector(':scope > h3');
+      if (chatSectionTitle && pack.chatSettingsSectionTitle) chatSectionTitle.textContent = pack.chatSettingsSectionTitle;
+    }
+  }
+  setGroupTitleByChild(els.chatContextLimitRange, pack.chatContextGroupTitle);
+  setSettingRowLabel(els.chatContextLimitRange, pack.chatContextLimitLabel);
+  setInlineCheckLabel(els.chatContextUnlimitedToggle, pack.chatUnlimited);
+  setSettingNoteByControl(els.chatContextLimitRange, pack.chatContextNote);
+
+  setGroupTitleByChild(els.chatTemperatureRange, pack.chatGenerationGroupTitle);
+  setSettingRowLabel(els.chatTemperatureRange, pack.chatTemperatureSettingLabel);
+  setSettingRowLabel(els.chatTopPRange, pack.chatTopPSettingLabel);
+  setInlineCheckLabel(els.chatTemperatureUseDefault, pack.useDefault);
+  setInlineCheckLabel(els.chatTopPUseDefault, pack.useDefault);
+  setSwitchItemTextByToggle(els.chatStreamOutputToggle, pack.chatStreamOutputTitle, pack.chatStreamOutputDesc);
+
+  setGroupTitleByChild(els.chatShowTimestampToggle, pack.chatDisplayGroupTitle);
+  setSwitchItemTextByToggle(els.chatShowTimestampToggle, pack.chatShowTimestampTitle);
+  setSwitchItemTextByToggle(els.chatShowModelToggle, pack.chatShowModelTitle);
+  setSwitchItemTextByToggle(els.chatShowCharCountToggle, pack.chatShowCharCountTitle);
+  setSwitchItemTextByToggle(els.chatShowTokenUsageToggle, pack.chatShowTokenUsageTitle);
+  setSwitchItemTextByToggle(els.chatShowFirstTokenLatencyToggle, pack.chatShowFirstTokenLatencyTitle);
+  setSwitchItemTextByToggle(els.chatMarkdownToggle, pack.chatMarkdownRenderTitle, pack.chatMarkdownRenderDesc);
+  setSwitchItemTextByToggle(els.chatLatexToggle, pack.chatLatexRenderTitle, pack.chatLatexRenderDesc);
+  setSwitchItemTextByToggle(els.chatSpellcheckToggle, pack.chatSpellcheckTitle);
+
+  setGroupTitleByChild(els.chatAutoTitleToggle, pack.chatFeatureGroupTitle);
+  setSwitchItemTextByToggle(els.chatAutoTitleToggle, pack.chatAutoTitleTitle, pack.chatAutoTitleDesc);
+  setSwitchItemTextByToggle(els.chatAutoPreviewArtifactToggle, pack.chatAutoPreviewArtifactTitle, pack.chatAutoPreviewArtifactDesc);
+
+  setGroupTitleByChild(els.userAvatarInput, pack.avatarGroupTitle);
+  if (els.userAvatarPreview) {
+    const row = els.userAvatarPreview.closest('.avatar-preview-row');
+    const labels = row ? row.querySelectorAll('.avatar-preview-item .muted') : [];
+    if (labels[0] && pack.avatarPreviewUser) labels[0].textContent = pack.avatarPreviewUser;
+    if (labels[1] && pack.avatarPreviewAi) labels[1].textContent = pack.avatarPreviewAi;
+  }
+  setSettingRowLabel(els.userAvatarInput, pack.avatarUserLabel);
+  setSettingRowLabel(els.aiAvatarInput, pack.avatarAiLabel);
+  if (els.userAvatarInput && pack.avatarUserPlaceholder) els.userAvatarInput.placeholder = pack.avatarUserPlaceholder;
+  if (els.aiAvatarInput && pack.avatarAiPlaceholder) els.aiAvatarInput.placeholder = pack.avatarAiPlaceholder;
+  if (els.userAvatarUploadBtn && pack.uploadImage) els.userAvatarUploadBtn.textContent = pack.uploadImage;
+  if (els.aiAvatarUploadBtn && pack.uploadImage) els.aiAvatarUploadBtn.textContent = pack.uploadImage;
+  if (els.saveAvatarBtn && pack.save) els.saveAvatarBtn.textContent = pack.save;
+  if (els.resetAvatarBtn && pack.resetDefault) els.resetAvatarBtn.textContent = pack.resetDefault;
+
+  updateChatSettingsUI();
+  updateConnectionUI();
+  updateTranslateSettingsUI();
+}
+
+function updateTranslateSettingsUI() {
+  const enabled = Boolean(state.settings.translateEnabled);
+  if (els.translateFromSelect) els.translateFromSelect.disabled = !enabled;
+  if (els.translateToSelect) els.translateToSelect.disabled = !enabled;
 }
 
 function updateProxyFieldsUI() {
@@ -408,19 +1503,22 @@ function updateChatSettingsUI() {
 }
 
 function updateRangeLabels() {
+  const pack = getUiPack();
   if (els.chatContextLimitLabel) {
     const unlimited = Boolean(state.settings.chatContextUnlimited);
     const limit = Number(state.settings.chatContextLimit || 14);
-    els.chatContextLimitLabel.textContent = unlimited ? 'Unlimited' : `${limit} msgs`;
+    els.chatContextLimitLabel.textContent = unlimited
+      ? (pack.chatUnlimited || 'Unlimited')
+      : `${limit} ${pack.labelMessagesUnit || 'msgs'}`;
   }
   if (els.chatTemperatureLabel) {
     els.chatTemperatureLabel.textContent = state.settings.chatTemperatureUseDefault
-      ? 'Default'
+      ? (pack.useDefault || 'Default')
       : String(Number(state.settings.chatTemperature ?? 0.7).toFixed(2));
   }
   if (els.chatTopPLabel) {
     els.chatTopPLabel.textContent = state.settings.chatTopPUseDefault
-      ? 'Default'
+      ? (pack.useDefault || 'Default')
       : String(Number(state.settings.chatTopP ?? 0.9).toFixed(2));
   }
 }
@@ -454,6 +1552,16 @@ function getChatSamplingOptions() {
     if (Number.isFinite(p)) out.topP = p;
   }
   return out;
+}
+
+function getChatClientPreferences() {
+  return {
+    uiLanguage: String(state.settings.language || 'zh-CN'),
+    translateEnabled: Boolean(state.settings.translateEnabled),
+    translateFrom: String(state.settings.translateFrom || 'auto'),
+    translateTo: String(state.settings.translateTo || 'zh-CN'),
+    globalDefense: Boolean(state.settings.globalDefense)
+  };
 }
 
 function bindEvents() {
@@ -546,12 +1654,20 @@ function bindEvents() {
     els.uiLangSelect.addEventListener('change', () => {
       state.settings.language = els.uiLangSelect.value || 'zh-CN';
       saveSettings();
+      applyLanguage();
     });
   }
   if (els.globalDefenseToggle) {
     els.globalDefenseToggle.addEventListener('change', () => {
       state.settings.globalDefense = Boolean(els.globalDefenseToggle.checked);
       saveSettings();
+    });
+  }
+  if (els.translateEnableToggle) {
+    els.translateEnableToggle.addEventListener('change', () => {
+      state.settings.translateEnabled = Boolean(els.translateEnableToggle.checked);
+      saveSettings();
+      updateTranslateSettingsUI();
     });
   }
   if (els.translateFromSelect) {
@@ -567,11 +1683,13 @@ function bindEvents() {
     });
   }
   if (els.fontSizeSelect) {
-    els.fontSizeSelect.addEventListener('change', () => {
-      state.settings.fontSize = els.fontSizeSelect.value || 'md';
+    const onFontSizeChange = () => {
+      state.settings.fontSize = normalizeFontSizePx(els.fontSizeSelect.value);
       saveSettings();
       applyFontSize(state.settings.fontSize);
-    });
+    };
+    els.fontSizeSelect.addEventListener('input', onFontSizeChange);
+    els.fontSizeSelect.addEventListener('change', onFontSizeChange);
   }
   if (els.themeSelect) {
     els.themeSelect.addEventListener('change', () => {
@@ -683,6 +1801,20 @@ function bindEvents() {
   if (els.chatShowCharCountToggle) {
     els.chatShowCharCountToggle.addEventListener('change', () => {
       state.settings.chatShowCharCount = Boolean(els.chatShowCharCountToggle.checked);
+      saveSettings();
+      renderMessages();
+    });
+  }
+  if (els.chatShowTokenUsageToggle) {
+    els.chatShowTokenUsageToggle.addEventListener('change', () => {
+      state.settings.chatShowTokenUsage = Boolean(els.chatShowTokenUsageToggle.checked);
+      saveSettings();
+      renderMessages();
+    });
+  }
+  if (els.chatShowFirstTokenLatencyToggle) {
+    els.chatShowFirstTokenLatencyToggle.addEventListener('change', () => {
+      state.settings.chatShowFirstTokenLatency = Boolean(els.chatShowFirstTokenLatencyToggle.checked);
       saveSettings();
       renderMessages();
     });
@@ -1777,6 +2909,15 @@ function renderAssistantMessageContent(text) {
   return renderRichTextWithMath(raw);
 }
 
+function estimateTokenUsage(text) {
+  const s = String(text || '');
+  if (!s) return 0;
+  const cjk = (s.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  const asciiLike = s.length - cjk;
+  const est = Math.round(cjk * 1.25 + asciiLike * 0.28);
+  return Math.max(1, est);
+}
+
 function renderMessageMeta(message, role) {
   const parts = [];
   if (state.settings.chatShowTimestamp) {
@@ -1787,6 +2928,12 @@ function renderMessageMeta(message, role) {
   }
   if (state.settings.chatShowCharCount) {
     parts.push(`${String(message.content || '').length} chars`);
+  }
+  if (state.settings.chatShowTokenUsage) {
+    parts.push(`~${estimateTokenUsage(message.content || '')} tok`);
+  }
+  if (state.settings.chatShowFirstTokenLatency && role === 'assistant' && Number.isFinite(message.firstTokenLatencyMs)) {
+    parts.push(`TTFT ${Math.max(0, Math.round(message.firstTokenLatencyMs))}ms`);
   }
   if (!parts.length) return '';
   return `<div class="msg-meta">${escapeHtml(parts.join(' · '))}</div>`;
@@ -1907,7 +3054,7 @@ function buildChatPayloadMessages(session) {
     .filter((m) => m.content.length > 0);
 }
 
-async function streamSSEResponse(response, messageId) {
+async function streamSSEResponse(response, messageId, requestStartedAt) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -1915,6 +3062,7 @@ async function streamSSEResponse(response, messageId) {
   let thinkFull = '';
   let isThinking = false;
   let toolCalls = [];
+  let firstTokenLatencyMs = null;
   const incrementalRender = Boolean(state.settings.chatStreamOutput);
 
   while (true) {
@@ -1944,6 +3092,9 @@ async function streamSSEResponse(response, messageId) {
         } else if (payload.think_content) {
           thinkFull += payload.think_content;
         } else if (payload.content) {
+          if (firstTokenLatencyMs == null && Number.isFinite(requestStartedAt)) {
+            firstTokenLatencyMs = Date.now() - requestStartedAt;
+          }
           full += payload.content;
         }
         updateMessage(messageId, (m) => ({
@@ -1951,7 +3102,8 @@ async function streamSSEResponse(response, messageId) {
           content: full,
           thinkContent: thinkFull || undefined,
           isThinking,
-          toolCalls: toolCalls.length ? [...toolCalls] : undefined
+          toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+          firstTokenLatencyMs: Number.isFinite(firstTokenLatencyMs) ? firstTokenLatencyMs : m.firstTokenLatencyMs
         }));
         if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || typeof payload.thinking === 'boolean') {
           renderMessages();
@@ -2019,11 +3171,14 @@ async function sendSingleChatMessage(session) {
       } catch (_) {}
     }
 
+    const requestStartedAt = Date.now();
+    const proxyHeader = getClientProxyHeaderValue();
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(state.token ? { 'x-access-token': state.token } : {})
+        ...(state.token ? { 'x-access-token': state.token } : {}),
+        ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
       },
       body: JSON.stringify({
         messages: payloadMessages,
@@ -2031,6 +3186,7 @@ async function sendSingleChatMessage(session) {
         mode: state.ui.chatMode,
         providerId: state.ui.selectedProviderId || undefined,
         model: state.ui.selectedModel || undefined,
+        preferences: getChatClientPreferences(),
         ...samplingOptions,
         searchResults: searchResults.length ? searchResults : undefined,
         knowledgeBaseIds: getEnabledKbIds(),
@@ -2059,7 +3215,7 @@ async function sendSingleChatMessage(session) {
       return;
     }
 
-    await streamSSEResponse(response, assistant.id);
+    await streamSSEResponse(response, assistant.id, requestStartedAt);
   } catch (error) {
     updateMessage(assistant.id, (m) => ({ ...m, content: `测试失败：${error.message || error}`, isThinking: false }));
     renderMessages();
@@ -2099,11 +3255,14 @@ async function sendGroupChatMessage(session, group) {
       if (msgInSession) msgInSession.speakerAvatarId = member.id;
       renderMessages();
 
+      const requestStartedAt = Date.now();
+      const proxyHeader = getClientProxyHeaderValue();
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(state.token ? { 'x-access-token': state.token } : {})
+          ...(state.token ? { 'x-access-token': state.token } : {}),
+          ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
         },
         body: JSON.stringify({
           messages: payloadMessages,
@@ -2111,6 +3270,7 @@ async function sendGroupChatMessage(session, group) {
           mode: state.ui.chatMode,
           providerId: state.ui.selectedProviderId || undefined,
           model: state.ui.selectedModel || undefined,
+          preferences: getChatClientPreferences(),
           ...samplingOptions,
           knowledgeBaseIds: getEnabledKbIds(),
           avatar: {
@@ -2141,7 +3301,7 @@ async function sendGroupChatMessage(session, group) {
         continue;
       }
 
-      const finalContent = await streamSSEResponse(response, assistant.id);
+      const finalContent = await streamSSEResponse(response, assistant.id, requestStartedAt);
       /* append this member's response to context for next member */
       payloadMessages.push({ role: 'assistant', content: `[${member.name}]: ${finalContent}` });
     }
@@ -2568,19 +3728,20 @@ async function refreshServiceStatus() {
     updateModelSelectFromProviders(info.providers || []);
   } catch (error) {
     state.health.online = false;
-    state.health.message = error.message || '服务不可用';
+    state.health.message = error.message || (getUiPack().serviceUnavailable || '服务不可用');
     updateConnectionUI();
   }
 }
 
 function updateConnectionUI() {
+  const pack = getUiPack();
   const online = state.health.online;
   if (online) {
-    els.connLine1.textContent = '已连接';
+    els.connLine1.textContent = pack.connected || '已连接';
     els.connLine2.textContent = '';
   } else {
-    els.connLine1.textContent = '未连接';
-    els.connLine2.textContent = state.health.message || '请先启动本地服务';
+    els.connLine1.textContent = pack.disconnected || '未连接';
+    els.connLine2.textContent = state.health.message || pack.startLocalService || '请先启动本地服务';
   }
 }
 
@@ -3122,11 +4283,30 @@ async function exportActiveWord() {
   }
 }
 
+function getClientProxyHeaderValue() {
+  const s = state.settings || {};
+  if (!s.proxyEnabled) return '';
+  const host = String(s.proxyHost || '').trim();
+  const portText = String(s.proxyPort || '').trim();
+  const port = Number(portText);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return '';
+  return JSON.stringify({
+    enabled: true,
+    type: String(s.proxyType || 'socks5'),
+    host,
+    port,
+    user: String(s.proxyUser || ''),
+    pass: String(s.proxyPass || '')
+  });
+}
+
 async function apiRequest(url, options) {
   const reqOptions = options || {};
   const headers = new Headers(reqOptions.headers || {});
   if (reqOptions.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   if (state.token) headers.set('x-access-token', state.token);
+  const proxyHeader = getClientProxyHeaderValue();
+  if (proxyHeader) headers.set('x-client-proxy-config', proxyHeader);
 
   let response;
   try {
@@ -3399,75 +4579,7 @@ function setStatus(text) {
   els.fileStatus.textContent = String(text || '');
 }
 
-function countQuestionTotal(bank) {
-  const a = Array.isArray(bank.mcq) ? bank.mcq.length : 0;
-  const b = Array.isArray(bank.blank) ? bank.blank.length : 0;
-  const c = Array.isArray(bank.short_answer) ? bank.short_answer.length : 0;
-  const d = Array.isArray(bank.comprehensive) ? bank.comprehensive.length : 0;
-  return a + b + c + d;
-}
-
-function toolName(tool) {
-  if (tool === 'paper_report') return '论文生成器';
-  return '期末复习包';
-}
-
-function formatTime(ts) {
-  if (!ts) return '-';
-  const d = new Date(ts);
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const pad = (n) => String(n).padStart(2, '0');
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-function escapeHtml(text) {
-  return String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function countChineseChars(text) {
-  const m = String(text || '').match(/[\u3400-\u9fff]/g);
-  return m ? m.length : 0;
-}
-
-function fallbackCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  document.execCommand('copy');
-  document.body.removeChild(ta);
-}
-
-function csvEscape(text) {
-  return `"${String(text || '').replace(/"/g, '""')}"`;
-}
-
-function timestamp() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-}
-
-function downloadBlob(blob, filename) {
-  const a = document.createElement('a');
-  const url = URL.createObjectURL(blob);
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/* Phase-1 split: pure/shared utility helpers moved to /public/js/utils-core.js */
 
 /* ── MCP Settings ── */
 

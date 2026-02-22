@@ -957,6 +957,10 @@ body.drawer-open .artifact-drawer {
   font-size: 14px;
   color: var(--text);
 }
+.setting-row select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .setting-row textarea {
   resize: vertical;
   min-height: 88px;
@@ -967,6 +971,22 @@ body.drawer-open .artifact-drawer {
   align-items: center;
 }
 .setting-control input { flex: 1; }
+.setting-control.range-control {
+  gap: 10px;
+}
+.setting-control.range-control input[type="range"] {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--brand);
+}
+.range-value {
+  min-width: 48px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--text);
+}
 .setting-row-actions {
   display: flex;
   gap: 8px;

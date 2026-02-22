@@ -204,7 +204,17 @@
                 <span class="muted">用于降低提示注入与不安全输出</span>
               </div>
             </div>
-            <div class="setting-row">
+                        <div class="setting-row">
+              <label id="translateEnableLabel">启用翻译</label>
+              <div class="setting-control">
+                <label class="toggle">
+                  <input id="translateEnableToggle" type="checkbox">
+                  <span class="toggle-slider"></span>
+                </label>
+                <span id="translateEnableDesc" class="muted">仅在聊天内容中生效（含角色卡/记忆等上下文）</span>
+              </div>
+            </div>
+<div class="setting-row">
               <label>翻译方向</label>
               <div class="setting-control">
                 <select id="translateFromSelect">
@@ -232,12 +242,10 @@
             </div>
             <div class="setting-row">
               <label>字体大小</label>
-              <select id="fontSizeSelect">
-                <option value="sm">小</option>
-                <option value="md">标准</option>
-                <option value="lg">大</option>
-                <option value="xl">特大</option>
-              </select>
+              <div class="setting-control range-control">
+                <input id="fontSizeSelect" type="range" min="12" max="20" step="1" value="14">
+                <span id="fontSizeValueLabel" class="range-value">14px</span>
+              </div>
             </div>
             <div class="setting-row">
               <label>主题</label>
@@ -433,6 +441,14 @@
                 <label class="toggle"><input id="chatShowCharCountToggle" type="checkbox"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
+                <div class="setting-switch-title">显示消息的 token 消耗（估算）</div>
+                <label class="toggle"><input id="chatShowTokenUsageToggle" type="checkbox"><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
+                <div class="setting-switch-title">显示首字耗时（TTFT）</div>
+                <label class="toggle"><input id="chatShowFirstTokenLatencyToggle" type="checkbox"><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-switch-item">
                 <div>
                   <div class="setting-switch-title">Markdown ??</div>
                   <div class="setting-switch-desc">?????????????</div>
@@ -474,90 +490,89 @@
           </div>
 
           <div class="settings-group">
-            <h4>??</h4>
+            <h4>头像</h4>
             <div class="avatar-preview-row">
               <div class="avatar-preview-item">
-                <span class="avatar-preview" id="userAvatarPreview">??</span>
-                <span class="muted">??</span>
+                <span class="avatar-preview" id="userAvatarPreview">👤</span>
+                <span class="muted">用户</span>
               </div>
               <div class="avatar-preview-item">
-                <span class="avatar-preview" id="aiAvatarPreview">??</span>
+                <span class="avatar-preview" id="aiAvatarPreview">🤖</span>
                 <span class="muted">AI</span>
               </div>
             </div>
             <div class="setting-row">
-              <label>????</label>
+              <label>用户头像</label>
               <div class="setting-control">
-                <input id="userAvatarInput" type="text" placeholder="emoji ? ??" maxlength="4">
-                <button id="userAvatarUploadBtn" class="btn ghost" type="button">????</button>
+                <input id="userAvatarInput" type="text" placeholder="emoji 如 😀" maxlength="4">
+                <button id="userAvatarUploadBtn" class="btn ghost" type="button">上传图片</button>
                 <input id="userAvatarFile" type="file" hidden accept="image/*">
               </div>
             </div>
             <div class="setting-row">
-              <label>AI ??</label>
+              <label>AI 头像</label>
               <div class="setting-control">
-                <input id="aiAvatarInput" type="text" placeholder="emoji ? ??" maxlength="4">
-                <button id="aiAvatarUploadBtn" class="btn ghost" type="button">????</button>
+                <input id="aiAvatarInput" type="text" placeholder="emoji 如 🧠" maxlength="4">
+                <button id="aiAvatarUploadBtn" class="btn ghost" type="button">上传图片</button>
                 <input id="aiAvatarFile" type="file" hidden accept="image/*">
               </div>
             </div>
             <div class="setting-row-actions">
-              <button id="saveAvatarBtn" class="btn primary" type="button">??</button>
-              <button id="resetAvatarBtn" class="btn ghost" type="button">????</button>
+              <button id="saveAvatarBtn" class="btn primary" type="button">保存</button>
+              <button id="resetAvatarBtn" class="btn ghost" type="button">恢复默认</button>
             </div>
           </div>
         </div>
         <div class="settings-section hidden" data-section="personas">
-          <h3>????</h3>
+          <h3>角色管理</h3>
           <div class="tavern-import-row">
-            <button id="tavernImportBtn" class="btn ghost" type="button">?? ??????</button>
+            <button id="tavernImportBtn" class="btn ghost" type="button">🃏 导入酒馆卡片</button>
             <input id="tavernImportFile" type="file" hidden accept=".png,.json">
             <span id="tavernImportStatus" class="muted"></span>
           </div>
           <div id="avatarListWrap" class="avatar-list"></div>
           <hr class="provider-divider">
-          <h4 id="avatarFormTitle">????</h4>
+          <h4 id="avatarFormTitle">新建角色</h4>
           <input id="avatarEditId" type="hidden" value="">
           <div class="setting-row">
-            <label>????</label>
-            <input id="avatarNameInput" type="text" placeholder="????????">
+            <label>角色名称</label>
+            <input id="avatarNameInput" type="text" placeholder="给角色起一个名字">
           </div>
           <div class="setting-row">
-            <label>?????</label>
-            <input id="avatarRelInput" type="text" placeholder="??????????????...">
+            <label>与你的关系</label>
+            <input id="avatarRelInput" type="text" placeholder="如：女朋友、老师、损友、哥们...">
           </div>
           <div class="setting-row">
-            <label>????</label>
+            <label>角色头像</label>
             <div class="setting-control avatar-icon-row">
-              <span id="avatarIconPreview" class="avatar-icon-preview">??</span>
-              <input id="avatarEmojiInput" type="text" placeholder="?? emoji" maxlength="4" class="avatar-emoji-input">
-              <button id="avatarIconUploadBtn" class="btn ghost" type="button">????</button>
+              <span id="avatarIconPreview" class="avatar-icon-preview">😺</span>
+              <input id="avatarEmojiInput" type="text" placeholder="输入 emoji" maxlength="4" class="avatar-emoji-input">
+              <button id="avatarIconUploadBtn" class="btn ghost" type="button">上传图片</button>
               <input id="avatarIconFile" type="file" hidden accept="image/*">
             </div>
           </div>
           <div class="setting-row">
-            <label>??? Prompt</label>
-            <textarea id="avatarPromptInput" rows="4" placeholder="????????????...????"></textarea>
+            <label>自定义 Prompt</label>
+            <textarea id="avatarPromptInput" rows="4" placeholder="描述角色的性格、说话方式...（可选）"></textarea>
           </div>
           <div class="setting-row">
-            <label>??????</label>
-            <textarea id="avatarMemoryInput" rows="4" placeholder="???????????...????"></textarea>
+            <label>历史聊天记录</label>
+            <textarea id="avatarMemoryInput" rows="4" placeholder="粘贴聊天记录或导入文件...（可选）"></textarea>
             <div class="setting-control">
-              <button id="avatarMemoryImportBtn" class="btn ghost" type="button">?????.txt / .md / .json?</button>
+              <button id="avatarMemoryImportBtn" class="btn ghost" type="button">导入文件（.txt / .md / .json）</button>
               <input id="avatarMemoryFile" type="file" hidden accept=".txt,.md,.json">
               <span id="avatarMemoryFileStatus" class="muted"></span>
             </div>
           </div>
           <div class="setting-row-actions">
-            <button id="avatarCancelBtn" class="btn ghost hidden" type="button">??</button>
-            <button id="avatarSaveBtn" class="btn primary" type="button">??</button>
+            <button id="avatarCancelBtn" class="btn ghost hidden" type="button">取消</button>
+            <button id="avatarSaveBtn" class="btn primary" type="button">保存</button>
           </div>
           <p id="avatarStatus" class="muted"></p>
         </div>
         <div class="settings-section hidden" data-section="mcp">
-          <h3>MCP ????</h3>
-          <p class="muted">???? MCP Server?? AI ????????</p>
-          <div id="mcpServerListWrap" class="provider-list"></div>
+          <h3>MCP 工具服务</h3>
+          <p class="muted">连接外部 MCP Server，让 AI 在聊天中调用工具</p>
           <div id="mcpServerListWrap" class="provider-list"></div>
           <hr class="provider-divider">
           <h4>快速添加</h4>
@@ -641,6 +656,7 @@
   <script src="/vendor/jszip.min.js"></script>
   <script src="/vendor/docx.umd.min.js"></script>
   <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/js/utils-core.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

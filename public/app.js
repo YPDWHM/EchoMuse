@@ -1406,14 +1406,18 @@ function applyLanguage() {
     const navProvider = els.settingsPanel.querySelector('.settings-nav-item[data-section="provider"]');
     const navMcp = els.settingsPanel.querySelector('.settings-nav-item[data-section="mcp"]');
     const navKnowledge = els.settingsPanel.querySelector('.settings-nav-item[data-section="knowledge"]');
+    const navTeamSharing = els.settingsPanel.querySelector('.settings-nav-item[data-section="team-sharing"]');
     const navTitle = els.settingsPanel.querySelector('.settings-nav h2');
     const generalTitle = els.settingsPanel.querySelector('.settings-section[data-section="general"] > h3');
+    const teamSharingTitle = els.settingsPanel.querySelector('.settings-section[data-section="team-sharing"] > h3');
     if (navTitle) navTitle.textContent = pack.settingsTitle;
     if (navGeneral) navGeneral.textContent = pack.navGeneral;
     if (navProvider) navProvider.textContent = pack.navProvider;
     if (navMcp) navMcp.textContent = pack.navMcp;
     if (navKnowledge) navKnowledge.textContent = pack.navKnowledge;
+    if (navTeamSharing) navTeamSharing.textContent = (state.settings.language || 'zh-CN') === 'en-US' ? 'Team Sharing' : '团队分享';
     if (generalTitle) generalTitle.textContent = pack.generalTitle;
+    if (teamSharingTitle) teamSharingTitle.textContent = (state.settings.language || 'zh-CN') === 'en-US' ? 'Team Sharing' : '团队分享（Team Sharing）';
 
     const basicGroupTitle = els.settingsPanel.querySelector('.settings-section[data-section="general"] .settings-group h4');
     if (basicGroupTitle) basicGroupTitle.textContent = pack.basicSettings;
@@ -1733,6 +1737,7 @@ function bindEvents() {
     els.settingsPanel.querySelectorAll('.settings-section').forEach((s) => {
       s.classList.toggle('hidden', s.dataset.section !== section);
     });
+    if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
   });
 
   els.saveTokenBtn.addEventListener('click', () => {
@@ -3981,6 +3986,7 @@ function updateConnectionUI() {
 
 async function openSettingsPanel() {
   els.settingsPanel.classList.remove('hidden');
+  ensureTeamSharingSettingsSection();
   refreshAvatarPreviews();
   els.tokenInput.value = state.token || '';
   els.userAvatarInput.value = state.ui.userAvatar || '';
@@ -3992,6 +3998,7 @@ async function openSettingsPanel() {
   await loadProviderList();
   loadMcpServerList();
   loadKbList();
+  loadTeamSharingStatus();
 }
 
 function closeSettingsPanel() {
@@ -4857,6 +4864,17 @@ const kbCreatorRuntime = {
   busy: false
 };
 
+const teamSharingRuntime = {
+  launcherReady: false,
+  modalReady: false,
+  ui: null,
+  data: null,
+  loading: false,
+  saving: false,
+  lastIssuedToken: '',
+  lastIssuedMemberId: ''
+};
+
 function getEmbeddingCapableProviders(type = '') {
   const providers = Array.isArray(state.info.providers) ? state.info.providers : [];
   return providers.filter((p) => {
@@ -4984,6 +5002,666 @@ function kvObjectToLines(obj, sep = '=') {
   return Object.entries(obj).map(([k, v]) => `${k}${sep}${String(v ?? '')}`).join('\n');
 }
 
+function getGeneralSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="general"]') : null;
+}
+
+function getTeamSharingSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="team-sharing"]') : null;
+}
+
+function ensureTeamSharingSettingsSection() {
+  if (!els.settingsPanel) return null;
+  const nav = els.settingsPanel.querySelector('.settings-nav');
+  const content = els.settingsPanel.querySelector('.settings-content');
+  if (!nav || !content) return null;
+
+  let navBtn = nav.querySelector('.settings-nav-item[data-section="team-sharing"]');
+  if (!navBtn) {
+    navBtn = document.createElement('button');
+    navBtn.className = 'settings-nav-item';
+    navBtn.type = 'button';
+    navBtn.dataset.section = 'team-sharing';
+    navBtn.textContent = '团队分享';
+    const spacer = nav.querySelector('.settings-nav-spacer');
+    if (spacer) nav.insertBefore(navBtn, spacer);
+    else nav.appendChild(navBtn);
+  }
+
+  let section = getTeamSharingSettingsSection();
+  if (!section) {
+    section = document.createElement('div');
+    section.className = 'settings-section hidden';
+    section.dataset.section = 'team-sharing';
+    section.innerHTML = `
+      <h3>团队分享（Team Sharing）</h3>
+      <div id="teamSharingSettingsMount"></div>
+      <div class="settings-group" style="margin-top:12px;">
+        <h4>接入说明</h4>
+        <div class="setting-row">
+          <label>OpenAI-compatible Relay</label>
+          <div class="setting-control" style="flex-direction:column;align-items:flex-start;gap:8px;max-width:100%;">
+            <div id="teamSharingRelaySummary" class="muted" style="line-height:1.5;word-break:break-all;">未加载</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button id="teamSharingCopyModelsUrlBtn" class="btn ghost" type="button">复制 models 地址</button>
+              <button id="teamSharingCopyChatUrlBtn" class="btn ghost" type="button">复制 chat 地址</button>
+              <button id="teamSharingCopyEmbedUrlBtn" class="btn ghost" type="button">复制 embeddings 地址</button>
+            </div>
+            <div id="teamSharingRelayCopyStatus" class="muted" style="font-size:12px;"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    content.appendChild(section);
+
+    const copyStatusEl = section.querySelector('#teamSharingRelayCopyStatus');
+    const copyRelayUrl = async (kind) => {
+      const data = teamSharingRuntime.data || {};
+      const base = String(data.publicBaseUrl || data.effectiveBaseUrl || location.origin).replace(/\/+$/, '');
+      let path = '/api/team-sharing/openai/v1/models';
+      if (kind === 'chat') path = '/api/team-sharing/openai/v1/chat/completions';
+      if (kind === 'embeddings') path = '/api/team-sharing/openai/v1/embeddings';
+      const ok = await copyTextPortable(`${base}${path}`);
+      if (copyStatusEl) copyStatusEl.textContent = ok ? `已复制：${base}${path}` : '复制失败，请手动复制';
+    };
+    const btnModels = section.querySelector('#teamSharingCopyModelsUrlBtn');
+    const btnChat = section.querySelector('#teamSharingCopyChatUrlBtn');
+    const btnEmbed = section.querySelector('#teamSharingCopyEmbedUrlBtn');
+    if (btnModels) btnModels.addEventListener('click', () => copyRelayUrl('models'));
+    if (btnChat) btnChat.addEventListener('click', () => copyRelayUrl('chat'));
+    if (btnEmbed) btnEmbed.addEventListener('click', () => copyRelayUrl('embeddings'));
+  }
+
+  return section;
+}
+
+function formatTeamSharingTime(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '未使用';
+  try {
+    return new Date(n).toLocaleString();
+  } catch (_) {
+    return String(n);
+  }
+}
+
+async function copyTextPortable(text) {
+  const content = String(text || '');
+  if (!content) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(content);
+      return true;
+    }
+  } catch (_) {}
+  try {
+    fallbackCopy(content);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildTeamSharingMemberGuideText(token, member, data) {
+  const status = data && typeof data === 'object' ? data : (teamSharingRuntime.data || {});
+  const baseUrl = String(status.publicBaseUrl || status.effectiveBaseUrl || `${location.origin}`).replace(/\/+$/, '');
+  const name = String(member?.name || 'Member');
+  const relayBase = `${baseUrl}/api/team-sharing/openai/v1`;
+  return [
+    `Team Sharing 成员：${name}`,
+    `Base URL: ${baseUrl}`,
+    `x-access-token: ${token}`,
+    '',
+    '当前 MVP 接入方式（FinalAI 客户端/自定义客户端）：',
+    `- 请求头带上 x-access-token: ${token}`,
+    `- 可访问路由：/api/chat /api/translate /api/search（以及少量只读状态接口）`,
+    '- 管理路由 /api/team-sharing/* 仅管理员可访问',
+    '',
+    'OpenAI-compatible Relay（推荐给第三方客户端）：',
+    `- Models: ${relayBase}/models`,
+    `- Chat Completions: ${relayBase}/chat/completions`,
+    `- Embeddings: ${relayBase}/embeddings`,
+    '- 认证头可用 Authorization: Bearer <token> 或 x-access-token',
+    '',
+    '示例（健康检查）：',
+    `curl -H "x-access-token: ${token}" "${baseUrl}/api/health"`,
+    '',
+    '示例（FinalAI 原生聊天接口）：',
+    `curl -X POST "${baseUrl}/api/chat" -H "Content-Type: application/json" -H "x-access-token: ${token}" -d "{\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"你好\\"}]}"`,
+    '',
+    '示例（OpenAI-compatible Chat）：',
+    `curl -X POST "${relayBase}/chat/completions" -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" -d "{\\"model\\":\\"${(state.ui.selectedModel || state.info.model || 'qwen3:8b')}\\",\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"你好\\"}]}"`,
+  ].join('\n');
+}
+
+function ensureTeamSharingLauncher() {
+  ensureTeamSharingSettingsSection();
+  const teamSection = getTeamSharingSettingsSection();
+  const sectionMount = teamSection ? teamSection.querySelector('#teamSharingSettingsMount') : null;
+  const section = sectionMount || getGeneralSettingsSection();
+  if (!section) return null;
+
+  const existingHost = document.getElementById('teamSharingLauncherCard');
+  if (existingHost) {
+    if (existingHost.parentElement !== section) section.appendChild(existingHost);
+    teamSharingRuntime.launcherReady = true;
+    return existingHost;
+  }
+
+  const host = document.createElement('div');
+  host.id = 'teamSharingLauncherCard';
+  host.className = 'team-sharing-launcher-card';
+  host.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid rgba(148,163,184,.28);border-radius:12px;background:rgba(248,250,252,.75);margin:8px 0 12px;">
+      <div style="min-width:0;flex:1;">
+        <div style="font-weight:700;">Team Sharing（共享访问）</div>
+        <div class="muted" style="font-size:12px;line-height:1.4;margin-top:2px;">为成员生成独立 token，并按成员限流；可用于桌面版/自定义客户端共享接入（真实生效）</div>
+        <div id="teamSharingLauncherSummary" class="muted" style="font-size:12px;line-height:1.5;margin-top:8px;">未加载</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button id="teamSharingOpenBtn" class="btn primary" type="button">管理 Sharing</button>
+        <button id="teamSharingRefreshBtn" class="btn ghost" type="button">刷新</button>
+      </div>
+    </div>
+  `;
+
+  const firstChild = section.firstElementChild;
+  if (firstChild) section.insertBefore(host, firstChild);
+  else section.appendChild(host);
+
+  const openBtn = host.querySelector('#teamSharingOpenBtn');
+  const refreshBtn = host.querySelector('#teamSharingRefreshBtn');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      openTeamSharingModal().catch((error) => {
+        const summaryEl = host.querySelector('#teamSharingLauncherSummary');
+        if (summaryEl) summaryEl.textContent = `打开 Sharing 管理失败：${error.message || error}`;
+      });
+    });
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => {
+      loadTeamSharingStatus({ force: true });
+    });
+  }
+
+  teamSharingRuntime.launcherReady = true;
+  return host;
+}
+
+function refreshTeamSharingLauncherSummary() {
+  const host = ensureTeamSharingLauncher();
+  const summaryEl = host ? host.querySelector('#teamSharingLauncherSummary') : null;
+  if (!summaryEl) return;
+
+  const data = teamSharingRuntime.data;
+  if (!data) {
+    summaryEl.textContent = teamSharingRuntime.loading ? '正在加载 Team Sharing 状态...' : '未加载 Team Sharing 状态';
+    return;
+  }
+
+  const enabled = Boolean(data.enabled);
+  const members = Array.isArray(data.members) ? data.members : [];
+  const activeCount = members.filter((m) => m && m.enabled !== false).length;
+  const accessTokenConfigured = Boolean(data.accessTokenConfigured);
+  const baseUrl = String(data.publicBaseUrl || data.effectiveBaseUrl || '').trim();
+  const warn = String(data.warning || '').trim();
+
+  let text = `${enabled ? '已启用' : '未启用'} · 成员 ${members.length} 个（启用 ${activeCount} 个）`;
+  text += ` · 管理口令${accessTokenConfigured ? '已配置' : '未配置'}`;
+  if (baseUrl) text += ` · Base URL: ${baseUrl}`;
+  if (warn) text += ` · ${warn}`;
+  summaryEl.textContent = text;
+
+  const relaySummaryEl = els.settingsPanel ? els.settingsPanel.querySelector('#teamSharingRelaySummary') : null;
+  if (relaySummaryEl) {
+    const relayBase = String(baseUrl || location.origin).replace(/\/+$/, '');
+    relaySummaryEl.innerHTML = [
+      `Models: <code>${escapeHtml(`${relayBase}/api/team-sharing/openai/v1/models`)}</code>`,
+      `Chat: <code>${escapeHtml(`${relayBase}/api/team-sharing/openai/v1/chat/completions`)}</code>`,
+      `Embeddings: <code>${escapeHtml(`${relayBase}/api/team-sharing/openai/v1/embeddings`)}</code>`,
+      '成员使用生成的 token 作为 `Authorization: Bearer <token>` 或 `x-access-token` 即可。'
+    ].join('<br>');
+  }
+}
+
+function ensureTeamSharingModal() {
+  if (teamSharingRuntime.modalReady && teamSharingRuntime.ui) return teamSharingRuntime.ui;
+  ensureToolUiInjectedStyle();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal" role="dialog" aria-modal="true" aria-labelledby="teamSharingTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="teamSharingTitle">Team Sharing 管理</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <div class="toolui-row">
+            <label>共享设置（真实生效）</label>
+            <div class="toolui-switch-block">
+              <div class="toolui-grid two-col">
+                <div class="toolui-row">
+                  <label for="teamShareEnabledInput">启用 Team Sharing</label>
+                  <label class="toolui-inline" style="font-weight:400;">
+                    <input id="teamShareEnabledInput" type="checkbox">
+                    <span>开启后成员 token 可访问受限 API（聊天/翻译等）</span>
+                  </label>
+                  <div class="hint">为避免管理接口暴露，建议并默认要求先配置 ACCESS_TOKEN 再启用。</div>
+                </div>
+                <div class="toolui-row">
+                  <label for="teamShareDefaultRateInput">成员默认限流（次/分钟）</label>
+                  <input id="teamShareDefaultRateInput" class="toolui-input" type="number" min="10" max="5000" step="1" value="120">
+                  <div class="hint">新建成员时默认使用，可单独覆盖。</div>
+                </div>
+                <div class="toolui-row" style="grid-column:1/-1;">
+                  <label for="teamSharePublicBaseUrlInput">对外 Base URL（可选）</label>
+                  <input id="teamSharePublicBaseUrlInput" class="toolui-input" type="text" placeholder="例如：https://your-domain.com">
+                  <div class="hint">用于生成接入说明；留空则按当前服务地址推断。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="toolui-row">
+            <label>运行状态</label>
+            <div class="toolui-filebox">
+              <div id="teamShareRuntimeInfo" style="font-size:13px;line-height:1.5;color:#334155;">未加载</div>
+              <div id="teamShareWarningText" class="hint" style="margin-top:6px;"></div>
+            </div>
+          </div>
+
+          <div class="toolui-row">
+            <label>新增成员</label>
+            <div class="toolui-filebox">
+              <div class="toolui-grid two-col">
+                <div class="toolui-row">
+                  <label for="teamShareMemberNameInput">成员名称</label>
+                  <input id="teamShareMemberNameInput" class="toolui-input" type="text" placeholder="例如：Alice / 测试机">
+                </div>
+                <div class="toolui-row">
+                  <label for="teamShareMemberRateInput">限流（次/分钟）</label>
+                  <input id="teamShareMemberRateInput" class="toolui-input" type="number" min="10" max="5000" step="1" placeholder="默认值">
+                </div>
+              </div>
+              <div class="toolui-actions-row">
+                <button id="teamShareCreateMemberBtn" type="button" class="btn primary">创建成员并生成 Token</button>
+              </div>
+              <div class="hint">注意：Token 只会在创建/重置时显示一次，请及时保存。</div>
+            </div>
+          </div>
+
+          <div id="teamShareIssuedTokenWrap" class="toolui-row toolui-hidden">
+            <label>新发放 Token（只展示一次）</label>
+            <div class="toolui-filebox">
+              <textarea id="teamShareIssuedTokenText" class="toolui-textarea" rows="3" readonly></textarea>
+              <div class="toolui-actions-row" style="margin-top:8px;">
+                <button id="teamShareCopyTokenBtn" type="button" class="btn ghost">复制 Token</button>
+                <button id="teamShareCopyGuideBtn" type="button" class="btn ghost">复制接入说明</button>
+              </div>
+              <div id="teamShareIssuedTokenStatus" class="toolui-status"></div>
+            </div>
+          </div>
+
+          <div class="toolui-row">
+            <label>成员列表</label>
+            <div id="teamShareMemberList" class="toolui-grid" style="gap:10px;"></div>
+          </div>
+
+          <div id="teamShareStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn ghost" id="teamShareRefreshBtnModal">刷新</button>
+        <button type="button" class="btn primary" id="teamShareSaveBtn">保存设置</button>
+        <button type="button" class="btn ghost" data-close>关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    enabled: backdrop.querySelector('#teamShareEnabledInput'),
+    defaultRate: backdrop.querySelector('#teamShareDefaultRateInput'),
+    publicBaseUrl: backdrop.querySelector('#teamSharePublicBaseUrlInput'),
+    runtimeInfo: backdrop.querySelector('#teamShareRuntimeInfo'),
+    warningText: backdrop.querySelector('#teamShareWarningText'),
+    memberName: backdrop.querySelector('#teamShareMemberNameInput'),
+    memberRate: backdrop.querySelector('#teamShareMemberRateInput'),
+    createMemberBtn: backdrop.querySelector('#teamShareCreateMemberBtn'),
+    memberList: backdrop.querySelector('#teamShareMemberList'),
+    issuedWrap: backdrop.querySelector('#teamShareIssuedTokenWrap'),
+    issuedTokenText: backdrop.querySelector('#teamShareIssuedTokenText'),
+    issuedTokenStatus: backdrop.querySelector('#teamShareIssuedTokenStatus'),
+    copyTokenBtn: backdrop.querySelector('#teamShareCopyTokenBtn'),
+    copyGuideBtn: backdrop.querySelector('#teamShareCopyGuideBtn'),
+    status: backdrop.querySelector('#teamShareStatus'),
+    refreshBtn: backdrop.querySelector('#teamShareRefreshBtnModal'),
+    saveBtn: backdrop.querySelector('#teamShareSaveBtn')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeTeamSharingModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeTeamSharingModal()));
+
+  ui.refreshBtn.addEventListener('click', () => loadTeamSharingStatus({ force: true, syncModal: true }));
+  ui.saveBtn.addEventListener('click', () => saveTeamSharingConfigFromModal());
+  ui.createMemberBtn.addEventListener('click', () => createTeamSharingMemberFromModal());
+  ui.copyTokenBtn.addEventListener('click', async () => {
+    const token = teamSharingRuntime.lastIssuedToken || '';
+    const ok = await copyTextPortable(token);
+    setToolUiStatus(ui.issuedTokenStatus, ok ? 'Token 已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
+  });
+  ui.copyGuideBtn.addEventListener('click', async () => {
+    const token = teamSharingRuntime.lastIssuedToken || '';
+    const data = teamSharingRuntime.data || {};
+    const member = (Array.isArray(data.members) ? data.members : []).find((m) => m.id === teamSharingRuntime.lastIssuedMemberId) || { name: 'Member' };
+    const ok = await copyTextPortable(buildTeamSharingMemberGuideText(token, member, data));
+    setToolUiStatus(ui.issuedTokenStatus, ok ? '接入说明已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
+  });
+
+  ui.memberList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action][data-member-id]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const memberId = btn.dataset.memberId;
+    const card = btn.closest('[data-member-card]');
+    if (!action || !memberId) return;
+    if (action === 'delete' && !window.confirm('确认删除该 Team Sharing 成员？')) return;
+    if (action === 'reset-token' && !window.confirm('确认重置该成员 Token？旧 Token 将立即失效。')) return;
+
+    if (action === 'save') {
+      await updateTeamSharingMemberFromCard(memberId, card);
+      return;
+    }
+    if (action === 'toggle') {
+      const nextEnabled = String(btn.dataset.nextEnabled || '0') === '1';
+      await updateTeamSharingMember(memberId, { enabled: nextEnabled }, { okMessage: nextEnabled ? '成员已启用' : '成员已禁用' });
+      return;
+    }
+    if (action === 'reset-token') {
+      await resetTeamSharingMemberToken(memberId);
+      return;
+    }
+    if (action === 'delete') {
+      await deleteTeamSharingMember(memberId);
+      return;
+    }
+  });
+
+  teamSharingRuntime.modalReady = true;
+  teamSharingRuntime.ui = ui;
+  return ui;
+}
+
+function closeTeamSharingModal() {
+  const ui = ensureTeamSharingModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function renderTeamSharingIssuedToken(member, token) {
+  const ui = ensureTeamSharingModal();
+  teamSharingRuntime.lastIssuedToken = String(token || '');
+  teamSharingRuntime.lastIssuedMemberId = String(member && member.id || '');
+  if (!teamSharingRuntime.lastIssuedToken) {
+    ui.issuedWrap.classList.add('toolui-hidden');
+    ui.issuedTokenText.value = '';
+    setToolUiStatus(ui.issuedTokenStatus, '', '');
+    return;
+  }
+  ui.issuedWrap.classList.remove('toolui-hidden');
+  ui.issuedTokenText.value = teamSharingRuntime.lastIssuedToken;
+  setToolUiStatus(ui.issuedTokenStatus, `请立即保存该 Token（成员：${member && member.name ? member.name : 'Member'}）`, '');
+}
+
+function renderTeamSharingMembers(data) {
+  const ui = ensureTeamSharingModal();
+  const list = Array.isArray(data && data.members) ? data.members : [];
+  if (!list.length) {
+    ui.memberList.innerHTML = '<div class="muted" style="padding:8px 2px;">暂无成员，请先创建一个 Team Sharing 成员。</div>';
+    return;
+  }
+
+  ui.memberList.innerHTML = list.map((m) => {
+    const usage = (m && m.usage && typeof m.usage === 'object') ? m.usage : {};
+    const usageText = [
+      `请求 ${Number(usage.requests || 0)}`,
+      `聊天 ${Number(usage.chats || 0)}`,
+      `翻译 ${Number(usage.translates || 0)}`,
+      usage.lastMethod && usage.lastPath ? `${escapeHtml(String(usage.lastMethod))} ${escapeHtml(String(usage.lastPath))}` : null
+    ].filter(Boolean).join(' · ');
+    return `
+      <div class="toolui-switch-block" data-member-card data-member-id="${escapeHtml(m.id)}" style="background:#fff;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div style="min-width:0;flex:1;">
+            <div style="font-weight:700;color:#0f172a;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span>${escapeHtml(m.name || 'Member')}</span>
+              <span style="font-size:12px;color:${m.enabled === false ? '#b45309' : '#047857'};">${m.enabled === false ? '已禁用' : '已启用'}</span>
+            </div>
+            <div class="hint" style="margin-top:4px;">Token 预览：${escapeHtml(m.tokenPreview || '') || '(无)'} · 最后使用：${escapeHtml(formatTeamSharingTime(m.lastUsedAt))}</div>
+            <div class="hint" style="margin-top:2px;">${usageText}</div>
+          </div>
+        </div>
+        <div class="toolui-grid two-col" style="margin-top:10px;">
+          <div class="toolui-row">
+            <label>名称</label>
+            <input class="toolui-input" type="text" data-field="name" value="${escapeHtml(m.name || '')}">
+          </div>
+          <div class="toolui-row">
+            <label>限流（次/分钟）</label>
+            <input class="toolui-input" type="number" min="10" max="5000" step="1" data-field="rate" value="${escapeHtml(String(m.rateLimitPerMin || ''))}">
+          </div>
+        </div>
+        <div class="toolui-actions-row" style="margin-top:10px;">
+          <button type="button" class="btn ghost" data-action="save" data-member-id="${escapeHtml(m.id)}">保存成员</button>
+          <button type="button" class="btn ghost" data-action="toggle" data-next-enabled="${m.enabled === false ? '1' : '0'}" data-member-id="${escapeHtml(m.id)}">${m.enabled === false ? '启用' : '禁用'}</button>
+          <button type="button" class="btn ghost" data-action="reset-token" data-member-id="${escapeHtml(m.id)}">重置 Token</button>
+          <button type="button" class="btn ghost" data-action="delete" data-member-id="${escapeHtml(m.id)}">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function fillTeamSharingModalFromData(data) {
+  const ui = ensureTeamSharingModal();
+  const payload = data && typeof data === 'object' ? data : {};
+  ui.enabled.checked = Boolean(payload.enabled);
+  ui.defaultRate.value = String(Number(payload.memberDefaultRatePerMin || 120) || 120);
+  ui.publicBaseUrl.value = String(payload.publicBaseUrl || '');
+
+  const members = Array.isArray(payload.members) ? payload.members : [];
+  const activeCount = members.filter((m) => m && m.enabled !== false).length;
+  const accessTokenConfigured = Boolean(payload.accessTokenConfigured);
+  const baseUrl = String(payload.effectiveBaseUrl || payload.publicBaseUrl || '').trim();
+  ui.runtimeInfo.innerHTML = `
+    <div>状态：<strong>${payload.enabled ? '已启用' : '未启用'}</strong> · 成员 ${members.length} 个（启用 ${activeCount} 个）</div>
+    <div style="margin-top:4px;">管理口令：${accessTokenConfigured ? '已配置' : '未配置'} · Share 模式：${payload.shareMode ? '开启' : '关闭'}${state.info && state.info.shareMode ? '' : '（本机模式也可用）'}</div>
+    <div style="margin-top:4px;">对外地址：${escapeHtml(baseUrl || `${location.origin}`)}</div>
+  `;
+  ui.warningText.textContent = String(payload.warning || '');
+  renderTeamSharingMembers(payload);
+}
+
+async function loadTeamSharingStatus(options = {}) {
+  ensureTeamSharingSettingsSection();
+  const section = getTeamSharingSettingsSection() || getGeneralSettingsSection();
+  if (!section) return;
+  ensureTeamSharingLauncher();
+
+  if (!options.force && teamSharingRuntime.loading) return;
+  if (state.info && state.info.authRequired && !state.token) {
+    teamSharingRuntime.data = null;
+    refreshTeamSharingLauncherSummary();
+    const host = ensureTeamSharingLauncher();
+    const summaryEl = host ? host.querySelector('#teamSharingLauncherSummary') : null;
+    if (summaryEl) summaryEl.textContent = '需要管理员 ACCESS_TOKEN 才能管理 Team Sharing（打开设置后可输入）。';
+    if (teamSharingRuntime.modalReady && options.syncModal) {
+      const ui = ensureTeamSharingModal();
+      ui.runtimeInfo.textContent = '需要管理员 ACCESS_TOKEN 才能管理 Team Sharing。';
+      setToolUiStatus(ui.status, '请先输入管理员口令', 'error');
+    }
+    return;
+  }
+
+  teamSharingRuntime.loading = true;
+  refreshTeamSharingLauncherSummary();
+  try {
+    const data = await apiRequest('/api/team-sharing/status', { method: 'GET' });
+    teamSharingRuntime.data = data || {};
+    refreshTeamSharingLauncherSummary();
+    if (teamSharingRuntime.modalReady) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    if (teamSharingRuntime.modalReady && options.syncModal) {
+      const ui = ensureTeamSharingModal();
+      setToolUiStatus(ui.status, '', '');
+    }
+  } catch (error) {
+    teamSharingRuntime.data = null;
+    refreshTeamSharingLauncherSummary();
+    const host = ensureTeamSharingLauncher();
+    const summaryEl = host ? host.querySelector('#teamSharingLauncherSummary') : null;
+    if (summaryEl) summaryEl.textContent = `Team Sharing 状态加载失败：${error.message || error}`;
+    if (teamSharingRuntime.modalReady && options.syncModal) {
+      const ui = ensureTeamSharingModal();
+      setToolUiStatus(ui.status, `加载失败：${error.message || error}`, 'error');
+    }
+  } finally {
+    teamSharingRuntime.loading = false;
+  }
+}
+
+async function openTeamSharingModal() {
+  await openSettingsSection('team-sharing');
+  const ui = ensureTeamSharingModal();
+  renderTeamSharingIssuedToken(null, '');
+  ui.backdrop.classList.add('open');
+  await loadTeamSharingStatus({ force: true, syncModal: true });
+}
+
+async function saveTeamSharingConfigFromModal() {
+  const ui = ensureTeamSharingModal();
+  if (teamSharingRuntime.saving) return;
+  const body = {
+    enabled: Boolean(ui.enabled.checked),
+    publicBaseUrl: String(ui.publicBaseUrl.value || '').trim(),
+    memberDefaultRatePerMin: Math.max(10, Math.min(5000, Number(ui.defaultRate.value || 120) || 120))
+  };
+
+  teamSharingRuntime.saving = true;
+  setToolUiStatus(ui.status, '保存中...', '');
+  try {
+    const resp = await apiRequest('/api/team-sharing/config', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    teamSharingRuntime.data = (resp && resp.status) || teamSharingRuntime.data;
+    if (teamSharingRuntime.data) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    refreshTeamSharingLauncherSummary();
+    setToolUiStatus(ui.status, '设置已保存', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `保存失败：${error.message || error}`, 'error');
+  } finally {
+    teamSharingRuntime.saving = false;
+  }
+}
+
+async function createTeamSharingMemberFromModal() {
+  const ui = ensureTeamSharingModal();
+  if (teamSharingRuntime.saving) return;
+  const defaultRate = Number(ui.defaultRate.value || 120) || 120;
+  const body = {
+    name: String(ui.memberName.value || '').trim(),
+    rateLimitPerMin: Math.max(10, Math.min(5000, Number(ui.memberRate.value || defaultRate) || defaultRate))
+  };
+
+  teamSharingRuntime.saving = true;
+  setToolUiStatus(ui.status, '创建成员中...', '');
+  try {
+    const resp = await apiRequest('/api/team-sharing/members', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    teamSharingRuntime.data = (resp && resp.status) || teamSharingRuntime.data;
+    if (teamSharingRuntime.data) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    refreshTeamSharingLauncherSummary();
+
+    ui.memberName.value = '';
+    ui.memberRate.value = '';
+    renderTeamSharingIssuedToken(resp && resp.member, resp && resp.token);
+    setToolUiStatus(ui.status, '成员已创建，Token 已生成（请及时保存）', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `创建成员失败：${error.message || error}`, 'error');
+  } finally {
+    teamSharingRuntime.saving = false;
+  }
+}
+
+async function updateTeamSharingMember(memberId, patch, opts = {}) {
+  const ui = ensureTeamSharingModal();
+  if (!memberId) return;
+  setToolUiStatus(ui.status, '保存成员中...', '');
+  try {
+    const resp = await apiRequest(`/api/team-sharing/members/${encodeURIComponent(memberId)}`, {
+      method: 'POST',
+      body: JSON.stringify(patch || {})
+    });
+    teamSharingRuntime.data = (resp && resp.status) || teamSharingRuntime.data;
+    if (teamSharingRuntime.data) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    refreshTeamSharingLauncherSummary();
+    setToolUiStatus(ui.status, opts.okMessage || '成员已保存', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `操作失败：${error.message || error}`, 'error');
+  }
+}
+
+async function updateTeamSharingMemberFromCard(memberId, card) {
+  if (!card) return;
+  const nameInput = card.querySelector('input[data-field="name"]');
+  const rateInput = card.querySelector('input[data-field="rate"]');
+  const name = String(nameInput && nameInput.value || '').trim();
+  const rate = Math.max(10, Math.min(5000, Number(rateInput && rateInput.value || 120) || 120));
+  await updateTeamSharingMember(memberId, { name, rateLimitPerMin: rate }, { okMessage: '成员信息已保存' });
+}
+
+async function resetTeamSharingMemberToken(memberId) {
+  const ui = ensureTeamSharingModal();
+  setToolUiStatus(ui.status, '重置 Token 中...', '');
+  try {
+    const resp = await apiRequest(`/api/team-sharing/members/${encodeURIComponent(memberId)}/reset-token`, {
+      method: 'POST',
+      body: '{}'
+    });
+    teamSharingRuntime.data = (resp && resp.status) || teamSharingRuntime.data;
+    if (teamSharingRuntime.data) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    refreshTeamSharingLauncherSummary();
+    renderTeamSharingIssuedToken(resp && resp.member, resp && resp.token);
+    setToolUiStatus(ui.status, 'Token 已重置（请及时保存新 Token）', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `重置 Token 失败：${error.message || error}`, 'error');
+  }
+}
+
+async function deleteTeamSharingMember(memberId) {
+  const ui = ensureTeamSharingModal();
+  setToolUiStatus(ui.status, '删除成员中...', '');
+  try {
+    const resp = await apiRequest(`/api/team-sharing/members/${encodeURIComponent(memberId)}`, {
+      method: 'DELETE'
+    });
+    teamSharingRuntime.data = (resp && resp.status) || teamSharingRuntime.data;
+    if (teamSharingRuntime.data) fillTeamSharingModalFromData(teamSharingRuntime.data);
+    if (teamSharingRuntime.lastIssuedMemberId === memberId) renderTeamSharingIssuedToken(null, '');
+    refreshTeamSharingLauncherSummary();
+    setToolUiStatus(ui.status, '成员已删除', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `删除失败：${error.message || error}`, 'error');
+  }
+}
+
 function getMcpSettingsSection() {
   return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="mcp"]') : null;
 }
@@ -4994,12 +5672,14 @@ async function openSettingsSection(section) {
     await openSettingsPanel();
   }
   if (!els.settingsPanel) return;
+  if (section === 'team-sharing') ensureTeamSharingSettingsSection();
   els.settingsPanel.querySelectorAll('.settings-nav-item').forEach((b) => b.classList.remove('active'));
   const nav = els.settingsPanel.querySelector(`.settings-nav-item[data-section="${CSS.escape(section)}"]`);
   if (nav) nav.classList.add('active');
   els.settingsPanel.querySelectorAll('.settings-section').forEach((s) => {
     s.classList.toggle('hidden', s.dataset.section !== section);
   });
+  if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
 }
 
 function ensureMcpCatalogLauncher() {

@@ -37,6 +37,7 @@ const KB_EMBED_QUERY_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.KB_EMBED_Q
 const KB_EMBED_VECTOR_WEIGHT = Math.max(0, Number(process.env.KB_EMBED_VECTOR_WEIGHT || 2.2));
 const KB_EMBED_VECTOR_MIN_SCORE = Math.max(-1, Math.min(1, Number(process.env.KB_EMBED_VECTOR_MIN_SCORE || 0.15)));
 const KB_EMBED_BATCH_SIZE = Math.max(1, Math.min(64, Number(process.env.KB_EMBED_BATCH_SIZE || 16)));
+const TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT = Math.max(10, Number(process.env.TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT || 120));
 const CHAT_THINK = process.env.CHAT_THINK !== '0';
 const CHAT_CTX_LIMIT = Number(process.env.CHAT_CTX_LIMIT || 3000);
 const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT || 8);
@@ -80,6 +81,13 @@ const PRESET_MCP_SERVERS = [
   { key: 'mcp-sequentialthinking', name: '深度推理', command: 'npx', args: ['-y', '@modelcontextprotocol/server-sequential-thinking'], icon: '🔗', desc: '分步推理复杂问题' }
 ];
 
+const TEAM_SHARING_DEFAULTS = Object.freeze({
+  enabled: false,
+  publicBaseUrl: '',
+  memberDefaultRatePerMin: TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT,
+  members: []
+});
+
 function migrateProvider(p) {
   if (typeof p.model === 'string' && !Array.isArray(p.models)) {
     p.models = p.model ? [p.model] : [];
@@ -101,7 +109,8 @@ function loadAppConfig() {
         providers: parsed.providers,
         activeProviderId: parsed.activeProviderId || parsed.providers[0]?.id || 'ollama-default',
         mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : [],
-        knowledgeBases: Array.isArray(parsed.knowledgeBases) ? parsed.knowledgeBases : []
+        knowledgeBases: Array.isArray(parsed.knowledgeBases) ? parsed.knowledgeBases : [],
+        teamSharing: normalizeTeamSharingConfig(parsed.teamSharing || {})
       };
     }
     // migrate old single-provider config
@@ -115,10 +124,10 @@ function loadAppConfig() {
       });
       const providers = [defaultOllamaProvider()];
       if (old.type === 'openai_compatible') providers.push(migrated);
-      return { providers, activeProviderId: migrated.id, mcpServers: [], knowledgeBases: [] };
+      return { providers, activeProviderId: migrated.id, mcpServers: [], knowledgeBases: [], teamSharing: normalizeTeamSharingConfig({}) };
     }
   } catch {}
-  return { providers: [defaultOllamaProvider()], activeProviderId: 'ollama-default', mcpServers: [], knowledgeBases: [] };
+  return { providers: [defaultOllamaProvider()], activeProviderId: 'ollama-default', mcpServers: [], knowledgeBases: [], teamSharing: normalizeTeamSharingConfig({}) };
 }
 
 function saveAppConfig() {
@@ -168,6 +177,8 @@ const translateResultCache = new Map();
 const translateInFlight = new Map();
 const kbEmbedQueryCache = new Map();
 const kbEmbedQueryInFlight = new Map();
+const teamShareMemberRateStore = new Map();
+const teamShareUsageStore = new Map();
 const requestContextStore = new AsyncLocalStorage();
 const proxyDispatcherCache = new Map();
 let undiciProxyAgentCtor = undefined;
@@ -180,6 +191,48 @@ function loadUndiciProxyAgentCtor() {
     undiciProxyAgentCtor = null;
   }
   return undiciProxyAgentCtor;
+}
+
+function clampTeamShareMemberRate(v, fallback = TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(10, Math.min(5000, Math.round(n)));
+}
+
+function normalizeTeamSharingMember(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const id = String(src.id || '').trim();
+  const tokenHash = String(src.tokenHash || '').trim();
+  if (!id || !tokenHash) return null;
+  return {
+    id: id.slice(0, 64),
+    name: String(src.name || 'Member').trim().slice(0, 80) || 'Member',
+    tokenHash: tokenHash.slice(0, 200),
+    tokenPreview: String(src.tokenPreview || '').trim().slice(0, 24),
+    enabled: src.enabled !== false,
+    rateLimitPerMin: clampTeamShareMemberRate(src.rateLimitPerMin, TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT),
+    createdAt: Number(src.createdAt) || Date.now(),
+    updatedAt: Number(src.updatedAt) || Date.now(),
+    lastUsedAt: Number(src.lastUsedAt) || 0
+  };
+}
+
+function normalizeTeamSharingConfig(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const members = Array.isArray(src.members)
+    ? src.members.map(normalizeTeamSharingMember).filter(Boolean)
+    : [];
+  return {
+    enabled: Boolean(src.enabled),
+    publicBaseUrl: String(src.publicBaseUrl || '').trim().slice(0, 500),
+    memberDefaultRatePerMin: clampTeamShareMemberRate(src.memberDefaultRatePerMin, TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT),
+    members
+  };
+}
+
+function ensureTeamSharingConfig() {
+  appConfig.teamSharing = normalizeTeamSharingConfig(appConfig.teamSharing || {});
+  return appConfig.teamSharing;
 }
 
 function safeJsonParse(text) {
@@ -361,22 +414,43 @@ app.use('/api', (req, res, next) => {
 });
 
 app.use('/api', (req, res, next) => {
-  if (!ACCESS_TOKEN) return next();
-
   const headerToken = req.get('x-access-token');
   const bearer = req.get('authorization');
   const bearerToken = bearer && bearer.toLowerCase().startsWith('bearer ')
     ? bearer.slice(7).trim()
     : '';
   const token = headerToken || bearerToken;
+  req.authRole = 'anonymous';
+  req.teamSharingMemberId = '';
+  req.teamSharingMemberName = '';
 
-  if (token !== ACCESS_TOKEN) {
-    return res.status(401).json({
-      error: 'Unauthorized',
-      message: '访问口令错误或缺失。'
-    });
+  if (ACCESS_TOKEN && token === ACCESS_TOKEN) {
+    req.authRole = 'admin';
+    return next();
   }
-  next();
+
+  const teamMember = findTeamSharingMemberByToken(token);
+  if (teamMember) {
+    if (!isTeamSharingAllowedApiRoute(req)) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'This team sharing token is not allowed to access this API route.'
+      });
+    }
+    if (!enforceTeamSharingMemberRateLimit(req, res, teamMember)) return;
+    req.authRole = 'team_member';
+    req.teamSharingMemberId = teamMember.id;
+    req.teamSharingMemberName = teamMember.name;
+    touchTeamSharingMemberUsage(teamMember, req);
+    return next();
+  }
+
+  if (!ACCESS_TOKEN) return next();
+
+  return res.status(401).json({
+    error: 'Unauthorized',
+    message: 'Unauthorized: invalid or missing access token.'
+  });
 });
 
 app.get('/api/info', (req, res) => {
@@ -398,6 +472,8 @@ app.get('/api/info', (req, res) => {
     translateRateLimitPerMin: RATE_LIMIT_TRANSLATE_PER_MIN,
     rateLimitWindowMs: RATE_LIMIT_WINDOW_MS,
     rateLimitUsesClientId: RATE_LIMIT_TRUST_CLIENT_ID,
+    teamSharingEnabled: Boolean(ensureTeamSharingConfig().enabled),
+    teamSharingMemberCount: Array.isArray(ensureTeamSharingConfig().members) ? ensureTeamSharingConfig().members.length : 0,
     minChineseChars: MIN_CN_CHARS
   });
 });
@@ -429,6 +505,273 @@ app.get('/api/health', async (req, res) => {
 });
 
 // ── Multi-provider CRUD ──
+
+app.get('/api/team-sharing/status', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  res.json(buildTeamSharingStatusPayload());
+});
+
+app.post('/api/team-sharing/config', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const body = req.body || {};
+  const cfg = ensureTeamSharingConfig();
+
+  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+    const nextEnabled = Boolean(body.enabled);
+    if (nextEnabled && !ACCESS_TOKEN) {
+      return res.status(400).json({
+        error: 'AccessTokenRequired',
+        message: '启用 Team Sharing 前请先配置 ACCESS_TOKEN（避免管理接口暴露）。'
+      });
+    }
+    cfg.enabled = nextEnabled;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'publicBaseUrl')) {
+    const raw = String(body.publicBaseUrl || '').trim();
+    if (raw && !/^https?:\/\/.+/i.test(raw)) {
+      return res.status(400).json({
+        error: 'BadRequest',
+        message: 'publicBaseUrl 必须以 http:// 或 https:// 开头。'
+      });
+    }
+    cfg.publicBaseUrl = raw.replace(/\/+$/, '').slice(0, 500);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'memberDefaultRatePerMin')) {
+    cfg.memberDefaultRatePerMin = clampTeamShareMemberRate(body.memberDefaultRatePerMin, cfg.memberDefaultRatePerMin);
+  }
+
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'SaveFailed', message: '保存 Team Sharing 配置失败。' });
+  }
+  res.json({ ok: true, status: buildTeamSharingStatusPayload() });
+});
+
+app.post('/api/team-sharing/members', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const cfg = ensureTeamSharingConfig();
+  const body = req.body || {};
+  const name = String(body.name || '').trim() || `Member ${cfg.members.length + 1}`;
+  const token = generateTeamSharingToken();
+  const now = Date.now();
+  const member = normalizeTeamSharingMember({
+    id: `tm_${now.toString(36)}_${crypto.randomBytes(4).toString('hex')}`,
+    name: name.slice(0, 80),
+    tokenHash: stableSha256(token),
+    tokenPreview: tokenPreview(token),
+    enabled: body.enabled !== false,
+    rateLimitPerMin: clampTeamShareMemberRate(body.rateLimitPerMin, cfg.memberDefaultRatePerMin || TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT),
+    createdAt: now,
+    updatedAt: now,
+    lastUsedAt: 0
+  });
+
+  if (!member) {
+    return res.status(500).json({ error: 'CreateFailed', message: '创建 Team Sharing 成员失败。' });
+  }
+  cfg.members.push(member);
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'SaveFailed', message: '保存 Team Sharing 成员失败。' });
+  }
+  res.json({
+    ok: true,
+    member: sanitizeTeamSharingMember(member),
+    token,
+    tokenPreview: member.tokenPreview || tokenPreview(token),
+    status: buildTeamSharingStatusPayload()
+  });
+});
+
+app.post('/api/team-sharing/members/:id', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const member = findTeamSharingMemberById(req.params.id);
+  if (!member) {
+    return res.status(404).json({ error: 'NotFound', message: '未找到 Team Sharing 成员。' });
+  }
+  const body = req.body || {};
+  if (Object.prototype.hasOwnProperty.call(body, 'name')) {
+    member.name = String(body.name || '').trim().slice(0, 80) || member.name;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+    member.enabled = Boolean(body.enabled);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'rateLimitPerMin')) {
+    member.rateLimitPerMin = clampTeamShareMemberRate(body.rateLimitPerMin, member.rateLimitPerMin);
+  }
+  member.updatedAt = Date.now();
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'SaveFailed', message: '保存 Team Sharing 成员失败。' });
+  }
+  res.json({ ok: true, member: sanitizeTeamSharingMember(member), status: buildTeamSharingStatusPayload() });
+});
+
+app.post('/api/team-sharing/members/:id/reset-token', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const member = findTeamSharingMemberById(req.params.id);
+  if (!member) {
+    return res.status(404).json({ error: 'NotFound', message: '未找到 Team Sharing 成员。' });
+  }
+  const token = generateTeamSharingToken();
+  member.tokenHash = stableSha256(token);
+  member.tokenPreview = tokenPreview(token);
+  member.updatedAt = Date.now();
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'SaveFailed', message: '重置 Team Sharing Token 失败。' });
+  }
+  res.json({
+    ok: true,
+    member: sanitizeTeamSharingMember(member),
+    token,
+    tokenPreview: member.tokenPreview || tokenPreview(token),
+    status: buildTeamSharingStatusPayload()
+  });
+});
+
+app.delete('/api/team-sharing/members/:id', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const cfg = ensureTeamSharingConfig();
+  const memberId = String(req.params.id || '').trim();
+  const idx = cfg.members.findIndex((m) => m.id === memberId);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'NotFound', message: '未找到 Team Sharing 成员。' });
+  }
+  cfg.members.splice(idx, 1);
+  teamShareUsageStore.delete(memberId);
+  teamShareMemberRateStore.delete(`ts:${memberId}`);
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'SaveFailed', message: '删除 Team Sharing 成员失败。' });
+  }
+  res.json({ ok: true, status: buildTeamSharingStatusPayload() });
+});
+
+app.get('/api/team-sharing/openai/v1/models', async (req, res) => {
+  try {
+    const data = listRelayModels();
+    res.json({ object: 'list', data });
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        message: error.message || String(error),
+        type: 'server_error'
+      }
+    });
+  }
+});
+
+app.post('/api/team-sharing/openai/v1/chat/completions', async (req, res) => {
+  try {
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+    const messages = normalizeRelayOpenAIMessages(body.messages);
+    if (!messages.length) {
+      return res.status(400).json({
+        error: { message: 'messages is required', type: 'invalid_request_error' }
+      });
+    }
+
+    if (Array.isArray(body.tools) && body.tools.length) {
+      return res.status(400).json({
+        error: {
+          message: 'tools/tool calls are not supported in Team Sharing OpenAI relay MVP yet',
+          type: 'invalid_request_error'
+        }
+      });
+    }
+
+    const resolved = resolveRelayProviderAndModel({
+      providerId: body.providerId || req.query.providerId || '',
+      model: body.model || ''
+    });
+    if (!resolved.ok) {
+      return res.status(400).json({
+        error: { message: resolved.message || 'provider resolution failed', type: 'invalid_request_error' }
+      });
+    }
+
+    if (body.stream === true) {
+      await relayChatCompletionStream(req, res, messages, body, resolved.provider, resolved.model);
+      return;
+    }
+
+    const payload = await relayChatCompletionNonStream(messages, body, resolved.provider, resolved.model);
+    if (!payload.object) payload.object = 'chat.completion';
+    if (!payload.model) payload.model = resolved.model;
+    res.json(payload);
+  } catch (error) {
+    if (res.headersSent) {
+      try {
+        res.write(`data: ${JSON.stringify({ error: { message: error.message || String(error), type: 'server_error' } })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch (_) {}
+      return;
+    }
+    res.status(500).json({
+      error: {
+        message: error.message || String(error),
+        type: 'server_error'
+      }
+    });
+  }
+});
+
+app.post('/api/team-sharing/openai/v1/embeddings', async (req, res) => {
+  try {
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+    const inputRaw = body.input;
+    const inputs = Array.isArray(inputRaw) ? inputRaw : [inputRaw];
+    const texts = inputs.map((v) => String(v == null ? '' : v).trim()).filter(Boolean);
+    if (!texts.length) {
+      return res.status(400).json({
+        error: { message: 'input is required', type: 'invalid_request_error' }
+      });
+    }
+
+    const resolved = resolveRelayProviderAndModel({
+      providerId: body.providerId || req.query.providerId || '',
+      model: body.model || ''
+    });
+    if (!resolved.ok) {
+      return res.status(400).json({
+        error: { message: resolved.message || 'provider resolution failed', type: 'invalid_request_error' }
+      });
+    }
+
+    let vectors;
+    if (resolved.provider.type === 'openai_compatible') {
+      vectors = await openaiEmbedTexts(texts, resolved.provider, resolved.model);
+    } else if (resolved.provider.type === 'ollama') {
+      vectors = await ollamaEmbedTexts(texts, resolved.model);
+    } else {
+      return res.status(400).json({
+        error: { message: 'Anthropic provider does not support embeddings in this relay', type: 'invalid_request_error' }
+      });
+    }
+
+    const data = vectors.map((embedding, index) => ({
+      object: 'embedding',
+      index,
+      embedding
+    }));
+    res.json({
+      object: 'list',
+      id: relayEmbeddingId(),
+      data,
+      model: resolved.model,
+      usage: {
+        prompt_tokens: texts.reduce((sum, t) => sum + estimateTokenCountLoose(t), 0),
+        total_tokens: texts.reduce((sum, t) => sum + estimateTokenCountLoose(t), 0)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        message: error.message || String(error),
+        type: 'server_error'
+      }
+    });
+  }
+});
 
 app.get('/api/preset-providers', (req, res) => {
   res.json({ presets: PRESET_PROVIDERS });
@@ -2572,6 +2915,539 @@ function getRateLimitBucketKey(req, ip) {
 
 function stableSha1(text) {
   return crypto.createHash('sha1').update(String(text || ''), 'utf8').digest('hex');
+}
+
+function stableSha256(text) {
+  return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
+}
+
+function generateTeamSharingToken() {
+  return `ets_${Date.now().toString(36)}_${crypto.randomBytes(18).toString('hex')}`;
+}
+
+function tokenPreview(token) {
+  const t = String(token || '').trim();
+  if (!t) return '';
+  if (t.length <= 10) return t;
+  return `${t.slice(0, 6)}...${t.slice(-4)}`;
+}
+
+function getTeamSharingPublicBaseUrl() {
+  const cfg = ensureTeamSharingConfig();
+  if (cfg.publicBaseUrl) return cfg.publicBaseUrl;
+  const host = SHARE_MODE ? (HOST === '0.0.0.0' ? 'YOUR_HOST' : HOST) : '127.0.0.1';
+  return `http://${host}:${PORT}`;
+}
+
+function sanitizeTeamSharingMember(member) {
+  if (!member || typeof member !== 'object') return null;
+  const usage = teamShareUsageStore.get(member.id) || {};
+  return {
+    id: member.id,
+    name: member.name,
+    enabled: member.enabled !== false,
+    tokenPreview: String(member.tokenPreview || ''),
+    rateLimitPerMin: clampTeamShareMemberRate(member.rateLimitPerMin, TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT),
+    createdAt: Number(member.createdAt) || 0,
+    updatedAt: Number(member.updatedAt) || 0,
+    lastUsedAt: Number(member.lastUsedAt) || 0,
+    usage: {
+      requests: Number(usage.requests || 0) || 0,
+      chats: Number(usage.chats || 0) || 0,
+      translates: Number(usage.translates || 0) || 0,
+      lastPath: String(usage.lastPath || ''),
+      lastMethod: String(usage.lastMethod || '')
+    }
+  };
+}
+
+function findTeamSharingMemberByToken(rawToken) {
+  const cfg = ensureTeamSharingConfig();
+  if (!cfg.enabled) return null;
+  const token = String(rawToken || '').trim();
+  if (!token) return null;
+  const hash = stableSha256(token);
+  return cfg.members.find((m) => m.enabled !== false && m.tokenHash === hash) || null;
+}
+
+function isTeamSharingAllowedApiRoute(req) {
+  const method = String(req.method || 'GET').toUpperCase();
+  const apiPath = String(req.path || '');
+  if (!apiPath.startsWith('/')) return false;
+  if (apiPath.startsWith('/team-sharing/openai/v1/')) {
+    if (method === 'GET' && apiPath === '/team-sharing/openai/v1/models') return true;
+    if (method === 'POST' && apiPath === '/team-sharing/openai/v1/chat/completions') return true;
+    if (method === 'POST' && apiPath === '/team-sharing/openai/v1/embeddings') return true;
+    return false;
+  }
+  if (apiPath.startsWith('/team-sharing')) return false;
+
+  if (method === 'GET' && ['/info', '/health', '/qrcode', '/providers', '/mcp-servers', '/mcp-tools', '/knowledge-bases'].includes(apiPath)) return true;
+  if (method === 'GET' && apiPath === '/preset-mcp-servers') return true;
+  if (method === 'POST' && ['/chat', '/translate', '/search'].includes(apiPath)) return true;
+
+  return false;
+}
+
+function touchTeamSharingMemberUsage(member, req) {
+  if (!member || !req) return;
+  const current = teamShareUsageStore.get(member.id) || { requests: 0, chats: 0, translates: 0, lastPath: '', lastMethod: '' };
+  current.requests += 1;
+  if (req.path === '/chat') current.chats += 1;
+  if (req.path === '/translate') current.translates += 1;
+  current.lastPath = String(req.path || '');
+  current.lastMethod = String(req.method || 'GET').toUpperCase();
+  teamShareUsageStore.set(member.id, current);
+  member.lastUsedAt = Date.now();
+}
+
+function enforceTeamSharingMemberRateLimit(req, res, member) {
+  const limit = clampTeamShareMemberRate(member?.rateLimitPerMin, TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT);
+  if (!(limit > 0)) return true;
+  const now = Date.now();
+  const key = `ts:${member.id}`;
+  const item = teamShareMemberRateStore.get(key) || { windowStart: now, count: 0 };
+
+  if (now - item.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    item.windowStart = now;
+    item.count = 0;
+  }
+
+  item.count += 1;
+  teamShareMemberRateStore.set(key, item);
+
+  if (item.count > limit) {
+    const retryAfterMs = Math.max(250, item.windowStart + RATE_LIMIT_WINDOW_MS - now);
+    res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+    res.status(429).json({
+      error: 'TeamShareRateLimited',
+      message: `Team sharing token rate limit exceeded (${Math.round(RATE_LIMIT_WINDOW_MS / 1000)}s / ${limit} requests).`,
+      retryAfterMs,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      limit
+    });
+    return false;
+  }
+  return true;
+}
+
+function buildTeamSharingStatusPayload() {
+  const cfg = ensureTeamSharingConfig();
+  return {
+    enabled: cfg.enabled,
+    publicBaseUrl: cfg.publicBaseUrl,
+    effectiveBaseUrl: getTeamSharingPublicBaseUrl(),
+    memberDefaultRatePerMin: cfg.memberDefaultRatePerMin,
+    accessTokenConfigured: Boolean(ACCESS_TOKEN),
+    shareMode: SHARE_MODE,
+    allowPublic: ALLOW_PUBLIC,
+    warning: !ACCESS_TOKEN
+      ? '建议配置 ACCESS_TOKEN 后再开启团队共享，以避免管理员权限暴露。'
+      : '',
+    members: cfg.members.map(sanitizeTeamSharingMember).filter(Boolean)
+  };
+}
+
+function requireAdminManagementRequest(req, res) {
+  if (!ACCESS_TOKEN) return true;
+  if (req && req.authRole === 'admin') return true;
+  res.status(403).json({
+    error: 'Forbidden',
+    message: 'Admin access token required.'
+  });
+  return false;
+}
+
+function findTeamSharingMemberById(id) {
+  const cfg = ensureTeamSharingConfig();
+  const memberId = String(id || '').trim();
+  if (!memberId) return null;
+  return cfg.members.find((m) => m.id === memberId) || null;
+}
+
+function normalizeRelayOpenAIMessages(rawMessages) {
+  if (!Array.isArray(rawMessages)) return [];
+  const out = [];
+  for (const raw of rawMessages) {
+    if (!raw || typeof raw !== 'object') continue;
+    const role = String(raw.role || '').trim() || 'user';
+    let content = '';
+    if (typeof raw.content === 'string') {
+      content = raw.content;
+    } else if (Array.isArray(raw.content)) {
+      const parts = [];
+      for (const item of raw.content) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.type === 'text' && typeof item.text === 'string') parts.push(item.text);
+        else if (item.type === 'input_text' && typeof item.text === 'string') parts.push(item.text);
+        else if (typeof item.content === 'string') parts.push(item.content);
+      }
+      content = parts.join('\n').trim();
+    } else if (raw.content != null) {
+      content = String(raw.content);
+    }
+    if (!content && role !== 'system') continue;
+
+    const msg = { role, content };
+    if (raw.name) msg.name = String(raw.name);
+    if (raw.tool_call_id) msg.tool_call_id = String(raw.tool_call_id);
+    out.push(msg);
+  }
+  return out;
+}
+
+function estimateTokenCountLoose(text) {
+  const s = String(text || '');
+  if (!s) return 0;
+  return Math.max(1, Math.round(s.length / 4));
+}
+
+function relayCompletionId() {
+  return `chatcmpl_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+function relayEmbeddingId() {
+  return `embed_${Date.now().toString(36)}_${crypto.randomBytes(5).toString('hex')}`;
+}
+
+function getEnabledProviders() {
+  return (appConfig.providers || []).filter((p) => p && p.enabled !== false);
+}
+
+function resolveRelayProviderAndModel({ providerId, model } = {}) {
+  const requestedProviderId = String(providerId || '').trim();
+  const requestedModel = String(model || '').trim();
+  const enabledProviders = getEnabledProviders();
+
+  if (requestedProviderId) {
+    const provider = getProvider(requestedProviderId);
+    if (!provider) return { ok: false, message: 'providerId not found' };
+    if (provider.enabled === false) return { ok: false, message: 'provider is disabled' };
+    const resolvedModel = requestedModel || (provider.models && provider.models[0]) || OLLAMA_MODEL;
+    return { ok: true, provider, model: resolvedModel };
+  }
+
+  if (requestedModel) {
+    const exact = enabledProviders.find((p) => Array.isArray(p.models) && p.models.includes(requestedModel));
+    if (exact) return { ok: true, provider: exact, model: requestedModel };
+
+    const byAvailable = enabledProviders.find((p) => Array.isArray(p.availableModels) && p.availableModels.some((m) => (m && (m.id || m.name)) === requestedModel));
+    if (byAvailable) return { ok: true, provider: byAvailable, model: requestedModel };
+
+    const anyOllama = enabledProviders.find((p) => p.type === 'ollama');
+    if (anyOllama) return { ok: true, provider: anyOllama, model: requestedModel };
+  }
+
+  const active = getActiveProvider();
+  if (active && active.enabled !== false) {
+    return { ok: true, provider: active, model: requestedModel || (active.models && active.models[0]) || OLLAMA_MODEL };
+  }
+  const fallback = enabledProviders[0];
+  if (!fallback) return { ok: false, message: 'no enabled provider available' };
+  return { ok: true, provider: fallback, model: requestedModel || (fallback.models && fallback.models[0]) || OLLAMA_MODEL };
+}
+
+function listRelayModels() {
+  const models = [];
+  const seen = new Set();
+  for (const p of getEnabledProviders()) {
+    const ids = new Set();
+    (Array.isArray(p.models) ? p.models : []).forEach((m) => { if (m) ids.add(String(m)); });
+    (Array.isArray(p.availableModels) ? p.availableModels : []).forEach((m) => {
+      const id = m && (m.id || m.name);
+      if (id) ids.add(String(id));
+    });
+    if (p.type === 'ollama' && ids.size === 0) ids.add((p.models && p.models[0]) || OLLAMA_MODEL);
+    for (const id of ids) {
+      const key = `${p.id}::${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      models.push({
+        id,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: p.name || p.id,
+        provider_id: p.id,
+        provider_type: p.type
+      });
+    }
+  }
+  return models;
+}
+
+async function relayOpenAICompatibleNonStream(messages, body, provider, model) {
+  const reqBody = {
+    model,
+    messages,
+    stream: false
+  };
+  if (Array.isArray(body.tools)) reqBody.tools = body.tools;
+  if (typeof body.tool_choice !== 'undefined') reqBody.tool_choice = body.tool_choice;
+  if (Number.isFinite(body.temperature)) reqBody.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
+  if (Number.isFinite(body.top_p)) reqBody.top_p = Math.max(0.1, Math.min(1, Number(body.top_p)));
+  if (Number.isFinite(body.max_tokens)) reqBody.max_tokens = Math.max(1, Math.round(Number(body.max_tokens)));
+
+  const resp = await fetchRuntime(`${provider.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify(reqBody)
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`OpenAI relay upstream failed: HTTP ${resp.status} ${text.slice(0, 300)}`);
+  }
+  return resp.json();
+}
+
+async function relayAnthropicNonStream(messages, body, provider, model) {
+  let systemText = '';
+  const apiMessages = [];
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemText += (systemText ? '\n\n' : '') + String(msg.content || '');
+    } else if (msg.role === 'tool') {
+      // team-sharing relay MVP does not support tool_result schema conversion
+      continue;
+    } else {
+      apiMessages.push({ role: msg.role, content: String(msg.content || '') });
+    }
+  }
+  const maxTokens = Number.isFinite(body.max_tokens) ? Math.max(1, Math.round(Number(body.max_tokens))) : (provider.maxTokens || 4096);
+  const reqBody = {
+    model,
+    max_tokens: maxTokens,
+    messages: apiMessages
+  };
+  if (systemText) reqBody.system = systemText;
+  if (Number.isFinite(body.temperature)) reqBody.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
+  if (Number.isFinite(body.top_p)) reqBody.top_p = Math.max(0.1, Math.min(1, Number(body.top_p)));
+
+  const resp = await fetchRuntime(`${provider.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': provider.apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify(reqBody)
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Anthropic relay upstream failed: HTTP ${resp.status} ${text.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  const content = Array.isArray(data.content)
+    ? data.content.filter((b) => b && b.type === 'text').map((b) => String(b.text || '')).join('')
+    : '';
+  return {
+    id: relayCompletionId(),
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content },
+        finish_reason: data.stop_reason || 'stop'
+      }
+    ],
+    usage: {
+      prompt_tokens: Number(data.usage?.input_tokens || 0) || 0,
+      completion_tokens: Number(data.usage?.output_tokens || 0) || 0,
+      total_tokens: (Number(data.usage?.input_tokens || 0) || 0) + (Number(data.usage?.output_tokens || 0) || 0)
+    }
+  };
+}
+
+async function relayOllamaNonStream(messages, body, model) {
+  const options = {};
+  if (Number.isFinite(body.temperature)) options.temperature = Math.max(0, Math.min(2, Number(body.temperature)));
+  if (Number.isFinite(body.top_p)) options.top_p = Math.max(0.1, Math.min(1, Number(body.top_p)));
+  if (Number.isFinite(body.max_tokens)) options.num_predict = Math.max(1, Math.round(Number(body.max_tokens)));
+
+  const resp = await fetchRuntime(`${OLLAMA_BASE_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages,
+      stream: false,
+      options
+    })
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Ollama relay upstream failed: HTTP ${resp.status} ${text.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  const content = String(data.message?.content || '');
+  const promptText = messages.map((m) => `${m.role}: ${m.content || ''}`).join('\n');
+  return {
+    id: relayCompletionId(),
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content },
+        finish_reason: data.done ? 'stop' : null
+      }
+    ],
+    usage: {
+      prompt_tokens: estimateTokenCountLoose(promptText),
+      completion_tokens: estimateTokenCountLoose(content),
+      total_tokens: estimateTokenCountLoose(promptText) + estimateTokenCountLoose(content)
+    }
+  };
+}
+
+async function relayChatCompletionNonStream(messages, body, provider, model) {
+  if (isOpenAI(provider)) return relayOpenAICompatibleNonStream(messages, body, provider, model);
+  if (isAnthropic(provider)) return relayAnthropicNonStream(messages, body, provider, model);
+  return relayOllamaNonStream(messages, body, model);
+}
+
+function writeOpenAIRelayChunk(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+async function relayChatCompletionStream(req, res, messages, body, provider, model) {
+  const streamId = relayCompletionId();
+  const created = Math.floor(Date.now() / 1000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OLLAMA_CHAT_TIMEOUT_MS);
+  req.on('aborted', () => { controller.abort(); clearTimeout(timer); });
+  res.on('close', () => { if (!res.writableEnded) controller.abort(); clearTimeout(timer); });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const streamResult = await llmChatStream(messages, {
+    temperature: Number.isFinite(body.temperature) ? Math.max(0, Math.min(2, Number(body.temperature))) : undefined,
+    topP: Number.isFinite(body.top_p) ? Math.max(0.1, Math.min(1, Number(body.top_p))) : undefined,
+    maxTokens: Number.isFinite(body.max_tokens) ? Math.max(1, Math.round(Number(body.max_tokens))) : undefined,
+    numPredict: Number.isFinite(body.max_tokens) ? Math.max(1, Math.round(Number(body.max_tokens))) : undefined
+  }, controller.signal, provider, model);
+
+  writeOpenAIRelayChunk(res, {
+    id: streamId,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+  });
+
+  const reader = streamResult.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let doneSent = false;
+  const emitContent = (text) => {
+    const t = String(text || '');
+    if (!t) return;
+    writeOpenAIRelayChunk(res, {
+      id: streamId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { content: t }, finish_reason: null }]
+    });
+  };
+  const emitDone = () => {
+    if (doneSent) return;
+    doneSent = true;
+    writeOpenAIRelayChunk(res, {
+      id: streamId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+    });
+    res.write('data: [DONE]\n\n');
+  };
+
+  try {
+    if (streamResult.format === 'anthropic') {
+      let currentEvent = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+          if (!line.startsWith('data: ')) continue;
+          const dataText = line.slice(6).trim();
+          if (!dataText) continue;
+          try {
+            const chunk = JSON.parse(dataText);
+            if (currentEvent === 'content_block_delta') {
+              const delta = chunk.delta || {};
+              if (delta.type === 'text_delta' && delta.text) emitContent(delta.text);
+            } else if (currentEvent === 'message_stop') {
+              emitDone();
+            }
+          } catch {}
+        }
+      }
+    } else if (streamResult.format === 'openai') {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const dataText = line.slice(6).trim();
+          if (!dataText) continue;
+          if (dataText === '[DONE]') {
+            emitDone();
+            continue;
+          }
+          try {
+            const chunk = JSON.parse(dataText);
+            const delta = chunk.choices?.[0]?.delta || {};
+            if (delta.content) emitContent(delta.content);
+            if (chunk.choices?.[0]?.finish_reason) emitDone();
+          } catch {}
+        }
+      }
+    } else {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const chunk = JSON.parse(line);
+            if (chunk.message?.content) {
+              const text = normalizeChatChunk(String(chunk.message.content || '').replace(/<think>|<\/think>/g, ''));
+              if (text) emitContent(text);
+            }
+            if (chunk.done) emitDone();
+          } catch {}
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!doneSent) emitDone();
+  res.end();
 }
 
 function buildTranslateCacheKey({ text, targetLang, provider, model, fastMode }) {

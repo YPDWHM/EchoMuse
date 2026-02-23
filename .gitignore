@@ -5,6 +5,8 @@ notes/
 # Local dependencies / binaries
 node_modules/
 /vendor/
+desktop-dist/
+dist/
 
 # Keep frontend vendor assets
 !/public/vendor/

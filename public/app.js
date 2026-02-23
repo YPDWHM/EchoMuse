@@ -4175,6 +4175,11 @@ async function loadProviderList() {
     renderProviderList(data.providers || []);
     updateModelSelectFromProviders(data.providers || []);
     renderPresetProviders(data.providers || []);
+    if (kbCreatorRuntime.initialized && kbCreatorRuntime.ui) {
+      syncKbEmbeddingProviderOptions(kbCreatorRuntime.ui, {
+        selectedId: kbCreatorRuntime.ui.embeddingProvider && kbCreatorRuntime.ui.embeddingProvider.value
+      });
+    }
   } catch {}
 }
 
@@ -4851,6 +4856,63 @@ const kbCreatorRuntime = {
   file: null,
   busy: false
 };
+
+function getEmbeddingCapableProviders(type = '') {
+  const providers = Array.isArray(state.info.providers) ? state.info.providers : [];
+  return providers.filter((p) => {
+    if (!p || !p.enabled) return false;
+    if (type === 'ollama') return p.type === 'ollama';
+    if (type === 'openai_compatible') return p.type === 'openai_compatible';
+    return p.type === 'ollama' || p.type === 'openai_compatible';
+  });
+}
+
+function syncKbEmbeddingProviderOptions(ui, opts = {}) {
+  if (!ui || !ui.embeddingMode || !ui.embeddingProvider) return;
+  const mode = String(ui.embeddingMode.value || 'none');
+  const selected = String(opts.selectedId || ui.embeddingProvider.value || '');
+  const providers = getEmbeddingCapableProviders(mode);
+
+  if (mode === 'none') {
+    ui.embeddingProvider.innerHTML = '<option value=\"\">未启用向量检索</option>';
+    ui.embeddingProvider.disabled = true;
+    if (ui.embeddingModel) ui.embeddingModel.disabled = true;
+    if (ui.embeddingStatusHint) ui.embeddingStatusHint.textContent = '当前仅使用词法检索（BM25-like）';
+    return;
+  }
+
+  const allowEmpty = mode === 'ollama';
+  const options = [];
+  if (allowEmpty) options.push('<option value=\"\">本机 Ollama（默认）</option>');
+  if (!providers.length) {
+    ui.embeddingProvider.innerHTML = options.concat('<option value=\"\" disabled>暂无可用 Provider</option>').join('');
+    ui.embeddingProvider.disabled = false;
+    if (ui.embeddingModel) ui.embeddingModel.disabled = false;
+    if (ui.embeddingStatusHint) {
+      ui.embeddingStatusHint.textContent = mode === 'openai_compatible'
+        ? '请先在模型提供方中添加并启用 OpenAI-compatible Provider'
+        : '将使用本机 Ollama；也可在模型提供方中添加更多 Ollama Provider';
+    }
+    return;
+  }
+
+  const providerOptions = providers.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} · ${escapeHtml(p.type)}</option>`);
+  ui.embeddingProvider.innerHTML = options.concat(providerOptions).join('');
+  if (selected && Array.from(ui.embeddingProvider.options).some((op) => op.value === selected)) {
+    ui.embeddingProvider.value = selected;
+  } else if (allowEmpty) {
+    ui.embeddingProvider.value = '';
+  } else {
+    ui.embeddingProvider.value = providers[0].id;
+  }
+  ui.embeddingProvider.disabled = false;
+  if (ui.embeddingModel) ui.embeddingModel.disabled = false;
+  if (ui.embeddingStatusHint) {
+    ui.embeddingStatusHint.textContent = mode === 'openai_compatible'
+      ? '使用兼容 OpenAI 的 /embeddings 接口构建向量索引'
+      : '使用本机 Ollama embeddings 接口构建向量索引（推荐如 nomic-embed-text）';
+  }
+}
 
 function ensureToolUiInjectedStyle() {
   if (document.getElementById('toolUiInjectedStyle')) return;
@@ -6239,6 +6301,34 @@ function ensureKbCreatorModal() {
           </div>
 
           <div class="toolui-row">
+            <label>向量检索（真实，可选）</label>
+            <div class="toolui-grid two-col">
+              <div class="toolui-row">
+                <label for="kbCreatorEmbeddingModeSelect">Embedding 提供方</label>
+                <select id="kbCreatorEmbeddingModeSelect" class="toolui-select">
+                  <option value="none">仅词法检索（关闭向量）</option>
+                  <option value="ollama">Ollama Embeddings（本地）</option>
+                  <option value="openai_compatible">OpenAI-compatible Embeddings（云端/兼容）</option>
+                </select>
+                <div class="hint">启用后会为知识库分块构建向量索引</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorEmbeddingProviderSelect">Embedding Provider</label>
+                <select id="kbCreatorEmbeddingProviderSelect" class="toolui-select">
+                  <option value="">未启用向量检索</option>
+                </select>
+                <div class="hint">OpenAI-compatible 需先在“模型提供方”里配置 Provider</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorEmbeddingModelInput">Embedding 模型 *</label>
+                <input id="kbCreatorEmbeddingModelInput" class="toolui-input" type="text" placeholder="例如：nomic-embed-text / text-embedding-3-small">
+                <div class="hint">不同 embedding 模型切换后需要重建索引（保存时自动处理）</div>
+              </div>
+            </div>
+            <div id="kbCreatorEmbeddingStatusHint" class="hint">当前仅使用词法检索（BM25-like）</div>
+          </div>
+
+          <div class="toolui-row">
             <label>RAG 参数（真实生效）</label>
             <div class="toolui-grid two-col">
               <div class="toolui-row">
@@ -6305,6 +6395,10 @@ function ensureKbCreatorModal() {
     name: backdrop.querySelector('#kbCreatorNameInput'),
     parser: backdrop.querySelector('#kbCreatorParserSelect'),
     retriever: backdrop.querySelector('#kbCreatorRetrieverSelect'),
+    embeddingMode: backdrop.querySelector('#kbCreatorEmbeddingModeSelect'),
+    embeddingProvider: backdrop.querySelector('#kbCreatorEmbeddingProviderSelect'),
+    embeddingModel: backdrop.querySelector('#kbCreatorEmbeddingModelInput'),
+    embeddingStatusHint: backdrop.querySelector('#kbCreatorEmbeddingStatusHint'),
     chunkSize: backdrop.querySelector('#kbCreatorChunkSizeInput'),
     chunkOverlap: backdrop.querySelector('#kbCreatorChunkOverlapInput'),
     topK: backdrop.querySelector('#kbCreatorTopKInput'),
@@ -6323,6 +6417,16 @@ function ensureKbCreatorModal() {
     if (e.target === backdrop) closeKbCreatorModal();
   });
   backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeKbCreatorModal()));
+  if (ui.embeddingMode) {
+    ui.embeddingMode.addEventListener('change', () => {
+      syncKbEmbeddingProviderOptions(ui);
+    });
+  }
+  if (ui.embeddingProvider) {
+    ui.embeddingProvider.addEventListener('change', () => {
+      syncKbEmbeddingProviderOptions(ui, { selectedId: ui.embeddingProvider.value });
+    });
+  }
   ui.pickFileBtn.addEventListener('click', () => ui.fileInput.click());
   ui.clearFileBtn.addEventListener('click', () => {
     kbCreatorRuntime.file = null;
@@ -6335,6 +6439,7 @@ function ensureKbCreatorModal() {
     setToolUiStatus(ui.fileStatus, file ? `已选择：${file.name}` : '未选择文件', file ? 'success' : '');
   });
   ui.saveBtn.addEventListener('click', () => saveKbCreatorModal());
+  syncKbEmbeddingProviderOptions(ui);
 
   kbCreatorRuntime.initialized = true;
   kbCreatorRuntime.ui = ui;
@@ -6348,6 +6453,7 @@ function closeKbCreatorModal() {
 
 async function openKbCreatorModal(options = {}) {
   await openSettingsSection('knowledge');
+  try { await loadProviderList(); } catch (_) {}
   const ui = ensureKbCreatorModal();
   kbCreatorRuntime.mode = options.mode === 'edit' ? 'edit' : 'create';
   kbCreatorRuntime.editId = options.editId ? String(options.editId) : '';
@@ -6358,8 +6464,20 @@ async function openKbCreatorModal(options = {}) {
   ui.saveBtn.textContent = kbCreatorRuntime.mode === 'edit' ? '保存' : '创建';
   ui.name.value = String(options.name || '');
   const ragConfig = (options.ragConfig && typeof options.ragConfig === 'object') ? options.ragConfig : {};
+  const embeddingConfig = (options.embeddingConfig && typeof options.embeddingConfig === 'object') ? options.embeddingConfig : {};
+  const embeddingMeta = (options.embeddingMeta && typeof options.embeddingMeta === 'object') ? options.embeddingMeta : {};
   const sourceMeta = (options.sourceMeta && typeof options.sourceMeta === 'object') ? options.sourceMeta : {};
   ui.parser.value = String(sourceMeta.parser || 'builtin');
+  if (ui.embeddingMode) {
+    ui.embeddingMode.value = String(embeddingConfig.providerType || 'none');
+    if (!['none', 'ollama', 'openai_compatible'].includes(ui.embeddingMode.value)) {
+      ui.embeddingMode.value = 'none';
+    }
+    syncKbEmbeddingProviderOptions(ui, { selectedId: String(embeddingConfig.providerId || '') });
+  }
+  if (ui.embeddingModel) {
+    ui.embeddingModel.value = String(embeddingConfig.model || '');
+  }
   ui.chunkSize.value = String(Number(ragConfig.chunkSize) || 700);
   ui.chunkOverlap.value = String(Number(ragConfig.chunkOverlap) || 120);
   ui.topK.value = String(Number(ragConfig.topK) || 4);
@@ -6369,6 +6487,23 @@ async function openKbCreatorModal(options = {}) {
   ui.fileInput.value = '';
   setToolUiStatus(ui.fileStatus, '未选择文件', '');
   setToolUiStatus(ui.status, '', '');
+  if (ui.embeddingStatusHint) {
+    const ready = Boolean(embeddingMeta.ready);
+    const emModel = String(embeddingMeta.model || embeddingConfig.model || '').trim();
+    const emType = String(embeddingMeta.providerType || embeddingConfig.providerType || 'none');
+    const dim = Number(embeddingMeta.vectorDim || 0);
+    const chunks = Number(embeddingMeta.chunkCount || 0);
+    const err = String(embeddingMeta.error || '').trim();
+    if (err) {
+      ui.embeddingStatusHint.textContent = `向量索引状态：失败（${err}）`;
+    } else if (ready) {
+      ui.embeddingStatusHint.textContent = `向量索引状态：已构建（${emType}/${emModel}${dim ? ` · ${dim}维` : ''}${chunks ? ` · ${chunks}片段` : ''}）`;
+    } else if (String(embeddingConfig.providerType || 'none') !== 'none') {
+      ui.embeddingStatusHint.textContent = '保存后将构建/重建向量索引（失败时会保留词法检索）';
+    } else {
+      ui.embeddingStatusHint.textContent = '当前仅使用词法检索（BM25-like）';
+    }
+  }
   if (kbCreatorRuntime.mode === 'edit') {
     setToolUiStatus(ui.fileStatus, '编辑模式暂不支持文件替换，请修改文本内容后保存', '');
   }
@@ -6402,6 +6537,15 @@ async function saveKbCreatorModal() {
     minScore: Math.max(0, Math.min(2, Number(ui.minScore.value || 0.05) || 0.05))
   };
   const parser = String((ui.parser && ui.parser.value) || 'builtin');
+  const embeddingMode = String((ui.embeddingMode && ui.embeddingMode.value) || 'none');
+  const embeddingProviderId = String((ui.embeddingProvider && ui.embeddingProvider.value) || '').trim();
+  const embeddingModel = String((ui.embeddingModel && ui.embeddingModel.value) || '').trim();
+  const embeddingConfig = {
+    enabled: embeddingMode !== 'none',
+    providerType: embeddingMode,
+    providerId: embeddingProviderId,
+    model: embeddingMode === 'none' ? '' : embeddingModel
+  };
 
   if (!name && !selectedFile) {
     setToolUiStatus(ui.status, '请输入知识库名称', 'error');
@@ -6413,6 +6557,14 @@ async function saveKbCreatorModal() {
   }
   if (kbCreatorRuntime.mode === 'edit' && selectedFile) {
     setToolUiStatus(ui.status, '编辑模式暂不支持文件替换，请删除后重新创建或使用文本保存', 'error');
+    return;
+  }
+  if (embeddingMode !== 'none' && !embeddingModel) {
+    setToolUiStatus(ui.status, '启用向量检索时必须填写 Embedding 模型', 'error');
+    return;
+  }
+  if (embeddingMode === 'openai_compatible' && !embeddingProviderId) {
+    setToolUiStatus(ui.status, '请选择 OpenAI-compatible Embedding Provider', 'error');
     return;
   }
 
@@ -6431,6 +6583,10 @@ async function saveKbCreatorModal() {
       formData.append('ragMaxContextChars', String(ragConfig.maxContextChars));
       formData.append('ragMinScore', String(ragConfig.minScore));
       formData.append('parser', parser);
+      formData.append('embedEnabled', embeddingConfig.enabled ? '1' : '0');
+      formData.append('embedProviderType', embeddingConfig.providerType || 'none');
+      if (embeddingConfig.providerId) formData.append('embedProviderId', embeddingConfig.providerId);
+      if (embeddingConfig.model) formData.append('embedModel', embeddingConfig.model);
       const headers = new Headers();
       if (state.token) headers.set('x-access-token', state.token);
       if (CLIENT_INSTANCE_ID) headers.set('x-client-id', CLIENT_INSTANCE_ID);
@@ -6443,14 +6599,17 @@ async function saveKbCreatorModal() {
       }
       result = await resp.json();
     } else {
-      const body = { name, content, ragConfig, parser };
+      const body = { name, content, ragConfig, parser, embeddingConfig };
       if (kbCreatorRuntime.mode === 'edit' && kbCreatorRuntime.editId) body.id = kbCreatorRuntime.editId;
       result = await apiRequest('/api/knowledge-bases', { method: 'POST', body: JSON.stringify(body) });
     }
 
     const chunkCount = Number(result && result.chunkCount);
     const suffix = Number.isFinite(chunkCount) && chunkCount > 0 ? `（${chunkCount} 个片段）` : '';
-    if (els.kbStatus) els.kbStatus.textContent = `${kbCreatorRuntime.mode === 'edit' ? '知识库已保存' : '知识库已创建'}${suffix}`;
+    const warning = String((result && result.warning) || '').trim();
+    if (els.kbStatus) {
+      els.kbStatus.textContent = `${kbCreatorRuntime.mode === 'edit' ? '知识库已保存' : '知识库已创建'}${suffix}${warning ? `，向量索引警告：${warning}` : ''}`;
+    }
     await refreshKbUiAfterChange();
     closeKbCreatorModal();
   } catch (error) {
@@ -6485,14 +6644,20 @@ function renderKbList(list) {
   wrap.innerHTML = list.map(kb => {
     const chunkCount = Number(kb.chunkCount || 0);
     const ragCfg = (kb.ragConfig && typeof kb.ragConfig === 'object') ? kb.ragConfig : {};
+    const embedCfg = (kb.embeddingConfig && typeof kb.embeddingConfig === 'object') ? kb.embeddingConfig : {};
+    const embedMeta = (kb.embeddingMeta && typeof kb.embeddingMeta === 'object') ? kb.embeddingMeta : {};
     const sourceMeta = (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : {};
     const sourceLabel = sourceMeta.type === 'file' ? '文件' : '文本';
     const parserLabel = sourceMeta.parser === 'builtin' ? '内置解析' : String(sourceMeta.parser || '解析器');
+    const embedLabel = embedCfg.providerType && embedCfg.providerType !== 'none'
+      ? `Vec:${embedMeta.ready ? '已建' : '待建'} ${embedCfg.providerType === 'ollama' ? 'Ollama' : 'OpenAI兼容'}${embedCfg.model ? `/${embedCfg.model}` : ''}${embedMeta.vectorDim ? ` ${embedMeta.vectorDim}d` : ''}`
+      : 'Vec:关闭';
     const meta = [
       `${kb.charCount} 字符`,
       chunkCount ? `${chunkCount} 片段` : null,
       ragCfg.topK ? `TopK=${ragCfg.topK}` : null,
       ragCfg.maxContextChars ? `Ctx=${ragCfg.maxContextChars}` : null,
+      embedLabel,
       parserLabel,
       sourceLabel,
       kb.enabled ? null : '已禁用'
@@ -6599,6 +6764,8 @@ async function editKb(id) {
       name: data.name || '',
       content: data.content || '',
       ragConfig: data.ragConfig || null,
+      embeddingConfig: data.embeddingConfig || null,
+      embeddingMeta: data.embeddingMeta || null,
       sourceMeta: data.sourceMeta || null
     });
   } catch (error) {
@@ -6623,10 +6790,15 @@ async function refreshKbQuickPanel() {
     els.kbQuickList.innerHTML = list.map(kb => {
       const chunkCount = Number(kb.chunkCount || 0);
       const ragCfg = (kb.ragConfig && typeof kb.ragConfig === 'object') ? kb.ragConfig : {};
+      const embedCfg = (kb.embeddingConfig && typeof kb.embeddingConfig === 'object') ? kb.embeddingConfig : {};
+      const embedMeta = (kb.embeddingMeta && typeof kb.embeddingMeta === 'object') ? kb.embeddingMeta : {};
+      const vecBadge = embedCfg.providerType && embedCfg.providerType !== 'none'
+        ? ` · Vec ${embedMeta.ready ? 'ON' : 'PENDING'}`
+        : '';
       return `<label class="mcp-quick-item">
         <input type="checkbox" data-kb-id="${escapeHtml(kb.id)}" ${kb.enabled ? 'checked' : ''}>
         <span class="mcp-quick-name">${escapeHtml(kb.name)}</span>
-        <span class="mcp-quick-status muted">${chunkCount ? `${chunkCount} chunks · TopK ${escapeHtml(String(ragCfg.topK || 4))}` : `${kb.charCount} chars`}</span>
+        <span class="mcp-quick-status muted">${chunkCount ? `${chunkCount} chunks · TopK ${escapeHtml(String(ragCfg.topK || 4))}${vecBadge}` : `${kb.charCount} chars${vecBadge}`}</span>
       </label>`;
     }).join('');
     updateKbBtnBadge(list.filter(kb => kb.enabled).length);

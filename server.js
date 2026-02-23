@@ -32,6 +32,11 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 8 * 60 * 1000)
 const OLLAMA_CHAT_TIMEOUT_MS = Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 12 * 60 * 1000);
 const TRANSLATE_CACHE_TTL_MS = Math.max(0, Number(process.env.TRANSLATE_CACHE_TTL_MS || 30 * 60 * 1000));
 const TRANSLATE_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.TRANSLATE_CACHE_MAX_ITEMS || 500));
+const KB_EMBED_QUERY_CACHE_TTL_MS = Math.max(0, Number(process.env.KB_EMBED_QUERY_CACHE_TTL_MS || 5 * 60 * 1000));
+const KB_EMBED_QUERY_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.KB_EMBED_QUERY_CACHE_MAX_ITEMS || 200));
+const KB_EMBED_VECTOR_WEIGHT = Math.max(0, Number(process.env.KB_EMBED_VECTOR_WEIGHT || 2.2));
+const KB_EMBED_VECTOR_MIN_SCORE = Math.max(-1, Math.min(1, Number(process.env.KB_EMBED_VECTOR_MIN_SCORE || 0.15)));
+const KB_EMBED_BATCH_SIZE = Math.max(1, Math.min(64, Number(process.env.KB_EMBED_BATCH_SIZE || 16)));
 const CHAT_THINK = process.env.CHAT_THINK !== '0';
 const CHAT_CTX_LIMIT = Number(process.env.CHAT_CTX_LIMIT || 3000);
 const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT || 8);
@@ -161,6 +166,8 @@ const rateStore = new Map();
 const translateRateStore = new Map();
 const translateResultCache = new Map();
 const translateInFlight = new Map();
+const kbEmbedQueryCache = new Map();
+const kbEmbedQueryInFlight = new Map();
 const requestContextStore = new AsyncLocalStorage();
 const proxyDispatcherCache = new Map();
 let undiciProxyAgentCtor = undefined;
@@ -748,6 +755,13 @@ const KB_RAG_DEFAULTS = Object.freeze({
   minScore: 0.05
 });
 
+const KB_EMBEDDING_DEFAULTS = Object.freeze({
+  enabled: false,
+  providerType: 'none', // none | ollama | openai_compatible
+  providerId: '',
+  model: ''
+});
+
 function clampInt(v, min, max, fallback) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
@@ -763,6 +777,23 @@ function normalizeKbRagConfig(raw, fallback = {}) {
     topK: clampInt(src.topK, 1, 20, base.topK),
     maxContextChars: clampInt(src.maxContextChars, 1000, 12000, base.maxContextChars),
     minScore: Number.isFinite(Number(src.minScore)) ? Math.max(0, Math.min(5, Number(src.minScore))) : base.minScore
+  };
+}
+
+function normalizeKbEmbeddingConfig(raw, fallback = {}) {
+  const base = { ...KB_EMBEDDING_DEFAULTS, ...(fallback && typeof fallback === 'object' ? fallback : {}) };
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const providerType = ['none', 'ollama', 'openai_compatible'].includes(String(src.providerType || base.providerType || 'none'))
+    ? String(src.providerType || base.providerType || 'none')
+    : 'none';
+  const model = String(src.model || base.model || '').trim().slice(0, 200);
+  const providerId = String(src.providerId || base.providerId || '').trim().slice(0, 120);
+  const enabled = providerType !== 'none' && Boolean(src.enabled ?? base.enabled) && Boolean(model);
+  return {
+    enabled,
+    providerType: enabled ? providerType : 'none',
+    providerId: enabled ? providerId : '',
+    model: enabled ? model : ''
   };
 }
 
@@ -827,10 +858,35 @@ function chunkKbContent(text, ragConfig) {
   return chunks;
 }
 
-function buildKbRecord({ id, name, content, existing, ragConfig, sourceMeta }) {
+function clearKbChunkEmbeddings(chunks) {
+  if (!Array.isArray(chunks)) return;
+  for (const chunk of chunks) {
+    if (!chunk || typeof chunk !== 'object') continue;
+    delete chunk.embedding;
+    delete chunk.embeddingNorm;
+  }
+}
+
+function summarizeKbEmbeddingMeta(kb) {
+  const meta = (kb && kb.embeddingMeta && typeof kb.embeddingMeta === 'object') ? kb.embeddingMeta : {};
+  return {
+    ready: Boolean(meta.ready),
+    providerType: String(meta.providerType || 'none'),
+    providerId: String(meta.providerId || ''),
+    model: String(meta.model || ''),
+    vectorDim: Number(meta.vectorDim || 0) || 0,
+    chunkCount: Number(meta.chunkCount || 0) || 0,
+    builtAt: Number(meta.builtAt || 0) || 0,
+    error: meta.error ? String(meta.error) : ''
+  };
+}
+
+function buildKbRecord({ id, name, content, existing, ragConfig, sourceMeta, embeddingConfig }) {
   const normalizedContent = normalizeKbText(content);
   const cfg = normalizeKbRagConfig(ragConfig, existing?.ragConfig || KB_RAG_DEFAULTS);
+  const embedCfg = normalizeKbEmbeddingConfig(embeddingConfig, existing?.embeddingConfig || KB_EMBEDDING_DEFAULTS);
   const chunks = chunkKbContent(normalizedContent, cfg);
+  clearKbChunkEmbeddings(chunks);
   return {
     id,
     name: String(name || '').trim(),
@@ -839,6 +895,28 @@ function buildKbRecord({ id, name, content, existing, ragConfig, sourceMeta }) {
     createdAt: existing ? existing.createdAt : Date.now(),
     updatedAt: Date.now(),
     ragConfig: cfg,
+    embeddingConfig: embedCfg,
+    embeddingMeta: embedCfg.enabled
+      ? {
+          ready: false,
+          providerType: embedCfg.providerType,
+          providerId: embedCfg.providerId || '',
+          model: embedCfg.model,
+          vectorDim: 0,
+          chunkCount: 0,
+          builtAt: 0,
+          error: ''
+        }
+      : {
+          ready: false,
+          providerType: 'none',
+          providerId: '',
+          model: '',
+          vectorDim: 0,
+          chunkCount: 0,
+          builtAt: 0,
+          error: ''
+        },
     sourceMeta: (sourceMeta && typeof sourceMeta === 'object')
       ? {
           type: String(sourceMeta.type || existing?.sourceMeta?.type || 'text'),
@@ -854,6 +932,7 @@ function buildKbRecord({ id, name, content, existing, ragConfig, sourceMeta }) {
 function ensureKbIndexedInMemory(kb) {
   if (!kb || typeof kb !== 'object') return kb;
   kb.ragConfig = normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS);
+  kb.embeddingConfig = normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS);
   if (!kb.sourceMeta || typeof kb.sourceMeta !== 'object') {
     kb.sourceMeta = { type: 'text', parser: 'builtin', fileName: '', fileExt: '' };
   } else {
@@ -866,6 +945,38 @@ function ensureKbIndexedInMemory(kb) {
   }
   if (!Array.isArray(kb.chunks) || !kb.chunks.length) {
     kb.chunks = chunkKbContent(kb.content || '', kb.ragConfig);
+  }
+  if (!kb.embeddingMeta || typeof kb.embeddingMeta !== 'object') {
+    kb.embeddingMeta = summarizeKbEmbeddingMeta({
+      embeddingMeta: kb.embeddingConfig.enabled
+        ? {
+            ready: false,
+            providerType: kb.embeddingConfig.providerType,
+            providerId: kb.embeddingConfig.providerId || '',
+            model: kb.embeddingConfig.model,
+            vectorDim: 0,
+            chunkCount: 0,
+            builtAt: 0,
+            error: ''
+          }
+        : {}
+    });
+  } else {
+    kb.embeddingMeta = summarizeKbEmbeddingMeta(kb);
+    if (kb.embeddingConfig.enabled && kb.embeddingMeta.providerType === 'none') {
+      kb.embeddingMeta.providerType = kb.embeddingConfig.providerType;
+      kb.embeddingMeta.providerId = kb.embeddingConfig.providerId || '';
+      kb.embeddingMeta.model = kb.embeddingConfig.model;
+    }
+    if (!kb.embeddingMeta.ready && kb.embeddingConfig.enabled && hasKbChunkEmbeddings(kb)) {
+      const firstVec = (kb.chunks || []).find((c) => Array.isArray(c.embedding) && c.embedding.length);
+      kb.embeddingMeta.ready = true;
+      kb.embeddingMeta.vectorDim = firstVec ? firstVec.embedding.length : 0;
+      kb.embeddingMeta.chunkCount = (kb.chunks || []).filter((c) => Array.isArray(c.embedding) && c.embedding.length).length;
+      kb.embeddingMeta.providerType = kb.embeddingConfig.providerType;
+      kb.embeddingMeta.providerId = kb.embeddingConfig.providerId || '';
+      kb.embeddingMeta.model = kb.embeddingConfig.model;
+    }
   }
   return kb;
 }
@@ -913,6 +1024,299 @@ function buildKbSearchQueryText(recentMessages) {
   const latest = users[users.length - 1].content.trim();
   if (latest.length >= 20) return latest.slice(0, 600);
   return users.slice(-2).map((m) => m.content.trim()).join('\n').slice(0, 600);
+}
+
+function hasKbChunkEmbeddings(kb) {
+  if (!kb || !Array.isArray(kb.chunks) || !kb.chunks.length) return false;
+  return kb.chunks.some((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0 && Number.isFinite(chunk.embeddingNorm));
+}
+
+function kbEmbeddingSignature(config) {
+  const cfg = normalizeKbEmbeddingConfig(config || {}, KB_EMBEDDING_DEFAULTS);
+  if (!cfg.enabled) return 'none';
+  return `${cfg.providerType}|${cfg.providerId || ''}|${cfg.model}`;
+}
+
+function normalizeEmbeddingVector(raw) {
+  if (!Array.isArray(raw) || !raw.length) return null;
+  const out = [];
+  let sum = 0;
+  for (const v of raw) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    const x = Math.round(n * 1e6) / 1e6;
+    out.push(x);
+    sum += x * x;
+  }
+  const norm = Math.sqrt(sum);
+  if (!(norm > 0)) return null;
+  return { vector: out, norm };
+}
+
+function cosineSimilarity(a, aNorm, b, bNorm) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+  if (!(aNorm > 0) || !(bNorm > 0)) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
+  return dot / (aNorm * bNorm);
+}
+
+function pruneKbEmbedQueryCache(now = Date.now()) {
+  if (KB_EMBED_QUERY_CACHE_TTL_MS <= 0 || KB_EMBED_QUERY_CACHE_MAX_ITEMS <= 0) {
+    if (kbEmbedQueryCache.size) kbEmbedQueryCache.clear();
+    return;
+  }
+  for (const [key, entry] of kbEmbedQueryCache.entries()) {
+    if (!entry || entry.expiresAt <= now) kbEmbedQueryCache.delete(key);
+  }
+  while (kbEmbedQueryCache.size > KB_EMBED_QUERY_CACHE_MAX_ITEMS) {
+    const oldestKey = kbEmbedQueryCache.keys().next().value;
+    if (!oldestKey) break;
+    kbEmbedQueryCache.delete(oldestKey);
+  }
+}
+
+function getCachedKbEmbedQuery(cacheKey) {
+  if (!cacheKey || KB_EMBED_QUERY_CACHE_TTL_MS <= 0 || KB_EMBED_QUERY_CACHE_MAX_ITEMS <= 0) return null;
+  const entry = kbEmbedQueryCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    kbEmbedQueryCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value || null;
+}
+
+function setCachedKbEmbedQuery(cacheKey, value) {
+  if (!cacheKey || !value || KB_EMBED_QUERY_CACHE_TTL_MS <= 0 || KB_EMBED_QUERY_CACHE_MAX_ITEMS <= 0) return;
+  const now = Date.now();
+  kbEmbedQueryCache.set(cacheKey, { value, expiresAt: now + KB_EMBED_QUERY_CACHE_TTL_MS });
+  if (kbEmbedQueryCache.size > KB_EMBED_QUERY_CACHE_MAX_ITEMS || (kbEmbedQueryCache.size % 50) === 0) {
+    pruneKbEmbedQueryCache(now);
+  }
+}
+
+function parseKbEmbeddingConfigFromMultipart(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  const providerType = String(src.embedProviderType || '').trim();
+  const rawEnabled = src.embedEnabled;
+  const enabled = rawEnabled === true || rawEnabled === '1' || rawEnabled === 'true' || providerType === 'ollama' || providerType === 'openai_compatible';
+  return normalizeKbEmbeddingConfig({
+    enabled,
+    providerType: providerType || 'none',
+    providerId: String(src.embedProviderId || '').trim(),
+    model: String(src.embedModel || '').trim()
+  }, KB_EMBEDDING_DEFAULTS);
+}
+
+function resolveKbEmbeddingProvider(config) {
+  const cfg = normalizeKbEmbeddingConfig(config || {}, KB_EMBEDDING_DEFAULTS);
+  if (!cfg.enabled) return { ok: false, message: 'embedding disabled', config: cfg };
+
+  if (cfg.providerType === 'ollama') {
+    const p = (cfg.providerId && getProvider(cfg.providerId)) || defaultOllamaProvider();
+    if (p && p.type !== 'ollama') {
+      return { ok: false, message: '选择的 Provider 不是 Ollama', config: cfg };
+    }
+    return { ok: true, config: cfg, provider: p || defaultOllamaProvider() };
+  }
+
+  if (cfg.providerType === 'openai_compatible') {
+    if (!cfg.providerId) return { ok: false, message: '请选择 OpenAI-compatible Provider', config: cfg };
+    const p = getProvider(cfg.providerId);
+    if (!p) return { ok: false, message: '未找到 Embedding Provider', config: cfg };
+    if (p.type !== 'openai_compatible') return { ok: false, message: 'Embedding Provider 必须是 openai_compatible', config: cfg };
+    if (!p.baseUrl || !p.apiKey) return { ok: false, message: 'Embedding Provider 缺少 baseUrl 或 apiKey', config: cfg };
+    return { ok: true, config: cfg, provider: p };
+  }
+
+  return { ok: false, message: '不支持的 Embedding Provider 类型', config: cfg };
+}
+
+async function openaiEmbedTexts(texts, provider, model) {
+  const inputs = (Array.isArray(texts) ? texts : []).map((t) => String(t || '').trim()).filter(Boolean);
+  if (!inputs.length) return [];
+  const p = provider || getActiveProvider();
+  const m = String(model || (p.models && p.models[0]) || '').trim();
+  if (!m) throw new Error('Embedding model is required');
+
+  const res = await fetchWithTimeout(`${p.baseUrl}/embeddings`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${p.apiKey}`
+    },
+    body: JSON.stringify({
+      model: m,
+      input: inputs
+    })
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Embedding(OpenAI-compatible) HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+
+  const payload = await res.json();
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  const vectors = data
+    .sort((a, b) => Number(a?.index || 0) - Number(b?.index || 0))
+    .map((row) => row?.embedding);
+  if (vectors.length !== inputs.length) {
+    throw new Error(`Embedding 返回数量异常：expected ${inputs.length}, got ${vectors.length}`);
+  }
+  return vectors;
+}
+
+async function ollamaEmbedTexts(texts, model) {
+  const inputs = (Array.isArray(texts) ? texts : []).map((t) => String(t || '').trim()).filter(Boolean);
+  if (!inputs.length) return [];
+  const m = String(model || '').trim() || 'nomic-embed-text';
+
+  // Newer Ollama API (batch-capable)
+  try {
+    const res = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: m, input: inputs })
+    });
+    if (res.ok) {
+      const payload = await res.json();
+      if (Array.isArray(payload?.embeddings) && payload.embeddings.length === inputs.length) {
+        return payload.embeddings;
+      }
+      if (inputs.length === 1 && Array.isArray(payload?.embedding)) return [payload.embedding];
+    }
+  } catch (_) {
+    // fall through to legacy endpoint
+  }
+
+  // Legacy Ollama API (single input)
+  const out = [];
+  for (const prompt of inputs) {
+    const res = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: m, prompt })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Embedding(Ollama) HTTP ${res.status} ${text.slice(0, 200)}`);
+    }
+    const payload = await res.json();
+    if (!Array.isArray(payload?.embedding)) {
+      throw new Error('Ollama embeddings response missing field: embedding');
+    }
+    out.push(payload.embedding);
+  }
+  return out;
+}
+
+async function embedTextsForKbConfig(config, texts) {
+  const resolved = resolveKbEmbeddingProvider(config);
+  if (!resolved.ok) throw new Error(resolved.message || 'Embedding provider unavailable');
+
+  if (resolved.config.providerType === 'ollama') {
+    return ollamaEmbedTexts(texts, resolved.config.model);
+  }
+  if (resolved.config.providerType === 'openai_compatible') {
+    return openaiEmbedTexts(texts, resolved.provider, resolved.config.model);
+  }
+  throw new Error('Unsupported embedding provider type');
+}
+
+async function embedKbQueryCached(config, queryText) {
+  const cfg = normalizeKbEmbeddingConfig(config || {}, KB_EMBEDDING_DEFAULTS);
+  if (!cfg.enabled) return null;
+  const q = String(queryText || '').trim();
+  if (!q) return null;
+  const cacheKey = `kbq|${kbEmbeddingSignature(cfg)}|${stableSha1(q)}`;
+  const cached = getCachedKbEmbedQuery(cacheKey);
+  if (cached) return cached;
+
+  let job = kbEmbedQueryInFlight.get(cacheKey);
+  if (!job) {
+    job = (async () => {
+      const vectors = await embedTextsForKbConfig(cfg, [q]);
+      const normalized = normalizeEmbeddingVector(vectors && vectors[0]);
+      if (!normalized) throw new Error('查询向量无效');
+      setCachedKbEmbedQuery(cacheKey, normalized);
+      return normalized;
+    })().finally(() => {
+      const cur = kbEmbedQueryInFlight.get(cacheKey);
+      if (cur === job) kbEmbedQueryInFlight.delete(cacheKey);
+    });
+    kbEmbedQueryInFlight.set(cacheKey, job);
+  }
+  return job;
+}
+
+async function buildKbEmbeddingIndex(kb) {
+  ensureKbIndexedInMemory(kb);
+  const cfg = normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS);
+  kb.embeddingConfig = cfg;
+  if (!cfg.enabled) {
+    clearKbChunkEmbeddings(kb.chunks);
+    kb.embeddingMeta = {
+      ready: false,
+      providerType: 'none',
+      providerId: '',
+      model: '',
+      vectorDim: 0,
+      chunkCount: 0,
+      builtAt: 0,
+      error: ''
+    };
+    return kb;
+  }
+  if (!Array.isArray(kb.chunks) || !kb.chunks.length) {
+    kb.embeddingMeta = {
+      ready: false,
+      providerType: cfg.providerType,
+      providerId: cfg.providerId || '',
+      model: cfg.model,
+      vectorDim: 0,
+      chunkCount: 0,
+      builtAt: 0,
+      error: '知识库内容为空，无法构建向量索引'
+    };
+    return kb;
+  }
+
+  const rawVectors = [];
+  for (let start = 0; start < kb.chunks.length; start += KB_EMBED_BATCH_SIZE) {
+    const batch = kb.chunks.slice(start, start + KB_EMBED_BATCH_SIZE).map((c) => c.text);
+    const vectors = await embedTextsForKbConfig(cfg, batch);
+    if (!Array.isArray(vectors) || vectors.length !== batch.length) {
+      throw new Error(`Embedding 批量返回数量异常：expected ${batch.length}, got ${Array.isArray(vectors) ? vectors.length : 0}`);
+    }
+    rawVectors.push(...vectors);
+  }
+  if (rawVectors.length !== kb.chunks.length) {
+    throw new Error(`Embedding 返回数量异常：expected ${kb.chunks.length}, got ${rawVectors.length}`);
+  }
+
+  let dim = 0;
+  for (let i = 0; i < kb.chunks.length; i += 1) {
+    const normalized = normalizeEmbeddingVector(rawVectors[i]);
+    if (!normalized) throw new Error(`第 ${i + 1} 个片段向量无效`);
+    if (!dim) dim = normalized.vector.length;
+    if (normalized.vector.length !== dim) throw new Error('向量维度不一致');
+    kb.chunks[i].embedding = normalized.vector;
+    kb.chunks[i].embeddingNorm = normalized.norm;
+  }
+
+  kb.embeddingMeta = {
+    ready: true,
+    providerType: cfg.providerType,
+    providerId: cfg.providerId || '',
+    model: cfg.model,
+    vectorDim: dim,
+    chunkCount: kb.chunks.length,
+    builtAt: Date.now(),
+    error: ''
+  };
+  return kb;
 }
 
 function retrieveKbChunks(kbList, queryText) {
@@ -988,14 +1392,95 @@ function retrieveKbChunks(kbList, queryText) {
   return out;
 }
 
-function buildKbInjectedContext(knowledgeBaseIds, recentMessages) {
+async function retrieveKbChunksHybrid(kbList, queryText) {
+  const lexicalHits = retrieveKbChunks(kbList, queryText);
+  const query = String(queryText || '').trim();
+  if (!query) return lexicalHits;
+
+  const eligible = (Array.isArray(kbList) ? kbList : [])
+    .map((kb) => ensureKbIndexedInMemory(kb))
+    .filter((kb) => kb && kb.embeddingConfig && kb.embeddingConfig.enabled && hasKbChunkEmbeddings(kb));
+  if (!eligible.length) return lexicalHits;
+
+  const groups = new Map();
+  for (const kb of eligible) {
+    const sig = kbEmbeddingSignature(kb.embeddingConfig);
+    if (sig === 'none') continue;
+    if (!groups.has(sig)) groups.set(sig, { config: normalizeKbEmbeddingConfig(kb.embeddingConfig, KB_EMBEDDING_DEFAULTS), kbs: [] });
+    groups.get(sig).kbs.push(kb);
+  }
+  if (!groups.size) return lexicalHits;
+
+  const vectorCandidates = [];
+  for (const { config, kbs } of groups.values()) {
+    try {
+      const qv = await embedKbQueryCached(config, query);
+      if (!qv || !Array.isArray(qv.vector)) continue;
+      for (const kb of kbs) {
+        const cfg = normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS);
+        for (const chunk of kb.chunks || []) {
+          if (!chunk || typeof chunk.text !== 'string' || !chunk.text.trim()) continue;
+          if (!Array.isArray(chunk.embedding) || !chunk.embedding.length || !Number.isFinite(chunk.embeddingNorm)) continue;
+          const score = cosineSimilarity(chunk.embedding, chunk.embeddingNorm, qv.vector, qv.norm);
+          if (!(score >= KB_EMBED_VECTOR_MIN_SCORE)) continue;
+          vectorCandidates.push({ kb, chunk, cfg, vectorScore: score });
+        }
+      }
+    } catch (error) {
+      console.warn('[kb-embed] query embedding failed:', error.message || error);
+    }
+  }
+
+  if (!vectorCandidates.length) return lexicalHits;
+
+  vectorCandidates.sort((a, b) => b.vectorScore - a.vectorScore);
+  const merged = new Map();
+  for (const item of lexicalHits) {
+    const key = `${item.kb.id}::${item.chunk.id}`;
+    merged.set(key, {
+      ...item,
+      lexicalScore: Number(item.score || 0) || 0,
+      vectorScore: 0,
+      score: Number(item.score || 0) || 0
+    });
+  }
+  for (const item of vectorCandidates.slice(0, 48)) {
+    const key = `${item.kb.id}::${item.chunk.id}`;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.vectorScore = Math.max(existing.vectorScore || 0, item.vectorScore);
+      existing.score = Math.max(existing.score || 0, (existing.lexicalScore || 0) + item.vectorScore * KB_EMBED_VECTOR_WEIGHT);
+    } else {
+      merged.set(key, {
+        ...item,
+        lexicalScore: 0,
+        score: item.vectorScore * KB_EMBED_VECTOR_WEIGHT
+      });
+    }
+  }
+
+  const sorted = Array.from(merged.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
+  const perKbCount = new Map();
+  const out = [];
+  for (const item of sorted) {
+    const cur = perKbCount.get(item.kb.id) || 0;
+    const kbTopK = normalizeKbRagConfig(item.kb.ragConfig || {}, KB_RAG_DEFAULTS).topK;
+    if (cur >= kbTopK) continue;
+    out.push(item);
+    perKbCount.set(item.kb.id, cur + 1);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+async function buildKbInjectedContext(knowledgeBaseIds, recentMessages) {
   if (!Array.isArray(knowledgeBaseIds) || !knowledgeBaseIds.length) return '';
   const enabled = (appConfig.knowledgeBases || [])
     .filter((kb) => knowledgeBaseIds.includes(kb.id) && kb.enabled && kb.content);
   if (!enabled.length) return '';
 
   const queryText = buildKbSearchQueryText(recentMessages);
-  const hits = retrieveKbChunks(enabled, queryText);
+  const hits = await retrieveKbChunksHybrid(enabled, queryText);
   if (!hits.length) return '';
 
   let usedChars = 0;
@@ -1011,7 +1496,10 @@ function buildKbInjectedContext(knowledgeBaseIds, recentMessages) {
     const remain = maxChars - usedChars;
     if (remain < 120) break;
     const clipped = chunkText.slice(0, remain);
-    lines.push(`- [${hit.kb.name}#${hit.chunk.id}] score=${hit.score.toFixed(3)}`);
+    const lexical = Number(hit.lexicalScore || 0);
+    const vector = Number(hit.vectorScore || 0);
+    const scoreNote = vector > 0 ? `${Number(hit.score || 0).toFixed(3)} (v=${vector.toFixed(3)}, l=${lexical.toFixed(3)})` : `${Number(hit.score || 0).toFixed(3)}`;
+    lines.push(`- [${hit.kb.name}#${hit.chunk.id}] score=${scoreNote}`);
     lines.push(clipped);
     usedChars += clipped.length;
   }
@@ -1033,14 +1521,16 @@ app.get('/api/knowledge-bases', (req, res) => {
       createdAt: kb.createdAt,
       updatedAt: kb.updatedAt,
       ragConfig: normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS),
+      embeddingConfig: normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS),
+      embeddingMeta: summarizeKbEmbeddingMeta(kb),
       sourceMeta: (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : { type: 'text', parser: 'builtin', fileName: '', fileExt: '' }
     };
   });
   res.json({ knowledgeBases: list });
 });
 
-app.post('/api/knowledge-bases', (req, res) => {
-  const { name, content, id: editId, ragConfig, parser } = req.body || {};
+app.post('/api/knowledge-bases', async (req, res) => {
+  const { name, content, id: editId, ragConfig, parser, embeddingConfig } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Bad Request', message: '需要名称。' });
   if (!content || typeof content !== 'string') return res.status(400).json({ error: 'Bad Request', message: '需要内容。' });
   if (!appConfig.knowledgeBases) appConfig.knowledgeBases = [];
@@ -1052,11 +1542,29 @@ app.post('/api/knowledge-bases', (req, res) => {
     content,
     existing,
     ragConfig,
+    embeddingConfig,
     sourceMeta: {
       type: 'text',
       parser: parser || existing?.sourceMeta?.parser || 'builtin'
     }
   });
+  let warning = '';
+  try {
+    await buildKbEmbeddingIndex(kb);
+  } catch (error) {
+    clearKbChunkEmbeddings(kb.chunks);
+    kb.embeddingMeta = {
+      ready: false,
+      providerType: kb.embeddingConfig?.providerType || 'none',
+      providerId: kb.embeddingConfig?.providerId || '',
+      model: kb.embeddingConfig?.model || '',
+      vectorDim: 0,
+      chunkCount: 0,
+      builtAt: 0,
+      error: String(error?.message || error || 'embedding build failed')
+    };
+    warning = kb.embeddingMeta.error;
+  }
   if (existing) Object.assign(existing, kb);
   else appConfig.knowledgeBases.push(kb);
   if (!saveAppConfig()) return res.status(500).json({ error: 'SaveFailed' });
@@ -1065,7 +1573,10 @@ app.post('/api/knowledge-bases', (req, res) => {
     id,
     chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
     ragConfig: kb.ragConfig,
-    sourceMeta: kb.sourceMeta
+    embeddingConfig: normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS),
+    embeddingMeta: summarizeKbEmbeddingMeta(kb),
+    sourceMeta: kb.sourceMeta,
+    warning
   });
 });
 
@@ -1096,6 +1607,8 @@ app.get('/api/knowledge-bases/:id/content', (req, res) => {
     name: kb.name,
     content: kb.content,
     ragConfig: normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS),
+    embeddingConfig: normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS),
+    embeddingMeta: summarizeKbEmbeddingMeta(kb),
     chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
     sourceMeta: (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : { type: 'text', parser: 'builtin', fileName: '', fileExt: '' }
   });
@@ -1131,12 +1644,14 @@ app.post('/api/knowledge-bases/upload', upload.single('file'), async (req, res) 
     maxContextChars: req.body?.ragMaxContextChars,
     minScore: req.body?.ragMinScore
   }, KB_RAG_DEFAULTS);
+  const embeddingConfig = parseKbEmbeddingConfigFromMultipart(req.body || {});
   const kb = buildKbRecord({
     id,
     name: String(name).trim(),
     content: text.trim(),
     existing: null,
     ragConfig,
+    embeddingConfig,
     sourceMeta: {
       type: 'file',
       parser: req.body?.parser || 'builtin',
@@ -1144,6 +1659,23 @@ app.post('/api/knowledge-bases/upload', upload.single('file'), async (req, res) 
       fileExt: ext || ''
     }
   });
+  let warning = '';
+  try {
+    await buildKbEmbeddingIndex(kb);
+  } catch (error) {
+    clearKbChunkEmbeddings(kb.chunks);
+    kb.embeddingMeta = {
+      ready: false,
+      providerType: kb.embeddingConfig?.providerType || 'none',
+      providerId: kb.embeddingConfig?.providerId || '',
+      model: kb.embeddingConfig?.model || '',
+      vectorDim: 0,
+      chunkCount: 0,
+      builtAt: 0,
+      error: String(error?.message || error || 'embedding build failed')
+    };
+    warning = kb.embeddingMeta.error;
+  }
   appConfig.knowledgeBases.push(kb);
   if (!saveAppConfig()) return res.status(500).json({ error: 'SaveFailed' });
   res.json({
@@ -1152,7 +1684,10 @@ app.post('/api/knowledge-bases/upload', upload.single('file'), async (req, res) 
     charCount: text.trim().length,
     chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
     ragConfig: kb.ragConfig,
-    sourceMeta: kb.sourceMeta
+    embeddingConfig: normalizeKbEmbeddingConfig(kb.embeddingConfig || {}, KB_EMBEDDING_DEFAULTS),
+    embeddingMeta: summarizeKbEmbeddingMeta(kb),
+    sourceMeta: kb.sourceMeta,
+    warning
   });
 });
 
@@ -1501,7 +2036,7 @@ app.post('/api/chat', async (req, res) => {
 
     /* 自定义 RAG 检索片段注入 */
     if (knowledgeBaseIds.length && llmMessages.length) {
-      const kbContext = buildKbInjectedContext(knowledgeBaseIds, recent);
+      const kbContext = await buildKbInjectedContext(knowledgeBaseIds, recent);
       if (kbContext) {
         llmMessages[0].content += `\n\n${kbContext}`;
       }

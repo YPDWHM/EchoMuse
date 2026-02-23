@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Zero-cloud final-review pack generator powered by local Ollama",
-  "main": "server.js",
+  "main": "desktop/main.js",
   "engines": {
     "node": ">=18.17.0"
   },
@@ -13,7 +13,10 @@
     "bootstrap:win": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\bootstrap-windows.ps1",
     "bootstrap:unix": "bash ./bootstrap-unix.sh",
     "win:local": "set HOST=127.0.0.1&& node server.js",
-    "win:share": "set HOST=0.0.0.0&& set SHARE_MODE=1&& node server.js"
+    "win:share": "set HOST=0.0.0.0&& set SHARE_MODE=1&& node server.js",
+    "desktop:dev": "electron .",
+    "desktop:build:dir": "electron-builder --dir",
+    "desktop:build": "electron-builder --win"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -29,5 +32,35 @@
     "qrcode": "^1.5.4",
     "undici": "^6.21.2",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "electron": "^35.5.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.echomuse.desktop",
+    "productName": "EchoMuse",
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "prompts/**/*",
+      "scripts/**/*",
+      "vendor/**/*",
+      "server.js",
+      "mcp-manager.js",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "desktop/main.js"
+    },
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
   }
 }

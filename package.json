@@ -16,7 +16,9 @@
     "win:share": "set HOST=0.0.0.0&& set SHARE_MODE=1&& node server.js",
     "desktop:dev": "electron .",
     "desktop:build:dir": "electron-builder --dir",
-    "desktop:build": "electron-builder --win"
+    "desktop:build": "electron-builder --win",
+    "desktop:build:portable": "electron-builder --win portable",
+    "desktop:build:nsis": "electron-builder --win nsis"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -40,6 +42,10 @@
   "build": {
     "appId": "com.echomuse.desktop",
     "productName": "EchoMuse",
+    "asar": false,
+    "compression": "normal",
+    "npmRebuild": false,
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "desktop/**/*",
       "public/**/*",
@@ -48,7 +54,8 @@
       "vendor/**/*",
       "server.js",
       "mcp-manager.js",
-      "package.json"
+      "package.json",
+      "package-lock.json"
     ],
     "extraMetadata": {
       "main": "desktop/main.js"
@@ -61,6 +68,18 @@
         "nsis",
         "portable"
       ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "EchoMuse"
     }
   }
 }

@@ -11,6 +11,7 @@ let tray = null;
 let serverStarted = false;
 let isQuitting = false;
 let windowStateSaveTimer = 0;
+const DESKTOP_LOAD_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 const WINDOW_STATE_FILE = 'window-state.json';
 const WINDOW_STATE_DEBOUNCE_MS = 320;
@@ -25,6 +26,7 @@ function ensureDesktopServerEnv() {
   if (!process.env.HOST) process.env.HOST = '127.0.0.1';
   if (!process.env.SHARE_MODE) process.env.SHARE_MODE = '0';
   if (!process.env.ALLOW_PUBLIC) process.env.ALLOW_PUBLIC = '0';
+  if (!process.env.ELECTRON_DESKTOP) process.env.ELECTRON_DESKTOP = '1';
   if (!process.env.PORT) process.env.PORT = process.env.ELECTRON_APP_PORT || '53173';
   if (!process.env.RATE_LIMIT_PER_MIN) process.env.RATE_LIMIT_PER_MIN = '600';
   if (!process.env.RATE_LIMIT_TRANSLATE_PER_MIN) process.env.RATE_LIMIT_TRANSLATE_PER_MIN = '1200';
@@ -196,6 +198,7 @@ function buildTrayMenu() {
   return Menu.buildFromTemplate([
     { label: visible ? 'Hide Window' : 'Show Window', click: () => (visible ? hideMainWindow() : showMainWindow()) },
     { label: 'Reload', click: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.reload() },
+    { label: 'Reload (Ignore Cache)', click: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.reloadIgnoringCache() },
     { type: 'separator' },
     { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
   ]);
@@ -292,7 +295,15 @@ async function bootDesktopApp() {
     startEmbeddedServer();
     await waitForServerReady(baseUrl, 25000);
     if (mainWindow && !mainWindow.isDestroyed()) {
-      await mainWindow.loadURL(baseUrl);
+      try {
+        await mainWindow.webContents.session.clearCache();
+      } catch (_) {
+        // Ignore cache clear failures; load with nonce below still helps.
+      }
+      const url = new URL(baseUrl);
+      url.searchParams.set('_desktop_nonce', DESKTOP_LOAD_NONCE);
+      url.searchParams.set('_ts', String(Date.now()));
+      await mainWindow.loadURL(url.toString());
     }
   } catch (error) {
     const msg = String(error && (error.message || error) || 'unknown error');

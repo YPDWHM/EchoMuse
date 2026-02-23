@@ -44,6 +44,7 @@ const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT || 8);
 const CHAT_USER_MAX_CHARS = Number(process.env.CHAT_USER_MAX_CHARS || 1000);
 const CHAT_ASSISTANT_MAX_CHARS = Number(process.env.CHAT_ASSISTANT_MAX_CHARS || 400);
 const ALLOW_PUBLIC = process.env.ALLOW_PUBLIC === '1';
+const ELECTRON_DESKTOP = process.env.ELECTRON_DESKTOP === '1';
 
 const CONFIG_DIR = path.join(os.homedir(), '.reviewpack');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -2723,7 +2724,9 @@ app.post('/api/translate', async (req, res) => {
 });
 
 app.use((req, res, next) => {
-  if (req.path.endsWith('.html') || req.path === '/') {
+  if (ELECTRON_DESKTOP) {
+    res.setHeader('Cache-Control', 'no-store');
+  } else if (req.path.endsWith('.html') || req.path === '/') {
     res.setHeader('Cache-Control', 'no-store');
   } else {
     res.setHeader('Cache-Control', 'no-cache, must-revalidate');

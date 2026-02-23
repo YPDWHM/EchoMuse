@@ -5,9 +5,33 @@ const STORAGE_SESSIONS_KEY = 'chatbox_sessions_v3';
 const STORAGE_ACTIVE_KEY = 'chatbox_active_session_v3';
 const STORAGE_AVATARS_KEY = 'chatbox_avatars_v1';
 const STORAGE_SETTINGS_KEY = 'chatbox_settings_v1';
+const STORAGE_CLIENT_ID_KEY = 'chatbox_client_id_v1';
 const MIN_CN_CHARS = 800;
 const MAX_SESSIONS = 30;
 const MAX_ARTIFACTS_PER_SESSION = 10;
+
+const CLIENT_INSTANCE_ID = getOrCreateClientInstanceId();
+
+function getOrCreateClientInstanceId() {
+  try {
+    const existing = String(localStorage.getItem(STORAGE_CLIENT_ID_KEY) || '').trim();
+    if (existing && existing.length <= 128) return existing;
+    const generated = createClientInstanceId();
+    localStorage.setItem(STORAGE_CLIENT_ID_KEY, generated);
+    return generated;
+  } catch (_) {
+    return createClientInstanceId();
+  }
+}
+
+function createClientInstanceId() {
+  try {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return `web-${window.crypto.randomUUID()}`;
+    }
+  } catch (_) {}
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const DEFAULT_SETTINGS = {
   language: 'zh-CN',
@@ -907,11 +931,24 @@ const translationOverlayRuntime = {
   queue: [],
   pending: new Set(),
   active: 0,
-  maxConcurrent: 2,
+  maxConcurrent: 3,
+  renderLookback: 12,
   lastErrorAt: 0,
   pauseUntil: 0,
-  resumeTimer: 0
+  resumeTimer: 0,
+  persistTimer: 0,
+  refreshTimer: 0,
+  refreshSessionId: ''
 };
+
+function applyTranslationRateHints(info) {
+  const limit = Number(info && info.translateRateLimitPerMin);
+  if (!Number.isFinite(limit) || limit <= 0) return;
+  if (limit >= 900) translationOverlayRuntime.maxConcurrent = 5;
+  else if (limit >= 480) translationOverlayRuntime.maxConcurrent = 4;
+  else if (limit >= 240) translationOverlayRuntime.maxConcurrent = 3;
+  else translationOverlayRuntime.maxConcurrent = 2;
+}
 
 const sharedUtils = window.EchoMuseUtils;
 if (!sharedUtils) {
@@ -2960,6 +2997,27 @@ function scheduleOverlayQueueResume() {
   }, delay);
 }
 
+function scheduleOverlayTranslationPersist() {
+  if (translationOverlayRuntime.persistTimer) return;
+  translationOverlayRuntime.persistTimer = window.setTimeout(() => {
+    translationOverlayRuntime.persistTimer = 0;
+    persistSessionsState();
+  }, 250);
+}
+
+function scheduleOverlayTranslationRefresh(sessionId) {
+  translationOverlayRuntime.refreshSessionId = String(sessionId || '');
+  if (translationOverlayRuntime.refreshTimer) return;
+  translationOverlayRuntime.refreshTimer = window.setTimeout(() => {
+    translationOverlayRuntime.refreshTimer = 0;
+    renderContactList();
+    const activeSession = getActiveSession();
+    if (activeSession && activeSession.id === translationOverlayRuntime.refreshSessionId) {
+      renderMessages();
+    }
+  }, 120);
+}
+
 async function pumpOverlayTranslationQueue() {
   if (translationOverlayRuntime.pauseUntil && Date.now() < translationOverlayRuntime.pauseUntil) {
     scheduleOverlayQueueResume();
@@ -2978,11 +3036,15 @@ async function pumpOverlayTranslationQueue() {
         const isRateLimited = Number(error && error.status) === 429 || /Too Many Requests|\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41/.test(msg);
         if (isRateLimited) {
           const now = Date.now();
-          translationOverlayRuntime.pauseUntil = Math.max(translationOverlayRuntime.pauseUntil || 0, now + 15000);
+          const retryAfterMs = Number(error && error.payload && error.payload.retryAfterMs);
+          const backoffMs = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+            ? Math.max(1000, Math.min(60000, retryAfterMs))
+            : 15000;
+          translationOverlayRuntime.pauseUntil = Math.max(translationOverlayRuntime.pauseUntil || 0, now + backoffMs);
           scheduleOverlayQueueResume();
           if (now - translationOverlayRuntime.lastErrorAt > 3000) {
             translationOverlayRuntime.lastErrorAt = now;
-            setStatus('\u7ffb\u8bd1\u8bf7\u6c42\u8fc7\u5feb\uff0c\u5df2\u6682\u505c 15 \u79d2\u540e\u7ee7\u7eed\u3002');
+            setStatus(`翻译请求过快，已暂停 ${Math.ceil(backoffMs / 1000)} 秒后继续。`);
           }
           return;
         }
@@ -3016,6 +3078,7 @@ async function runOverlayTranslationTask(task) {
     body: JSON.stringify({
       text: task.sourceText,
       targetLang: task.lang,
+      fastMode: true,
       providerId: state.ui.selectedProviderId || undefined,
       model: state.ui.selectedModel || undefined
     })
@@ -3025,13 +3088,9 @@ async function runOverlayTranslationTask(task) {
   if (!translated) return;
 
   setMessageTranslationCache(message, task.lang, task.sourceText, translated);
-  persistSessionsState();
+  scheduleOverlayTranslationPersist();
 
-  const activeSession = getActiveSession();
-  if (activeSession && activeSession.id === session.id) {
-    renderMessages();
-    renderContactList();
-  }
+  scheduleOverlayTranslationRefresh(session.id);
 }
 
 function renderMessages() {
@@ -3095,8 +3154,11 @@ function renderMessages() {
   }).join('');
 
   if (isAvatarTranslationOverlayEnabled(session)) {
-    for (const message of session.messages) {
-      enqueueOverlayTranslation(session, message);
+    let queued = 0;
+    for (let i = session.messages.length - 1; i >= 0; i -= 1) {
+      enqueueOverlayTranslation(session, session.messages[i]);
+      queued += 1;
+      if (queued >= translationOverlayRuntime.renderLookback) break;
     }
   }
 
@@ -3347,6 +3409,7 @@ async function sendSingleChatMessage(session) {
       headers: {
         'Content-Type': 'application/json',
         ...(state.token ? { 'x-access-token': state.token } : {}),
+        ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
         ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
       },
       body: JSON.stringify({
@@ -3431,6 +3494,7 @@ async function sendGroupChatMessage(session, group) {
         headers: {
           'Content-Type': 'application/json',
           ...(state.token ? { 'x-access-token': state.token } : {}),
+          ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
           ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
         },
         body: JSON.stringify({
@@ -3890,6 +3954,7 @@ async function refreshServiceStatus() {
   try {
     const info = await apiRequest('/api/info', { method: 'GET' });
     state.info = { ...state.info, ...info };
+    applyTranslationRateHints(info);
     const health = await apiRequest('/api/health', { method: 'GET' });
     state.health.online = Boolean(health.ok && health.model_available);
     state.health.message = health.message || '';
@@ -4474,6 +4539,7 @@ async function apiRequest(url, options) {
   const headers = new Headers(reqOptions.headers || {});
   if (reqOptions.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   if (state.token) headers.set('x-access-token', state.token);
+  if (CLIENT_INSTANCE_ID) headers.set('x-client-id', CLIENT_INSTANCE_ID);
   const proxyHeader = getClientProxyHeaderValue();
   if (proxyHeader) headers.set('x-client-proxy-config', proxyHeader);
 
@@ -4755,14 +4821,865 @@ function setStatus(text) {
 
 /* ── MCP Settings ── */
 
+const mcpCatalogRuntime = {
+  initialized: false,
+  ui: null,
+  query: '',
+  loading: false,
+  lastMessage: ''
+};
+
+const mcpServerEditorRuntime = {
+  initialized: false,
+  ui: null,
+  mode: 'create',
+  editId: '',
+  saving: false
+};
+
+const mcpJsonImportRuntime = {
+  initialized: false,
+  ui: null,
+  busy: false
+};
+
+const kbCreatorRuntime = {
+  initialized: false,
+  ui: null,
+  mode: 'create',
+  editId: '',
+  file: null,
+  busy: false
+};
+
+function ensureToolUiInjectedStyle() {
+  if (document.getElementById('toolUiInjectedStyle')) return;
+  const style = document.createElement('style');
+  style.id = 'toolUiInjectedStyle';
+  style.textContent = `
+    .toolui-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.28);display:none;align-items:center;justify-content:center;padding:24px;z-index:10000}
+    .toolui-backdrop.open{display:flex}
+    .toolui-modal{width:min(860px,96vw);max-height:min(88vh,900px);background:#fff;color:#111827;border-radius:14px;box-shadow:0 24px 70px rgba(15,23,42,.25);display:flex;flex-direction:column;overflow:hidden}
+    .toolui-modal.narrow{width:min(720px,96vw)}
+    .toolui-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.18)}
+    .toolui-title{font-size:18px;font-weight:700}
+    .toolui-close{border:0;background:#f1f5f9;color:#334155;border-radius:10px;padding:8px 10px;cursor:pointer}
+    .toolui-body{padding:16px 18px;overflow:auto}
+    .toolui-foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:14px 18px;border-top:1px solid rgba(148,163,184,.18);background:#fff}
+    .toolui-grid{display:grid;grid-template-columns:1fr;gap:12px}
+    .toolui-row{display:flex;flex-direction:column;gap:6px}
+    .toolui-row label{font-size:13px;font-weight:600;color:#334155}
+    .toolui-row .hint{font-size:12px;color:#94a3b8}
+    .toolui-input,.toolui-select,.toolui-textarea{width:100%;border:1px solid rgba(148,163,184,.35);border-radius:10px;padding:10px 12px;font:inherit;color:inherit;background:#fff}
+    .toolui-textarea{min-height:110px;resize:vertical}
+    .toolui-input:focus,.toolui-select:focus,.toolui-textarea:focus{outline:0;border-color:rgba(59,130,246,.55);box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+    .toolui-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .toolui-radio{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid rgba(148,163,184,.24);border-radius:999px;background:#fff;cursor:pointer}
+    .toolui-radio input{margin:0}
+    .toolui-radio.active{border-color:rgba(59,130,246,.45);background:#eff6ff}
+    .toolui-switch-block{border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:12px;background:#fafcff}
+    .toolui-hidden{display:none !important}
+    .toolui-status{font-size:12px;color:#64748b;margin-top:6px;min-height:18px;line-height:1.35}
+    .toolui-status.error{color:#b91c1c}
+    .toolui-status.success{color:#047857}
+    .toolui-section-title{font-size:13px;font-weight:700;color:#64748b;margin:4px 0 2px}
+    .toolui-actions-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .toolui-filebox{border:1px dashed rgba(148,163,184,.35);border-radius:10px;padding:10px 12px;background:#f8fafc}
+    @media (min-width: 760px){
+      .toolui-grid.two-col{grid-template-columns:1fr 1fr}
+    }
+    @media (max-width: 700px){
+      .toolui-backdrop{padding:12px}
+      .toolui-modal,.toolui-modal.narrow{width:100%;max-height:92vh;border-radius:12px}
+      .toolui-head,.toolui-body,.toolui-foot{padding-left:14px;padding-right:14px}
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function setToolUiStatus(el, text, type = '') {
+  if (!el) return;
+  el.textContent = String(text || '');
+  el.classList.remove('error', 'success');
+  if (type) el.classList.add(type);
+}
+
+function parseKeyValueLines(text) {
+  const out = {};
+  String(text || '').split(/\r?\n/).forEach((line) => {
+    const s = line.trim();
+    if (!s || s.startsWith('#')) return;
+    let idx = s.indexOf('=');
+    if (idx <= 0) idx = s.indexOf(':');
+    if (idx <= 0) return;
+    out[s.slice(0, idx).trim()] = s.slice(idx + 1).trim();
+  });
+  return out;
+}
+
+function kvObjectToLines(obj, sep = '=') {
+  if (!obj || typeof obj !== 'object') return '';
+  return Object.entries(obj).map(([k, v]) => `${k}${sep}${String(v ?? '')}`).join('\n');
+}
+
+function getMcpSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="mcp"]') : null;
+}
+
+async function openSettingsSection(section) {
+  if (!section) return;
+  if (els.settingsPanel && els.settingsPanel.classList.contains('hidden')) {
+    await openSettingsPanel();
+  }
+  if (!els.settingsPanel) return;
+  els.settingsPanel.querySelectorAll('.settings-nav-item').forEach((b) => b.classList.remove('active'));
+  const nav = els.settingsPanel.querySelector(`.settings-nav-item[data-section="${CSS.escape(section)}"]`);
+  if (nav) nav.classList.add('active');
+  els.settingsPanel.querySelectorAll('.settings-section').forEach((s) => {
+    s.classList.toggle('hidden', s.dataset.section !== section);
+  });
+}
+
+function ensureMcpCatalogLauncher() {
+  const section = getMcpSettingsSection();
+  if (!section || !els.mcpServerListWrap) return;
+  if (section.querySelector('#mcpCatalogOpenBtn')) return;
+
+  const host = document.createElement('div');
+  host.className = 'mcp-catalog-toolbar';
+  host.innerHTML = `
+    <div class="mcp-catalog-toolbar-card" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid rgba(148,163,184,.28);border-radius:12px;background:rgba(248,250,252,.75);margin:8px 0 12px;">
+      <div>
+        <div style="font-weight:600;">MCP 添加中心</div>
+        <div class="muted" style="font-size:12px;line-height:1.4;">自定义 MCP 管理：启用后 AI 在聊天中可调用对应工具（非装饰）</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button id="mcpCatalogOpenBtn" class="btn primary" type="button">打开目录</button>
+        <button id="mcpCatalogManualBtn" class="btn ghost" type="button">手动添加</button>
+      </div>
+    </div>
+  `;
+  section.insertBefore(host, els.mcpServerListWrap);
+
+  const openBtn = host.querySelector('#mcpCatalogOpenBtn');
+  const manualBtn = host.querySelector('#mcpCatalogManualBtn');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      openMcpCatalogModal().catch((error) => {
+        if (els.mcpStatus) els.mcpStatus.textContent = `打开 MCP 目录失败：${error.message || error}`;
+      });
+    });
+  }
+  if (manualBtn) {
+    manualBtn.addEventListener('click', async () => {
+      await openMcpServerEditorModal({ mode: 'create' });
+    });
+  }
+}
+
+function ensureMcpCatalogModal() {
+  if (mcpCatalogRuntime.initialized && mcpCatalogRuntime.ui) return mcpCatalogRuntime.ui;
+
+  if (!document.getElementById('mcpCatalogInjectedStyle')) {
+    const style = document.createElement('style');
+    style.id = 'mcpCatalogInjectedStyle';
+    style.textContent = `
+      .mcp-catalog-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.28);display:none;align-items:center;justify-content:center;padding:24px;z-index:9999}
+      .mcp-catalog-backdrop.open{display:flex}
+      .mcp-catalog-modal{width:min(860px,96vw);max-height:min(86vh,900px);background:#fff;color:#111827;border-radius:14px;box-shadow:0 24px 70px rgba(15,23,42,.25);display:flex;flex-direction:column;overflow:hidden}
+      .mcp-catalog-head{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid rgba(148,163,184,.2)}
+      .mcp-catalog-search{flex:1;display:flex;align-items:center;gap:8px;border:1px solid rgba(148,163,184,.35);border-radius:10px;padding:10px 12px;background:#f8fafc}
+      .mcp-catalog-search input{border:0;outline:0;background:transparent;width:100%;font-size:14px;color:inherit}
+      .mcp-catalog-close{border:0;background:#f1f5f9;color:#334155;border-radius:10px;padding:8px 10px;cursor:pointer}
+      .mcp-catalog-body{padding:10px 10px 14px;overflow:auto}
+      .mcp-catalog-status{font-size:12px;color:#64748b;padding:4px 6px 8px}
+      .mcp-catalog-section{padding:6px}
+      .mcp-catalog-section-title{font-size:12px;font-weight:700;color:#64748b;padding:8px 6px;text-transform:none}
+      .mcp-catalog-list{display:flex;flex-direction:column;gap:6px}
+      .mcp-catalog-item{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;border:1px solid rgba(148,163,184,.18);background:#fff;border-radius:12px;padding:12px;cursor:pointer;transition:border-color .15s ease,background-color .15s ease}
+      .mcp-catalog-item:hover{border-color:rgba(59,130,246,.35);background:#f8fbff}
+      .mcp-catalog-item[disabled]{cursor:not-allowed;opacity:.62;background:#f8fafc}
+      .mcp-catalog-icon{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-weight:700;flex:0 0 auto}
+      .mcp-catalog-icon.text{background:#f1f5f9;color:#334155}
+      .mcp-catalog-item-main{min-width:0;flex:1}
+      .mcp-catalog-item-title{font-weight:600;line-height:1.25}
+      .mcp-catalog-item-desc{font-size:12px;color:#64748b;line-height:1.35;margin-top:2px;word-break:break-word}
+      .mcp-catalog-item-meta{font-size:11px;color:#94a3b8;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .mcp-catalog-item-badge{font-size:11px;border-radius:999px;padding:3px 8px;background:#eff6ff;color:#1d4ed8;align-self:center}
+      .mcp-catalog-item-badge.added{background:#ecfdf5;color:#047857}
+      .mcp-catalog-empty{padding:18px 14px;color:#64748b;text-align:center}
+      @media (max-width: 700px){
+        .mcp-catalog-backdrop{padding:12px}
+        .mcp-catalog-modal{width:100%;max-height:92vh;border-radius:12px}
+        .mcp-catalog-item{padding:10px}
+        .mcp-catalog-head{padding:12px}
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'mcp-catalog-backdrop';
+  backdrop.innerHTML = `
+    <div class="mcp-catalog-modal" role="dialog" aria-modal="true" aria-labelledby="mcpCatalogTitle">
+      <div class="mcp-catalog-head">
+        <div class="mcp-catalog-search">
+          <span aria-hidden="true">🔎</span>
+          <input id="mcpCatalogSearchInput" type="text" placeholder="搜索 MCP、命令、描述..." autocomplete="off">
+        </div>
+        <button class="mcp-catalog-close" id="mcpCatalogCloseBtn" type="button" aria-label="关闭">ESC</button>
+      </div>
+      <div class="mcp-catalog-body">
+        <div id="mcpCatalogStatus" class="mcp-catalog-status">正在加载...</div>
+        <div id="mcpCatalogSections"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    searchInput: backdrop.querySelector('#mcpCatalogSearchInput'),
+    closeBtn: backdrop.querySelector('#mcpCatalogCloseBtn'),
+    status: backdrop.querySelector('#mcpCatalogStatus'),
+    sections: backdrop.querySelector('#mcpCatalogSections')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeMcpCatalogModal();
+  });
+  if (ui.closeBtn) ui.closeBtn.addEventListener('click', () => closeMcpCatalogModal());
+  if (ui.searchInput) {
+    ui.searchInput.addEventListener('input', () => {
+      mcpCatalogRuntime.query = String(ui.searchInput.value || '').trim();
+      renderMcpCatalogSections();
+    });
+  }
+  if (ui.sections) {
+    ui.sections.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-mcp-catalog-action],button[data-mcp-preset-key]');
+      if (!btn || btn.disabled) return;
+      if (btn.dataset.mcpCatalogAction) {
+        handleMcpCatalogAction(btn.dataset.mcpCatalogAction).catch((error) => {
+          mcpCatalogRuntime.lastMessage = `操作失败：${error.message || error}`;
+          mcpCatalogRuntime.loading = false;
+          renderMcpCatalogSections();
+        });
+        return;
+      }
+      if (btn.dataset.mcpPresetKey) {
+        addMcpPresetFromCatalog(btn.dataset.mcpPresetKey).catch((error) => {
+          mcpCatalogRuntime.lastMessage = `添加失败：${error.message || error}`;
+          mcpCatalogRuntime.loading = false;
+          renderMcpCatalogSections();
+        });
+      }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mcpCatalogRuntime.ui && mcpCatalogRuntime.ui.backdrop.classList.contains('open')) {
+      closeMcpCatalogModal();
+    }
+  });
+
+  mcpCatalogRuntime.initialized = true;
+  mcpCatalogRuntime.ui = ui;
+  return ui;
+}
+
+function closeMcpCatalogModal() {
+  const ui = ensureMcpCatalogModal();
+  ui.backdrop.classList.remove('open');
+}
+
+async function openMcpCatalogModal() {
+  await openSettingsSection('mcp');
+  const ui = ensureMcpCatalogModal();
+  ui.backdrop.classList.add('open');
+  if (ui.searchInput) {
+    ui.searchInput.value = mcpCatalogRuntime.query || '';
+    window.setTimeout(() => ui.searchInput.focus(), 0);
+  }
+  renderMcpCatalogSections();
+  await refreshMcpCatalogData();
+}
+
+function mcpPresetMatchesServer(preset, server) {
+  if (!preset || !server) return false;
+  const presetType = String(preset.type || 'stdio').toLowerCase();
+  const serverType = String(server.type || 'stdio').toLowerCase();
+  if (presetType !== serverType) return false;
+  if (presetType !== 'stdio') {
+    return String(preset.url || '').trim() && String(preset.url || '').trim() === String(server.url || '').trim();
+  }
+  const pCmd = String(preset.command || '').trim();
+  const sCmd = String(server.command || '').trim();
+  if (!pCmd || pCmd !== sCmd) return false;
+  const pArgs = JSON.stringify(Array.isArray(preset.args) ? preset.args.map((x) => String(x)) : []);
+  const sArgs = JSON.stringify(Array.isArray(server.args) ? server.args.map((x) => String(x)) : []);
+  return pArgs === sArgs;
+}
+
+function getMcpCatalogPresetAddedMap() {
+  const presets = Array.isArray(state._mcpPresetCache) ? state._mcpPresetCache : [];
+  const servers = Array.isArray(state._mcpServerCache) ? state._mcpServerCache : [];
+  const out = new Map();
+  presets.forEach((preset) => {
+    const added = servers.some((server) => mcpPresetMatchesServer(preset, server));
+    out.set(String(preset.key || ''), added);
+  });
+  return out;
+}
+
+function mcpCatalogEntryMatchesQuery(entry, query) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return [entry.title, entry.desc, entry.meta].some((v) => String(v || '').toLowerCase().includes(q));
+}
+
+function renderMcpCatalogSections() {
+  const ui = ensureMcpCatalogModal();
+  if (!ui.sections) return;
+  const query = String(mcpCatalogRuntime.query || '').trim();
+  const presetAddedMap = getMcpCatalogPresetAddedMap();
+  const presets = Array.isArray(state._mcpPresetCache) ? state._mcpPresetCache : [];
+
+  const sections = [];
+  sections.push({
+    title: '添加导入',
+    items: [
+      {
+        kind: 'action',
+        action: 'custom',
+        icon: '+',
+        iconClass: '',
+        title: '添加自定义服务器',
+        desc: '手动配置 stdio MCP 服务（npx / node / python）',
+        meta: '适合本地命令型 MCP Server',
+        badge: '打开表单'
+      },
+      {
+        kind: 'action',
+        action: 'import-json',
+        icon: 'JSON',
+        iconClass: 'text',
+        title: '从剪贴板 JSON 导入',
+        desc: '支持 mcpServers / servers / 配置数组',
+        meta: '自动跳过重复项',
+        badge: '快速导入'
+      }
+    ]
+  });
+
+  sections.push({
+    title: '探索（预设）',
+    items: presets.map((p) => ({
+      kind: 'preset',
+      key: String(p.key || ''),
+      icon: p.icon || '🔌',
+      iconClass: '',
+      title: String(p.name || 'MCP Server'),
+      desc: String(p.desc || ''),
+      meta: ((p.type || 'stdio') === 'stdio')
+        ? `${String(p.command || '')} ${(Array.isArray(p.args) ? p.args.join(' ') : '')}`.trim()
+        : `${String(p.type || 'http').toUpperCase()} ${String(p.url || '')}`.trim(),
+      added: Boolean(presetAddedMap.get(String(p.key || ''))),
+      badge: Boolean(presetAddedMap.get(String(p.key || ''))) ? '已添加' : '点击添加'
+    }))
+  });
+
+  let visibleCount = 0;
+  const html = sections.map((section) => {
+    const items = section.items.filter((entry) => mcpCatalogEntryMatchesQuery(entry, query));
+    if (!items.length) return '';
+    visibleCount += items.length;
+    const itemsHtml = items.map((entry) => {
+      const isPreset = entry.kind === 'preset';
+      const disabledAttr = isPreset && entry.added ? ' disabled' : '';
+      const actionAttr = !isPreset
+        ? ` data-mcp-catalog-action="${escapeHtml(entry.action)}"`
+        : ` data-mcp-preset-key="${escapeHtml(entry.key)}"`;
+      const badgeClass = entry.added ? 'mcp-catalog-item-badge added' : 'mcp-catalog-item-badge';
+      return `
+        <button type="button" class="mcp-catalog-item"${actionAttr}${disabledAttr}>
+          <span class="mcp-catalog-icon${entry.iconClass ? ` ${entry.iconClass}` : ''}">${escapeHtml(entry.icon)}</span>
+          <span class="mcp-catalog-item-main">
+            <div class="mcp-catalog-item-title">${escapeHtml(entry.title)}</div>
+            <div class="mcp-catalog-item-desc">${escapeHtml(entry.desc)}</div>
+            <div class="mcp-catalog-item-meta">${escapeHtml(entry.meta)}</div>
+          </span>
+          <span class="${badgeClass}">${escapeHtml(entry.badge || '')}</span>
+        </button>
+      `;
+    }).join('');
+    return `
+      <section class="mcp-catalog-section">
+        <div class="mcp-catalog-section-title">${escapeHtml(section.title)}</div>
+        <div class="mcp-catalog-list">${itemsHtml}</div>
+      </section>
+    `;
+  }).join('');
+
+  ui.sections.innerHTML = html || '<div class="mcp-catalog-empty">没有匹配的 MCP 项目</div>';
+
+  const parts = [];
+  const serverCount = Array.isArray(state._mcpServerCache) ? state._mcpServerCache.length : 0;
+  if (serverCount || serverCount === 0) parts.push(`已添加 ${serverCount} 个`);
+  if (presets.length) parts.push(`预设 ${presets.length} 个`);
+  if (query) parts.push(`搜索：${query}`);
+  if (mcpCatalogRuntime.lastMessage) parts.push(mcpCatalogRuntime.lastMessage);
+  if (mcpCatalogRuntime.loading) parts.push('同步中...');
+  if (ui.status) ui.status.textContent = parts.join(' ｜ ') || 'MCP 目录';
+}
+
+async function refreshMcpCatalogData() {
+  ensureMcpCatalogModal();
+  mcpCatalogRuntime.loading = true;
+  mcpCatalogRuntime.lastMessage = '';
+  renderMcpCatalogSections();
+  const results = await Promise.allSettled([
+    apiRequest('/api/mcp-servers', { method: 'GET' }),
+    apiRequest('/api/preset-mcp-servers', { method: 'GET' })
+  ]);
+  const [serversRes, presetsRes] = results;
+
+  if (serversRes.status === 'fulfilled') {
+    state._mcpServerCache = Array.isArray(serversRes.value.servers) ? serversRes.value.servers : [];
+  } else {
+    mcpCatalogRuntime.lastMessage = `服务器列表加载失败：${serversRes.reason?.message || serversRes.reason || 'unknown'}`;
+  }
+  if (presetsRes.status === 'fulfilled') {
+    state._mcpPresetCache = Array.isArray(presetsRes.value.presets) ? presetsRes.value.presets : [];
+  } else if (!mcpCatalogRuntime.lastMessage) {
+    mcpCatalogRuntime.lastMessage = `预设加载失败：${presetsRes.reason?.message || presetsRes.reason || 'unknown'}`;
+  }
+
+  mcpCatalogRuntime.loading = false;
+  renderMcpCatalogSections();
+}
+
+async function handleMcpCatalogAction(action) {
+  if (action === 'custom') {
+    closeMcpCatalogModal();
+    await openMcpServerEditorModal({ mode: 'create' });
+    return;
+  }
+  if (action === 'import-json') {
+    closeMcpCatalogModal();
+    await openMcpJsonImportModal();
+  }
+}
+
+function buildMcpPayloadFromPreset(preset) {
+  const type = String(preset.type || 'stdio').toLowerCase();
+  if (type !== 'stdio') {
+    return {
+      name: String(preset.name || 'MCP Server').trim() || 'MCP Server',
+      type,
+      url: String(preset.url || '').trim(),
+      headers: preset.headers && typeof preset.headers === 'object' ? { ...preset.headers } : {},
+      enabled: true
+    };
+  }
+  return {
+    name: String(preset.name || 'MCP Server').trim() || 'MCP Server',
+    command: String(preset.command || '').trim(),
+    args: Array.isArray(preset.args) ? preset.args.map((x) => String(x)) : [],
+    env: preset.env && typeof preset.env === 'object' ? { ...preset.env } : {},
+    enabled: true
+  };
+}
+
+async function addMcpPresetFromCatalog(presetKey) {
+  const key = String(presetKey || '');
+  if (!key) return;
+  const preset = (Array.isArray(state._mcpPresetCache) ? state._mcpPresetCache : []).find((p) => String(p.key || '') === key);
+  if (!preset) {
+    mcpCatalogRuntime.lastMessage = '未找到该预设';
+    renderMcpCatalogSections();
+    return;
+  }
+
+  mcpCatalogRuntime.loading = true;
+  mcpCatalogRuntime.lastMessage = `正在添加：${preset.name}`;
+  renderMcpCatalogSections();
+  try {
+    await apiRequest('/api/mcp-servers', {
+      method: 'POST',
+      body: JSON.stringify(buildMcpPayloadFromPreset(preset))
+    });
+    if (els.mcpStatus) els.mcpStatus.textContent = `已添加 MCP：${preset.name}`;
+    await refreshMcpUiAfterChange();
+    mcpCatalogRuntime.lastMessage = `已添加：${preset.name}`;
+  } catch (error) {
+    const msg = error.message || String(error);
+    if (els.mcpStatus) els.mcpStatus.textContent = `添加失败：${msg}`;
+    mcpCatalogRuntime.lastMessage = `添加失败：${msg}`;
+  } finally {
+    mcpCatalogRuntime.loading = false;
+    renderMcpCatalogSections();
+  }
+}
+
+async function refreshMcpUiAfterChange() {
+  const results = await Promise.allSettled([
+    loadMcpServerList(),
+    refreshMcpQuickPanel()
+  ]);
+  const loadErr = results.find((r) => r.status === 'rejected');
+  if (loadErr && els.mcpStatus) {
+    els.mcpStatus.textContent = `MCP 列表刷新失败：${loadErr.reason?.message || loadErr.reason || 'unknown'}`;
+  }
+  if (mcpCatalogRuntime.initialized && mcpCatalogRuntime.ui && mcpCatalogRuntime.ui.backdrop.classList.contains('open')) {
+    renderMcpCatalogSections();
+  }
+}
+
+function ensureMcpServerEditorModal() {
+  if (mcpServerEditorRuntime.initialized && mcpServerEditorRuntime.ui) return mcpServerEditorRuntime.ui;
+  ensureToolUiInjectedStyle();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal narrow" role="dialog" aria-modal="true" aria-labelledby="mcpServerEditorTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="mcpServerEditorTitle">添加 MCP Server</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <div class="toolui-row">
+            <label for="mcpEditorNameInput">名称 *</label>
+            <input id="mcpEditorNameInput" class="toolui-input" type="text" placeholder="如：Brave Search / GitHub / 本地工具箱">
+          </div>
+
+          <div class="toolui-row">
+            <label>类型 *</label>
+            <div class="toolui-inline" id="mcpEditorTransportGroup">
+              <label class="toolui-radio active" data-radio-wrap>
+                <input type="radio" name="mcpEditorTransport" value="http" checked>
+                <span>远程 (http/sse)</span>
+              </label>
+              <label class="toolui-radio" data-radio-wrap>
+                <input type="radio" name="mcpEditorTransport" value="stdio">
+                <span>本地 (stdio)</span>
+              </label>
+            </div>
+          </div>
+
+          <div id="mcpEditorRemoteBlock" class="toolui-switch-block">
+            <div class="toolui-grid">
+              <div class="toolui-row">
+                <label for="mcpEditorRemoteTypeSelect">远程协议</label>
+                <select id="mcpEditorRemoteTypeSelect" class="toolui-select">
+                  <option value="http">HTTP</option>
+                  <option value="sse">SSE</option>
+                </select>
+              </div>
+              <div class="toolui-row">
+                <label for="mcpEditorUrlInput">URL *</label>
+                <input id="mcpEditorUrlInput" class="toolui-input" type="text" placeholder="https://...">
+              </div>
+              <div class="toolui-row">
+                <label for="mcpEditorHeadersInput">HTTP Header</label>
+                <textarea id="mcpEditorHeadersInput" class="toolui-textarea" rows="4" placeholder="Authorization=Bearer xxx&#10;X-API-Key=..."></textarea>
+                <div class="hint">每行一个，支持 <code>KEY=VALUE</code> 或 <code>Key: Value</code></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="mcpEditorStdioBlock" class="toolui-switch-block toolui-hidden">
+            <div class="toolui-grid">
+              <div class="toolui-row">
+                <label for="mcpEditorCommandInput">命令 *</label>
+                <input id="mcpEditorCommandInput" class="toolui-input" type="text" placeholder="npx / node / python">
+              </div>
+              <div class="toolui-row">
+                <label for="mcpEditorArgsInput">参数</label>
+                <input id="mcpEditorArgsInput" class="toolui-input" type="text" placeholder="-y @modelcontextprotocol/server-fetch">
+              </div>
+              <div class="toolui-row">
+                <label for="mcpEditorEnvInput">环境变量</label>
+                <textarea id="mcpEditorEnvInput" class="toolui-textarea" rows="4" placeholder="KEY=value&#10;KEY2=value2"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <div id="mcpEditorStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="button" class="btn ghost" id="mcpEditorTestBtn">测试</button>
+        <button type="button" class="btn primary" id="mcpEditorSaveBtn">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    title: backdrop.querySelector('#mcpServerEditorTitle'),
+    name: backdrop.querySelector('#mcpEditorNameInput'),
+    transportGroup: backdrop.querySelector('#mcpEditorTransportGroup'),
+    transportRadios: Array.from(backdrop.querySelectorAll('input[name="mcpEditorTransport"]')),
+    remoteBlock: backdrop.querySelector('#mcpEditorRemoteBlock'),
+    stdioBlock: backdrop.querySelector('#mcpEditorStdioBlock'),
+    remoteType: backdrop.querySelector('#mcpEditorRemoteTypeSelect'),
+    url: backdrop.querySelector('#mcpEditorUrlInput'),
+    headers: backdrop.querySelector('#mcpEditorHeadersInput'),
+    command: backdrop.querySelector('#mcpEditorCommandInput'),
+    args: backdrop.querySelector('#mcpEditorArgsInput'),
+    env: backdrop.querySelector('#mcpEditorEnvInput'),
+    status: backdrop.querySelector('#mcpEditorStatus'),
+    testBtn: backdrop.querySelector('#mcpEditorTestBtn'),
+    saveBtn: backdrop.querySelector('#mcpEditorSaveBtn')
+  };
+
+  function updateTransportUi() {
+    const current = (ui.transportRadios.find((r) => r.checked) || {}).value || 'http';
+    ui.remoteBlock.classList.toggle('toolui-hidden', current === 'stdio');
+    ui.stdioBlock.classList.toggle('toolui-hidden', current !== 'stdio');
+    ui.transportGroup.querySelectorAll('[data-radio-wrap]').forEach((wrap) => {
+      const radio = wrap.querySelector('input[type="radio"]');
+      wrap.classList.toggle('active', !!(radio && radio.checked));
+    });
+  }
+
+  ui.transportRadios.forEach((radio) => radio.addEventListener('change', updateTransportUi));
+  updateTransportUi();
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeMcpServerEditorModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeMcpServerEditorModal()));
+  ui.testBtn.addEventListener('click', () => testMcpServerEditorModal());
+  ui.saveBtn.addEventListener('click', () => saveMcpServerEditorModal());
+
+  mcpServerEditorRuntime.initialized = true;
+  mcpServerEditorRuntime.ui = ui;
+  return ui;
+}
+
+function closeMcpServerEditorModal() {
+  const ui = ensureMcpServerEditorModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function getMcpServerEditorPayload({ requireName = true } = {}) {
+  const ui = ensureMcpServerEditorModal();
+  const name = String(ui.name.value || '').trim();
+  const transport = (ui.transportRadios.find((r) => r.checked) || {}).value || 'http';
+  const payload = {};
+
+  if (requireName && !name) throw new Error('请输入名称');
+  if (name) payload.name = name;
+  if (transport === 'stdio') {
+    const command = String(ui.command.value || '').trim();
+    if (!command) throw new Error('请输入本地命令');
+    payload.type = 'stdio';
+    payload.command = command;
+    payload.args = parseMcpImportArgs(ui.args.value || '');
+    payload.env = parseMcpImportEnv(String(ui.env.value || '').replace(/\r/g, ''));
+  } else {
+    const remoteType = String(ui.remoteType.value || 'http').toLowerCase() === 'sse' ? 'sse' : 'http';
+    const url = String(ui.url.value || '').trim();
+    if (!url) throw new Error('请输入远程 URL');
+    payload.type = remoteType;
+    payload.url = url;
+    payload.headers = parseKeyValueLines(ui.headers.value || '');
+  }
+  return payload;
+}
+
+async function openMcpServerEditorModal(options = {}) {
+  await openSettingsSection('mcp');
+  const ui = ensureMcpServerEditorModal();
+  const mode = options.mode === 'edit' ? 'edit' : 'create';
+  const server = options.server || null;
+  mcpServerEditorRuntime.mode = mode;
+  mcpServerEditorRuntime.editId = server && server.id ? String(server.id) : '';
+  mcpServerEditorRuntime.saving = false;
+
+  ui.title.textContent = mode === 'edit' ? '编辑 MCP Server' : '添加 MCP Server';
+  ui.name.value = server ? String(server.name || '') : '';
+
+  const type = String((server && server.type) || 'http').toLowerCase();
+  const isStdio = type === 'stdio';
+  ui.transportRadios.forEach((r) => { r.checked = isStdio ? r.value === 'stdio' : r.value === 'http'; });
+  ui.remoteType.value = type === 'sse' ? 'sse' : 'http';
+  ui.url.value = server ? String(server.url || '') : '';
+  ui.headers.value = server ? kvObjectToLines(server.headers || {}, '=') : '';
+  ui.command.value = server ? String(server.command || '') : '';
+  ui.args.value = server ? (Array.isArray(server.args) ? server.args.join(' ') : String(server.args || '')) : '';
+  ui.env.value = server ? kvObjectToLines(server.env || {}, '=') : '';
+  setToolUiStatus(ui.status, '', '');
+
+  ui.transportGroup.querySelectorAll('[data-radio-wrap]').forEach((wrap) => {
+    const radio = wrap.querySelector('input[type="radio"]');
+    wrap.classList.toggle('active', !!(radio && radio.checked));
+  });
+  ui.remoteBlock.classList.toggle('toolui-hidden', isStdio);
+  ui.stdioBlock.classList.toggle('toolui-hidden', !isStdio);
+
+  ui.backdrop.classList.add('open');
+  window.setTimeout(() => ui.name.focus(), 0);
+}
+
+async function testMcpServerEditorModal() {
+  const ui = ensureMcpServerEditorModal();
+  try {
+    const payload = getMcpServerEditorPayload({ requireName: false });
+    setToolUiStatus(ui.status, '测试连接中...', '');
+    const data = await apiRequest('/api/mcp-servers/test-connection', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    const tools = Array.isArray(data.tools) ? data.tools : [];
+    const names = tools.slice(0, 6).map((t) => t.name).join(', ');
+    setToolUiStatus(ui.status, `测试成功：${tools.length} 个工具${names ? `（${names}）` : ''}`, 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `测试失败：${error.message || error}`, 'error');
+  }
+}
+
+async function saveMcpServerEditorModal() {
+  const ui = ensureMcpServerEditorModal();
+  if (mcpServerEditorRuntime.saving) return;
+  try {
+    const payload = getMcpServerEditorPayload({ requireName: true });
+    if (mcpServerEditorRuntime.mode === 'edit' && mcpServerEditorRuntime.editId) {
+      payload.id = mcpServerEditorRuntime.editId;
+    }
+    mcpServerEditorRuntime.saving = true;
+    setToolUiStatus(ui.status, '保存中...', '');
+    await apiRequest('/api/mcp-servers', { method: 'POST', body: JSON.stringify(payload) });
+    setToolUiStatus(ui.status, '已保存', 'success');
+    if (els.mcpStatus) els.mcpStatus.textContent = 'MCP 已保存';
+    await refreshMcpUiAfterChange();
+    closeMcpServerEditorModal();
+  } catch (error) {
+    setToolUiStatus(ui.status, `保存失败：${error.message || error}`, 'error');
+  } finally {
+    mcpServerEditorRuntime.saving = false;
+  }
+}
+
+function ensureMcpJsonImportModal() {
+  if (mcpJsonImportRuntime.initialized && mcpJsonImportRuntime.ui) return mcpJsonImportRuntime.ui;
+  ensureToolUiInjectedStyle();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal narrow" role="dialog" aria-modal="true" aria-labelledby="mcpJsonImportTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="mcpJsonImportTitle">从 JSON 导入 MCP</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <div class="toolui-row">
+            <label for="mcpJsonImportTextarea">MCP JSON 配置</label>
+            <textarea id="mcpJsonImportTextarea" class="toolui-textarea" rows="12" placeholder='粘贴 JSON（支持 mcpServers / servers / 数组）'></textarea>
+          </div>
+          <div class="toolui-actions-row">
+            <button type="button" class="btn ghost" id="mcpJsonPasteBtn">读取剪贴板</button>
+            <button type="button" class="btn ghost" id="mcpJsonClearBtn">清空</button>
+          </div>
+          <div id="mcpJsonImportStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="button" class="btn primary" id="mcpJsonImportRunBtn">导入</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    textarea: backdrop.querySelector('#mcpJsonImportTextarea'),
+    status: backdrop.querySelector('#mcpJsonImportStatus'),
+    pasteBtn: backdrop.querySelector('#mcpJsonPasteBtn'),
+    clearBtn: backdrop.querySelector('#mcpJsonClearBtn'),
+    runBtn: backdrop.querySelector('#mcpJsonImportRunBtn')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeMcpJsonImportModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeMcpJsonImportModal()));
+  ui.clearBtn.addEventListener('click', () => {
+    ui.textarea.value = '';
+    setToolUiStatus(ui.status, '', '');
+    ui.textarea.focus();
+  });
+  ui.pasteBtn.addEventListener('click', async () => {
+    try {
+      if (!navigator.clipboard?.readText) throw new Error('当前浏览器不支持读取剪贴板');
+      ui.textarea.value = await navigator.clipboard.readText();
+      setToolUiStatus(ui.status, '已读取剪贴板内容', 'success');
+    } catch (error) {
+      setToolUiStatus(ui.status, `读取剪贴板失败：${error.message || error}`, 'error');
+    }
+  });
+  ui.runBtn.addEventListener('click', () => runMcpJsonImportModal());
+
+  mcpJsonImportRuntime.initialized = true;
+  mcpJsonImportRuntime.ui = ui;
+  return ui;
+}
+
+function closeMcpJsonImportModal() {
+  const ui = ensureMcpJsonImportModal();
+  ui.backdrop.classList.remove('open');
+}
+
+async function openMcpJsonImportModal() {
+  await openSettingsSection('mcp');
+  const ui = ensureMcpJsonImportModal();
+  ui.backdrop.classList.add('open');
+  setToolUiStatus(ui.status, '', '');
+  window.setTimeout(() => ui.textarea.focus(), 0);
+}
+
+async function runMcpJsonImportModal() {
+  const ui = ensureMcpJsonImportModal();
+  if (mcpJsonImportRuntime.busy) return;
+  const rawText = String(ui.textarea.value || '').trim();
+  if (!rawText) {
+    setToolUiStatus(ui.status, '请先粘贴 JSON 配置', 'error');
+    return;
+  }
+  mcpJsonImportRuntime.busy = true;
+  setToolUiStatus(ui.status, '导入中...', '');
+  try {
+    const resultText = await importMcpServersFromText(rawText);
+    setToolUiStatus(ui.status, resultText || '导入完成', 'success');
+    if (els.mcpStatus) els.mcpStatus.textContent = resultText || '导入完成';
+  } catch (error) {
+    setToolUiStatus(ui.status, `导入失败：${error.message || error}`, 'error');
+  } finally {
+    mcpJsonImportRuntime.busy = false;
+  }
+}
+
 async function loadMcpServerList() {
+  ensureMcpCatalogLauncher();
   if (!els.mcpServerListWrap) return;
   try {
     const data = await apiRequest('/api/mcp-servers', { method: 'GET' });
     const servers = data.servers || [];
+    state._mcpServerCache = Array.isArray(servers) ? servers : [];
     renderMcpServerList(servers);
     renderPresetMcpServers(servers);
-  } catch {}
+    if (mcpCatalogRuntime.initialized) renderMcpCatalogSections();
+  } catch (error) {
+    if (els.mcpStatus) els.mcpStatus.textContent = `加载 MCP 列表失败：${error.message || error}`;
+  }
 }
 
 function renderMcpServerList(servers) {
@@ -4797,7 +5714,7 @@ async function renderPresetMcpServers(existingServers) {
     const presets = data.presets || [];
     const existing = existingServers || [];
     els.presetMcpList.innerHTML = presets.map((p) => {
-      const added = existing.some((s) => s.name === p.name);
+      const added = existing.some((s) => mcpPresetMatchesServer(p, s));
       return `<div class="preset-card${added ? ' added' : ''}" data-preset-key="${escapeHtml(p.key)}">
         <span class="preset-card-icon">${p.icon || '🔌'}</span>
         <span class="preset-card-name">${escapeHtml(p.name)}</span>
@@ -4806,7 +5723,13 @@ async function renderPresetMcpServers(existingServers) {
       </div>`;
     }).join('');
     state._mcpPresetCache = presets;
-  } catch {}
+    if (mcpCatalogRuntime.initialized) renderMcpCatalogSections();
+  } catch (error) {
+    if (mcpCatalogRuntime.initialized) {
+      mcpCatalogRuntime.lastMessage = `预设加载失败：${error.message || error}`;
+      renderMcpCatalogSections();
+    }
+  }
 }
 
 function fillMcpFromPreset(key) {
@@ -4855,7 +5778,7 @@ async function saveMcpServer() {
     await apiRequest('/api/mcp-servers', { method: 'POST', body: JSON.stringify(body) });
     els.mcpStatus.textContent = '已保存';
     resetMcpForm();
-    await loadMcpServerList();
+    await refreshMcpUiAfterChange();
   } catch (e) {
     els.mcpStatus.textContent = `保存失败：${e.message || e}`;
   }
@@ -4864,8 +5787,10 @@ async function saveMcpServer() {
 async function toggleMcpServer(id) {
   try {
     await apiRequest(`/api/mcp-servers/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
-    await loadMcpServerList();
-  } catch {}
+    await refreshMcpUiAfterChange();
+  } catch (e) {
+    if (els.mcpStatus) els.mcpStatus.textContent = `切换失败：${e.message || e}`;
+  }
 }
 window.toggleMcpServer = toggleMcpServer;
 
@@ -4873,8 +5798,11 @@ async function deleteMcpServer(id) {
   if (!window.confirm('确认删除该 MCP 服务？')) return;
   try {
     await apiRequest(`/api/mcp-servers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    await loadMcpServerList();
-  } catch {}
+    if (els.mcpStatus) els.mcpStatus.textContent = '已删除';
+    await refreshMcpUiAfterChange();
+  } catch (e) {
+    if (els.mcpStatus) els.mcpStatus.textContent = `删除失败：${e.message || e}`;
+  }
 }
 window.deleteMcpServer = deleteMcpServer;
 
@@ -4883,19 +5811,10 @@ async function editMcpServer(id) {
     const data = await apiRequest('/api/mcp-servers', { method: 'GET' });
     const s = (data.servers || []).find((x) => x.id === id);
     if (!s) return;
-    if ((s.type || 'stdio') !== 'stdio') {
-      els.mcpStatus.textContent = '远程 MCP（HTTP/SSE）目前仅支持导入/启用/测试，表单编辑暂未开放。';
-      return;
-    }
-    els.mcpEditId.value = s.id;
-    els.mcpName.value = s.name || '';
-    els.mcpCommand.value = s.command || '';
-    els.mcpArgs.value = (s.args || []).join(' ');
-    els.mcpEnv.value = Object.entries(s.env || {}).map(([k, v]) => `${k}=${v}`).join(' ');
-    els.mcpFormTitle.textContent = `编辑：${s.name}`;
-    els.mcpCancelBtn.classList.remove('hidden');
-    els.mcpStatus.textContent = '';
-  } catch {}
+    await openMcpServerEditorModal({ mode: 'edit', server: s });
+  } catch (error) {
+    if (els.mcpStatus) els.mcpStatus.textContent = `读取失败：${error.message || error}`;
+  }
 }
 window.editMcpServer = editMcpServer;
 
@@ -5091,34 +6010,21 @@ function mcpImportSignature(server) {
   return `${server.name}||${server.command}||${(server.args || []).join(' ')}`;
 }
 
-async function importMcpServersFromClipboard() {
-  if (!els.mcpStatus) return;
-
-  let rawText = '';
-  try {
-    if (!navigator.clipboard?.readText) throw new Error('clipboard_unavailable');
-    rawText = await navigator.clipboard.readText();
-  } catch (_) {
-    rawText = window.prompt('请粘贴 MCP JSON 配置', '') || '';
-  }
-
+async function importMcpServersFromText(rawTextInput) {
+  const rawText = String(rawTextInput || '');
   if (!String(rawText || '').trim()) {
-    els.mcpStatus.textContent = '未读取到 JSON 内容';
-    return;
+    throw new Error('未读取到 JSON 内容');
   }
-
   let parsed;
   try {
     parsed = JSON.parse(extractJsonFromClipboardText(rawText));
   } catch (e) {
-    els.mcpStatus.textContent = `JSON 解析失败：${e.message || e}`;
-    return;
+    throw new Error(`JSON 解析失败：${e.message || e}`);
   }
 
   const candidates = collectMcpImportCandidates(parsed);
   if (!candidates.length) {
-    els.mcpStatus.textContent = '未识别到可导入的 MCP 配置（支持 mcpServers 对象或配置数组）';
-    return;
+    throw new Error('未识别到可导入的 MCP 配置（支持 mcpServers 对象或配置数组）');
   }
 
   let existingServers = [];
@@ -5156,8 +6062,7 @@ async function importMcpServersFromClipboard() {
     }
   }
 
-  await loadMcpServerList();
-  await refreshMcpQuickPanel();
+  await refreshMcpUiAfterChange();
 
   const summary = [];
   summary.push(`导入 ${imported} 个`);
@@ -5167,7 +6072,26 @@ async function importMcpServersFromClipboard() {
   let text = summary.join('，');
   const detailLines = [...skipped.slice(0, 2), ...failed.slice(0, 2)];
   if (detailLines.length) text += `：${detailLines.join('；')}`;
-  els.mcpStatus.textContent = text;
+  return text;
+}
+
+async function importMcpServersFromClipboard() {
+  if (!els.mcpStatus) return;
+
+  let rawText = '';
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('clipboard_unavailable');
+    rawText = await navigator.clipboard.readText();
+  } catch (_) {
+    rawText = window.prompt('请粘贴 MCP JSON 配置', '') || '';
+  }
+
+  try {
+    const text = await importMcpServersFromText(rawText);
+    els.mcpStatus.textContent = text;
+  } catch (e) {
+    els.mcpStatus.textContent = e.message || String(e);
+  }
 }
 
 /* ── MCP Quick Panel (composer bar) ── */
@@ -5190,7 +6114,11 @@ async function refreshMcpQuickPanel() {
       </label>`;
     }).join('');
     updateMcpBtnBadge(servers.filter(s => s.enabled).length);
-  } catch {}
+  } catch (error) {
+    if (els.mcpQuickList) {
+      els.mcpQuickList.innerHTML = `<span class="muted" style="padding:6px 10px;display:block">MCP 列表加载失败：${escapeHtml(error.message || String(error))}</span>`;
+    }
+  }
 }
 
 function updateMcpBtnBadge(count) {
@@ -5206,8 +6134,11 @@ if (els.mcpQuickList) {
     const id = checkbox.dataset.mcpId;
     try {
       await apiRequest(`/api/mcp-servers/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
+      await refreshMcpUiAfterChange();
+    } catch (error) {
+      if (els.mcpStatus) els.mcpStatus.textContent = `切换失败：${error.message || error}`;
       await refreshMcpQuickPanel();
-    } catch {}
+    }
   });
 }
 
@@ -5216,6 +6147,319 @@ refreshMcpQuickPanel();
 
 /* 鈹€鈹€ Knowledge Base Settings 鈹€鈹€ */
 
+function getKbSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="knowledge"]') : null;
+}
+
+function ensureKbCreatorLauncher() {
+  const section = getKbSettingsSection();
+  if (!section || !els.kbListWrap) return;
+  if (section.querySelector('#kbCreatorOpenBtn')) return;
+
+  const host = document.createElement('div');
+  host.className = 'kb-creator-toolbar';
+  host.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid rgba(148,163,184,.28);border-radius:12px;background:rgba(248,250,252,.75);margin:8px 0 12px;">
+      <div>
+        <div style="font-weight:600;">知识库管理</div>
+        <div class="muted" style="font-size:12px;line-height:1.4;">自定义知识库（非 Chatbox 风格），启用后会作为聊天参考内容注入</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <button id="kbCreatorOpenBtn" class="btn primary" type="button">+ 添加</button>
+        <button id="kbCreatorLegacyBtn" class="btn ghost" type="button">旧表单</button>
+      </div>
+    </div>
+  `;
+  section.insertBefore(host, els.kbListWrap);
+
+  const openBtn = host.querySelector('#kbCreatorOpenBtn');
+  const legacyBtn = host.querySelector('#kbCreatorLegacyBtn');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      openKbCreatorModal({ mode: 'create' }).catch((error) => {
+        if (els.kbStatus) els.kbStatus.textContent = `打开知识库弹窗失败：${error.message || error}`;
+      });
+    });
+  }
+  if (legacyBtn) {
+    legacyBtn.addEventListener('click', async () => {
+      await openSettingsSection('knowledge');
+      resetKbForm();
+      if (els.kbName) {
+        els.kbName.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        els.kbName.focus();
+      }
+    });
+  }
+}
+
+function ensureKbCreatorModal() {
+  if (kbCreatorRuntime.initialized && kbCreatorRuntime.ui) return kbCreatorRuntime.ui;
+  ensureToolUiInjectedStyle();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal narrow" role="dialog" aria-modal="true" aria-labelledby="kbCreatorTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="kbCreatorTitle">创建知识库</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <div class="toolui-row">
+            <label for="kbCreatorNameInput">知识库名称 *</label>
+            <input id="kbCreatorNameInput" class="toolui-input" type="text" placeholder="新知识库名称">
+          </div>
+
+          <div class="toolui-row">
+            <label>作用方式（真实生效）</label>
+            <div class="toolui-filebox">
+              <div style="font-size:13px;line-height:1.5;color:#334155;">
+                创建后该知识库会分块并建立自定义检索索引；启用状态下聊天会按问题检索相关片段注入给 AI。
+              </div>
+              <div class="hint" style="margin-top:6px;">当前为自定义 RAG（分块 + 轻量检索）流程，不展示未接入后端的装饰字段。</div>
+            </div>
+          </div>
+
+          <div class="toolui-row">
+            <label for="kbCreatorParserSelect">文档解析器（真实）</label>
+            <select id="kbCreatorParserSelect" class="toolui-select">
+              <option value="builtin">内置解析（txt / md / pdf / docx）</option>
+            </select>
+            <div class="hint">文件导入时会使用该解析器（当前仅内置解析已接入）</div>
+          </div>
+
+          <div class="toolui-row">
+            <label for="kbCreatorRetrieverSelect">检索器（真实）</label>
+            <select id="kbCreatorRetrieverSelect" class="toolui-select" disabled>
+              <option value="lexical-bm25ish">词法检索（BM25-like）已启用</option>
+            </select>
+            <div class="hint">当前已接入词法检索；后续可扩展向量检索/重排</div>
+          </div>
+
+          <div class="toolui-row">
+            <label>RAG 参数（真实生效）</label>
+            <div class="toolui-grid two-col">
+              <div class="toolui-row">
+                <label for="kbCreatorChunkSizeInput">分块大小（字符）</label>
+                <input id="kbCreatorChunkSizeInput" class="toolui-input" type="number" min="200" max="4000" step="10" value="700">
+                <div class="hint">单个检索片段的大致长度</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorChunkOverlapInput">分块重叠（字符）</label>
+                <input id="kbCreatorChunkOverlapInput" class="toolui-input" type="number" min="0" max="1500" step="10" value="120">
+                <div class="hint">相邻片段重复长度，减少断句信息丢失</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorTopKInput">Top-K 召回</label>
+                <input id="kbCreatorTopKInput" class="toolui-input" type="number" min="1" max="20" step="1" value="4">
+                <div class="hint">每次回答最多从该知识库取多少个片段</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorMaxContextCharsInput">注入上限（字符）</label>
+                <input id="kbCreatorMaxContextCharsInput" class="toolui-input" type="number" min="1000" max="12000" step="100" value="4200">
+                <div class="hint">检索片段注入到模型上下文的总字符上限</div>
+              </div>
+              <div class="toolui-row">
+                <label for="kbCreatorMinScoreInput">最低相关度阈值</label>
+                <input id="kbCreatorMinScoreInput" class="toolui-input" type="number" min="0" max="2" step="0.01" value="0.05">
+                <div class="hint">过滤弱相关片段；太高可能召回不到</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="toolui-section-title">知识内容来源（至少一种）</div>
+
+          <div class="toolui-row">
+            <label for="kbCreatorContentInput">文本内容</label>
+            <textarea id="kbCreatorContentInput" class="toolui-textarea" rows="8" placeholder="粘贴知识内容（可选；若上传文件可留空）"></textarea>
+          </div>
+
+          <div class="toolui-row">
+            <label>文件导入</label>
+            <div class="toolui-filebox">
+              <div class="toolui-actions-row">
+                <button id="kbCreatorPickFileBtn" type="button" class="btn ghost">选择文件</button>
+                <button id="kbCreatorClearFileBtn" type="button" class="btn ghost">清除文件</button>
+                <input id="kbCreatorFileInput" type="file" hidden accept=".txt,.md,.pdf,.docx">
+              </div>
+              <div id="kbCreatorFileStatus" class="toolui-status"></div>
+            </div>
+          </div>
+
+          <div id="kbCreatorStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="button" class="btn primary" id="kbCreatorSaveBtn">创建</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    title: backdrop.querySelector('#kbCreatorTitle'),
+    name: backdrop.querySelector('#kbCreatorNameInput'),
+    parser: backdrop.querySelector('#kbCreatorParserSelect'),
+    retriever: backdrop.querySelector('#kbCreatorRetrieverSelect'),
+    chunkSize: backdrop.querySelector('#kbCreatorChunkSizeInput'),
+    chunkOverlap: backdrop.querySelector('#kbCreatorChunkOverlapInput'),
+    topK: backdrop.querySelector('#kbCreatorTopKInput'),
+    maxContextChars: backdrop.querySelector('#kbCreatorMaxContextCharsInput'),
+    minScore: backdrop.querySelector('#kbCreatorMinScoreInput'),
+    content: backdrop.querySelector('#kbCreatorContentInput'),
+    pickFileBtn: backdrop.querySelector('#kbCreatorPickFileBtn'),
+    clearFileBtn: backdrop.querySelector('#kbCreatorClearFileBtn'),
+    fileInput: backdrop.querySelector('#kbCreatorFileInput'),
+    fileStatus: backdrop.querySelector('#kbCreatorFileStatus'),
+    status: backdrop.querySelector('#kbCreatorStatus'),
+    saveBtn: backdrop.querySelector('#kbCreatorSaveBtn')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeKbCreatorModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeKbCreatorModal()));
+  ui.pickFileBtn.addEventListener('click', () => ui.fileInput.click());
+  ui.clearFileBtn.addEventListener('click', () => {
+    kbCreatorRuntime.file = null;
+    ui.fileInput.value = '';
+    setToolUiStatus(ui.fileStatus, '未选择文件', '');
+  });
+  ui.fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    kbCreatorRuntime.file = file || null;
+    setToolUiStatus(ui.fileStatus, file ? `已选择：${file.name}` : '未选择文件', file ? 'success' : '');
+  });
+  ui.saveBtn.addEventListener('click', () => saveKbCreatorModal());
+
+  kbCreatorRuntime.initialized = true;
+  kbCreatorRuntime.ui = ui;
+  return ui;
+}
+
+function closeKbCreatorModal() {
+  const ui = ensureKbCreatorModal();
+  ui.backdrop.classList.remove('open');
+}
+
+async function openKbCreatorModal(options = {}) {
+  await openSettingsSection('knowledge');
+  const ui = ensureKbCreatorModal();
+  kbCreatorRuntime.mode = options.mode === 'edit' ? 'edit' : 'create';
+  kbCreatorRuntime.editId = options.editId ? String(options.editId) : '';
+  kbCreatorRuntime.file = null;
+  kbCreatorRuntime.busy = false;
+
+  ui.title.textContent = kbCreatorRuntime.mode === 'edit' ? '编辑知识库' : '创建知识库';
+  ui.saveBtn.textContent = kbCreatorRuntime.mode === 'edit' ? '保存' : '创建';
+  ui.name.value = String(options.name || '');
+  const ragConfig = (options.ragConfig && typeof options.ragConfig === 'object') ? options.ragConfig : {};
+  const sourceMeta = (options.sourceMeta && typeof options.sourceMeta === 'object') ? options.sourceMeta : {};
+  ui.parser.value = String(sourceMeta.parser || 'builtin');
+  ui.chunkSize.value = String(Number(ragConfig.chunkSize) || 700);
+  ui.chunkOverlap.value = String(Number(ragConfig.chunkOverlap) || 120);
+  ui.topK.value = String(Number(ragConfig.topK) || 4);
+  ui.maxContextChars.value = String(Number(ragConfig.maxContextChars) || 4200);
+  ui.minScore.value = String(Number(ragConfig.minScore) || 0.05);
+  ui.content.value = String(options.content || '');
+  ui.fileInput.value = '';
+  setToolUiStatus(ui.fileStatus, '未选择文件', '');
+  setToolUiStatus(ui.status, '', '');
+  if (kbCreatorRuntime.mode === 'edit') {
+    setToolUiStatus(ui.fileStatus, '编辑模式暂不支持文件替换，请修改文本内容后保存', '');
+  }
+
+  ui.backdrop.classList.add('open');
+  window.setTimeout(() => ui.name.focus(), 0);
+}
+
+async function refreshKbUiAfterChange() {
+  const results = await Promise.allSettled([
+    loadKbList(),
+    refreshKbQuickPanel()
+  ]);
+  const failed = results.find((r) => r.status === 'rejected');
+  if (failed && els.kbStatus) {
+    els.kbStatus.textContent = `知识库列表刷新失败：${failed.reason?.message || failed.reason || 'unknown'}`;
+  }
+}
+
+async function saveKbCreatorModal() {
+  const ui = ensureKbCreatorModal();
+  if (kbCreatorRuntime.busy) return;
+  const name = String(ui.name.value || '').trim();
+  const content = String(ui.content.value || '').trim();
+  const selectedFile = kbCreatorRuntime.file;
+  const ragConfig = {
+    chunkSize: Math.max(200, Math.min(4000, Number(ui.chunkSize.value || 700) || 700)),
+    chunkOverlap: Math.max(0, Math.min(1500, Number(ui.chunkOverlap.value || 120) || 120)),
+    topK: Math.max(1, Math.min(20, Number(ui.topK.value || 4) || 4)),
+    maxContextChars: Math.max(1000, Math.min(12000, Number(ui.maxContextChars.value || 4200) || 4200)),
+    minScore: Math.max(0, Math.min(2, Number(ui.minScore.value || 0.05) || 0.05))
+  };
+  const parser = String((ui.parser && ui.parser.value) || 'builtin');
+
+  if (!name && !selectedFile) {
+    setToolUiStatus(ui.status, '请输入知识库名称', 'error');
+    return;
+  }
+  if (!content && !selectedFile) {
+    setToolUiStatus(ui.status, '请输入文本内容或选择文件', 'error');
+    return;
+  }
+  if (kbCreatorRuntime.mode === 'edit' && selectedFile) {
+    setToolUiStatus(ui.status, '编辑模式暂不支持文件替换，请删除后重新创建或使用文本保存', 'error');
+    return;
+  }
+
+  kbCreatorRuntime.busy = true;
+  setToolUiStatus(ui.status, '保存中...', '');
+  try {
+    let result = null;
+    if (selectedFile) {
+      const finalName = name || selectedFile.name.replace(/\.[^.]+$/, '');
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('name', finalName);
+      formData.append('ragChunkSize', String(ragConfig.chunkSize));
+      formData.append('ragChunkOverlap', String(ragConfig.chunkOverlap));
+      formData.append('ragTopK', String(ragConfig.topK));
+      formData.append('ragMaxContextChars', String(ragConfig.maxContextChars));
+      formData.append('ragMinScore', String(ragConfig.minScore));
+      formData.append('parser', parser);
+      const headers = new Headers();
+      if (state.token) headers.set('x-access-token', state.token);
+      if (CLIENT_INSTANCE_ID) headers.set('x-client-id', CLIENT_INSTANCE_ID);
+      const proxyHeader = getClientProxyHeaderValue();
+      if (proxyHeader) headers.set('x-client-proxy-config', proxyHeader);
+      const resp = await fetch('/api/knowledge-bases/upload', { method: 'POST', headers, body: formData });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.message || `HTTP ${resp.status}`);
+      }
+      result = await resp.json();
+    } else {
+      const body = { name, content, ragConfig, parser };
+      if (kbCreatorRuntime.mode === 'edit' && kbCreatorRuntime.editId) body.id = kbCreatorRuntime.editId;
+      result = await apiRequest('/api/knowledge-bases', { method: 'POST', body: JSON.stringify(body) });
+    }
+
+    const chunkCount = Number(result && result.chunkCount);
+    const suffix = Number.isFinite(chunkCount) && chunkCount > 0 ? `（${chunkCount} 个片段）` : '';
+    if (els.kbStatus) els.kbStatus.textContent = `${kbCreatorRuntime.mode === 'edit' ? '知识库已保存' : '知识库已创建'}${suffix}`;
+    await refreshKbUiAfterChange();
+    closeKbCreatorModal();
+  } catch (error) {
+    setToolUiStatus(ui.status, `保存失败：${error.message || error}`, 'error');
+  } finally {
+    kbCreatorRuntime.busy = false;
+  }
+}
+
 let _kbCache = [];
 
 function getEnabledKbIds() {
@@ -5223,24 +6467,41 @@ function getEnabledKbIds() {
 }
 
 async function loadKbList() {
+  ensureKbCreatorLauncher();
   if (!els.kbListWrap) return;
   try {
     const data = await apiRequest('/api/knowledge-bases', { method: 'GET' });
     _kbCache = data.knowledgeBases || [];
     renderKbList(_kbCache);
     updateKbBtnBadge(_kbCache.filter(kb => kb.enabled).length);
-  } catch {}
+  } catch (error) {
+    if (els.kbStatus) els.kbStatus.textContent = `加载知识库列表失败：${error.message || error}`;
+  }
 }
 
 function renderKbList(list) {
   const wrap = els.kbListWrap;
   if (!list.length) { wrap.innerHTML = '<p class="muted">暂无知识库</p>'; return; }
   wrap.innerHTML = list.map(kb => {
+    const chunkCount = Number(kb.chunkCount || 0);
+    const ragCfg = (kb.ragConfig && typeof kb.ragConfig === 'object') ? kb.ragConfig : {};
+    const sourceMeta = (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : {};
+    const sourceLabel = sourceMeta.type === 'file' ? '文件' : '文本';
+    const parserLabel = sourceMeta.parser === 'builtin' ? '内置解析' : String(sourceMeta.parser || '解析器');
+    const meta = [
+      `${kb.charCount} 字符`,
+      chunkCount ? `${chunkCount} 片段` : null,
+      ragCfg.topK ? `TopK=${ragCfg.topK}` : null,
+      ragCfg.maxContextChars ? `Ctx=${ragCfg.maxContextChars}` : null,
+      parserLabel,
+      sourceLabel,
+      kb.enabled ? null : '已禁用'
+    ].filter(Boolean).join(' · ');
     return `
     <div class="provider-card${kb.enabled ? '' : ' disabled'}">
       <div class="provider-card-info">
         <div class="provider-card-name">${escapeHtml(kb.name)}</div>
-        <div class="provider-card-meta">${kb.charCount} 字符${kb.enabled ? '' : ' · 已禁用'}</div>
+        <div class="provider-card-meta">${escapeHtml(meta)}</div>
       </div>
       <div class="provider-card-actions">
         <button onclick="editKb('${escapeHtml(kb.id)}')">编辑</button>
@@ -5274,7 +6535,7 @@ async function saveKb() {
     await apiRequest('/api/knowledge-bases', { method: 'POST', body: JSON.stringify(body) });
     els.kbStatus.textContent = '已保存';
     resetKbForm();
-    await loadKbList();
+    await refreshKbUiAfterChange();
   } catch (e) {
     els.kbStatus.textContent = `保存失败：${e.message || e}`;
   }
@@ -5289,6 +6550,9 @@ async function uploadKbFile(file) {
     formData.append('name', name);
     const headers = {};
     if (state.token) headers['x-access-token'] = state.token;
+    if (CLIENT_INSTANCE_ID) headers['x-client-id'] = CLIENT_INSTANCE_ID;
+    const proxyHeader = getClientProxyHeaderValue();
+    if (proxyHeader) headers['x-client-proxy-config'] = proxyHeader;
     const resp = await fetch('/api/knowledge-bases/upload', { method: 'POST', headers, body: formData });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -5297,7 +6561,7 @@ async function uploadKbFile(file) {
     const data = await resp.json();
     els.kbUploadStatus.textContent = `上传完成：${data.charCount} 字符`;
     resetKbForm();
-    await loadKbList();
+    await refreshKbUiAfterChange();
   } catch (e) {
     els.kbUploadStatus.textContent = `上传失败：${e.message || e}`;
   }
@@ -5306,8 +6570,10 @@ async function uploadKbFile(file) {
 async function toggleKb(id) {
   try {
     await apiRequest(`/api/knowledge-bases/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
-    await loadKbList();
-  } catch {}
+    await refreshKbUiAfterChange();
+  } catch (error) {
+    if (els.kbStatus) els.kbStatus.textContent = `切换失败：${error.message || error}`;
+  }
 }
 window.toggleKb = toggleKb;
 
@@ -5315,8 +6581,11 @@ async function deleteKb(id) {
   if (!window.confirm('确认删除知识库？')) return;
   try {
     await apiRequest(`/api/knowledge-bases/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    await loadKbList();
-  } catch {}
+    if (els.kbStatus) els.kbStatus.textContent = '已删除';
+    await refreshKbUiAfterChange();
+  } catch (error) {
+    if (els.kbStatus) els.kbStatus.textContent = `删除失败：${error.message || error}`;
+  }
 }
 window.deleteKb = deleteKb;
 
@@ -5324,13 +6593,17 @@ async function editKb(id) {
   try {
     const data = await apiRequest(`/api/knowledge-bases/${encodeURIComponent(id)}/content`, { method: 'GET' });
     if (!data) return;
-    els.kbEditId.value = data.id;
-    els.kbName.value = data.name || '';
-    els.kbContent.value = data.content || '';
-    els.kbFormTitle.textContent = `编辑：${data.name}`;
-    els.kbCancelBtn.classList.remove('hidden');
-    els.kbStatus.textContent = '';
-  } catch {}
+    await openKbCreatorModal({
+      mode: 'edit',
+      editId: data.id,
+      name: data.name || '',
+      content: data.content || '',
+      ragConfig: data.ragConfig || null,
+      sourceMeta: data.sourceMeta || null
+    });
+  } catch (error) {
+    if (els.kbStatus) els.kbStatus.textContent = `读取失败：${error.message || error}`;
+  }
 }
 window.editKb = editKb;
 
@@ -5348,14 +6621,20 @@ async function refreshKbQuickPanel() {
       return;
     }
     els.kbQuickList.innerHTML = list.map(kb => {
+      const chunkCount = Number(kb.chunkCount || 0);
+      const ragCfg = (kb.ragConfig && typeof kb.ragConfig === 'object') ? kb.ragConfig : {};
       return `<label class="mcp-quick-item">
         <input type="checkbox" data-kb-id="${escapeHtml(kb.id)}" ${kb.enabled ? 'checked' : ''}>
         <span class="mcp-quick-name">${escapeHtml(kb.name)}</span>
-        <span class="mcp-quick-status muted">${kb.charCount} chars</span>
+        <span class="mcp-quick-status muted">${chunkCount ? `${chunkCount} chunks · TopK ${escapeHtml(String(ragCfg.topK || 4))}` : `${kb.charCount} chars`}</span>
       </label>`;
     }).join('');
     updateKbBtnBadge(list.filter(kb => kb.enabled).length);
-  } catch {}
+  } catch (error) {
+    if (els.kbQuickList) {
+      els.kbQuickList.innerHTML = `<span class="muted" style="padding:6px 10px;display:block">知识库列表加载失败：${escapeHtml(error.message || String(error))}</span>`;
+    }
+  }
 }
 
 function updateKbBtnBadge(count) {
@@ -5371,8 +6650,11 @@ if (els.kbQuickList) {
     const id = checkbox.dataset.kbId;
     try {
       await apiRequest(`/api/knowledge-bases/${encodeURIComponent(id)}/toggle`, { method: 'POST' });
+      await refreshKbUiAfterChange();
+    } catch (error) {
+      if (els.kbStatus) els.kbStatus.textContent = `切换失败：${error.message || error}`;
       await refreshKbQuickPanel();
-    } catch {}
+    }
   });
 }
 

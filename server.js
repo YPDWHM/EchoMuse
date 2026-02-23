@@ -4,6 +4,7 @@ const express = require('express');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const QRCode = require('qrcode');
 const mcpManager = require('./mcp-manager');
@@ -21,12 +22,16 @@ const SHARE_MODE = HOST === '0.0.0.0' || process.env.SHARE_MODE === '1';
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN || '';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b';
 const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
-const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 20);
-const RATE_LIMIT_TRANSLATE_PER_MIN = Number(process.env.RATE_LIMIT_TRANSLATE_PER_MIN || 120);
+const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60 * 1000));
+const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || (SHARE_MODE ? 60 : 240));
+const RATE_LIMIT_TRANSLATE_PER_MIN = Number(process.env.RATE_LIMIT_TRANSLATE_PER_MIN || (SHARE_MODE ? 180 : 600));
+const RATE_LIMIT_TRUST_CLIENT_ID = process.env.RATE_LIMIT_TRUST_CLIENT_ID !== '0';
 const MIN_CN_CHARS = Number(process.env.MIN_CN_CHARS || 800);
 const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 60000);
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 8 * 60 * 1000);
 const OLLAMA_CHAT_TIMEOUT_MS = Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 12 * 60 * 1000);
+const TRANSLATE_CACHE_TTL_MS = Math.max(0, Number(process.env.TRANSLATE_CACHE_TTL_MS || 30 * 60 * 1000));
+const TRANSLATE_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.TRANSLATE_CACHE_MAX_ITEMS || 500));
 const CHAT_THINK = process.env.CHAT_THINK !== '0';
 const CHAT_CTX_LIMIT = Number(process.env.CHAT_CTX_LIMIT || 3000);
 const CHAT_HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT || 8);
@@ -154,6 +159,8 @@ const paperRepairPromptTemplate = readPromptOrExit(path.join(promptsDir, 'paper_
 
 const rateStore = new Map();
 const translateRateStore = new Map();
+const translateResultCache = new Map();
+const translateInFlight = new Map();
 const requestContextStore = new AsyncLocalStorage();
 const proxyDispatcherCache = new Map();
 let undiciProxyAgentCtor = undefined;
@@ -275,7 +282,7 @@ async function fetchRuntime(url, options) {
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-access-token, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-access-token, Authorization, x-client-id');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
@@ -310,26 +317,36 @@ app.use('/api', (req, res, next) => {
   const isTranslateApi = req.path === '/translate';
   const activeStore = isTranslateApi ? translateRateStore : rateStore;
   const activeLimit = isTranslateApi ? RATE_LIMIT_TRANSLATE_PER_MIN : RATE_LIMIT_PER_MIN;
-  const item = activeStore.get(ip) || { windowStart: now, count: 0 };
+  if (!(activeLimit > 0)) return next();
 
-  if (now - item.windowStart >= 60 * 1000) {
+  const key = getRateLimitBucketKey(req, ip);
+  const item = activeStore.get(key) || { windowStart: now, count: 0 };
+
+  if (now - item.windowStart >= RATE_LIMIT_WINDOW_MS) {
     item.windowStart = now;
     item.count = 0;
   }
 
   item.count += 1;
-  activeStore.set(ip, item);
+  activeStore.set(key, item);
+  res.setHeader('X-RateLimit-Limit', String(activeLimit));
+  res.setHeader('X-RateLimit-Remaining', String(Math.max(0, activeLimit - item.count)));
 
   if (item.count > activeLimit) {
+    const retryAfterMs = Math.max(250, item.windowStart + RATE_LIMIT_WINDOW_MS - now);
+    res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
     return res.status(429).json({
       error: 'Too Many Requests',
-      message: `\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\uff08\u6bcf\u5206\u949f\u6700\u591a ${activeLimit} \u6b21\uff09\u3002`
+      message: `\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\uff08${Math.round(RATE_LIMIT_WINDOW_MS / 1000)} \u79d2\u5185\u6700\u591a ${activeLimit} \u6b21\uff09\u3002`,
+      retryAfterMs,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      limit: activeLimit
     });
   }
 
   if (activeStore.size > 5000) {
-    for (const [key, value] of activeStore.entries()) {
-      if (now - value.windowStart > 2 * 60 * 1000) activeStore.delete(key);
+    for (const [staleKey, value] of activeStore.entries()) {
+      if (now - value.windowStart > Math.max(2 * RATE_LIMIT_WINDOW_MS, 2 * 60 * 1000)) activeStore.delete(staleKey);
     }
   }
 
@@ -371,6 +388,9 @@ app.get('/api/info', (req, res) => {
     })),
     activeProviderId: appConfig.activeProviderId,
     rateLimitPerMin: RATE_LIMIT_PER_MIN,
+    translateRateLimitPerMin: RATE_LIMIT_TRANSLATE_PER_MIN,
+    rateLimitWindowMs: RATE_LIMIT_WINDOW_MS,
+    rateLimitUsesClientId: RATE_LIMIT_TRUST_CLIENT_ID,
     minChineseChars: MIN_CN_CHARS
   });
 });
@@ -720,26 +740,333 @@ app.get('/api/mcp-tools', async (req, res) => {
 
 /* ── Knowledge Base CRUD ── */
 
+const KB_RAG_DEFAULTS = Object.freeze({
+  chunkSize: 700,
+  chunkOverlap: 120,
+  topK: 4,
+  maxContextChars: 4200,
+  minScore: 0.05
+});
+
+function clampInt(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function normalizeKbRagConfig(raw, fallback = {}) {
+  const base = { ...KB_RAG_DEFAULTS, ...(fallback && typeof fallback === 'object' ? fallback : {}) };
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    chunkSize: clampInt(src.chunkSize, 200, 4000, base.chunkSize),
+    chunkOverlap: clampInt(src.chunkOverlap, 0, 1500, base.chunkOverlap),
+    topK: clampInt(src.topK, 1, 20, base.topK),
+    maxContextChars: clampInt(src.maxContextChars, 1000, 12000, base.maxContextChars),
+    minScore: Number.isFinite(Number(src.minScore)) ? Math.max(0, Math.min(5, Number(src.minScore))) : base.minScore
+  };
+}
+
+function normalizeKbText(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .replace(/\u0000/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function pickKbChunkEnd(text, start, desiredEnd) {
+  const len = text.length;
+  let end = Math.min(len, Math.max(start + 1, desiredEnd));
+  if (end >= len) return len;
+
+  const windowStart = Math.max(start + 1, end - 120);
+  const windowEnd = Math.min(len, end + 120);
+  let best = -1;
+  for (let i = windowStart; i < windowEnd; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '。' || ch === '！' || ch === '？' || ch === '.' || ch === '!' || ch === '?') {
+      best = i + 1;
+      if (i >= end - 30) break;
+    }
+  }
+  if (best > start + 20) return best;
+  return end;
+}
+
+function chunkKbContent(text, ragConfig) {
+  const source = normalizeKbText(text);
+  if (!source) return [];
+  const cfg = normalizeKbRagConfig(ragConfig);
+  const chunkSize = cfg.chunkSize;
+  const chunkOverlap = Math.min(cfg.chunkOverlap, Math.max(0, chunkSize - 50));
+  const chunks = [];
+  let start = 0;
+  let guard = 0;
+
+  while (start < source.length && guard < 10000) {
+    guard += 1;
+    const desiredEnd = start + chunkSize;
+    let end = pickKbChunkEnd(source, start, desiredEnd);
+    if (end <= start) end = Math.min(source.length, start + chunkSize);
+    const textSlice = source.slice(start, end).trim();
+    if (textSlice) {
+      chunks.push({
+        id: `c${chunks.length + 1}`,
+        index: chunks.length,
+        start,
+        end,
+        text: textSlice
+      });
+    }
+    if (end >= source.length) break;
+    const nextStart = Math.max(start + 1, end - chunkOverlap);
+    if (nextStart <= start) break;
+    start = nextStart;
+  }
+
+  return chunks;
+}
+
+function buildKbRecord({ id, name, content, existing, ragConfig, sourceMeta }) {
+  const normalizedContent = normalizeKbText(content);
+  const cfg = normalizeKbRagConfig(ragConfig, existing?.ragConfig || KB_RAG_DEFAULTS);
+  const chunks = chunkKbContent(normalizedContent, cfg);
+  return {
+    id,
+    name: String(name || '').trim(),
+    content: normalizedContent,
+    enabled: existing ? existing.enabled !== false : true,
+    createdAt: existing ? existing.createdAt : Date.now(),
+    updatedAt: Date.now(),
+    ragConfig: cfg,
+    sourceMeta: (sourceMeta && typeof sourceMeta === 'object')
+      ? {
+          type: String(sourceMeta.type || existing?.sourceMeta?.type || 'text'),
+          parser: String(sourceMeta.parser || existing?.sourceMeta?.parser || 'builtin'),
+          fileName: sourceMeta.fileName ? String(sourceMeta.fileName) : (existing?.sourceMeta?.fileName || ''),
+          fileExt: sourceMeta.fileExt ? String(sourceMeta.fileExt) : (existing?.sourceMeta?.fileExt || '')
+        }
+      : (existing?.sourceMeta || { type: 'text', parser: 'builtin', fileName: '', fileExt: '' }),
+    chunks
+  };
+}
+
+function ensureKbIndexedInMemory(kb) {
+  if (!kb || typeof kb !== 'object') return kb;
+  kb.ragConfig = normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS);
+  if (!kb.sourceMeta || typeof kb.sourceMeta !== 'object') {
+    kb.sourceMeta = { type: 'text', parser: 'builtin', fileName: '', fileExt: '' };
+  } else {
+    kb.sourceMeta = {
+      type: String(kb.sourceMeta.type || 'text'),
+      parser: String(kb.sourceMeta.parser || 'builtin'),
+      fileName: kb.sourceMeta.fileName ? String(kb.sourceMeta.fileName) : '',
+      fileExt: kb.sourceMeta.fileExt ? String(kb.sourceMeta.fileExt) : ''
+    };
+  }
+  if (!Array.isArray(kb.chunks) || !kb.chunks.length) {
+    kb.chunks = chunkKbContent(kb.content || '', kb.ragConfig);
+  }
+  return kb;
+}
+
+function tokenizeRagText(text) {
+  const s = String(text || '').toLowerCase();
+  if (!s) return [];
+  const tokens = [];
+
+  const wordMatches = s.match(/\p{L}[\p{L}\p{N}_-]*/gu) || [];
+  for (const token of wordMatches) {
+    const t = token.trim();
+    if (t.length >= 2) tokens.push(t);
+  }
+
+  const addNgrams = (re, n = 2) => {
+    const runs = s.match(re) || [];
+    for (const run of runs) {
+      if (run.length <= n) {
+        if (run.length >= 1) tokens.push(run);
+        continue;
+      }
+      for (let i = 0; i <= run.length - n; i++) {
+        tokens.push(run.slice(i, i + n));
+      }
+    }
+  };
+  addNgrams(/[\u3400-\u9fff]+/gu, 2);
+  addNgrams(/[\u3040-\u30ffー]+/gu, 2);
+  addNgrams(/[\uac00-\ud7af]+/gu, 2);
+
+  return tokens.slice(0, 2000);
+}
+
+function buildTokenFreq(tokens) {
+  const tf = new Map();
+  for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
+  return tf;
+}
+
+function buildKbSearchQueryText(recentMessages) {
+  if (!Array.isArray(recentMessages)) return '';
+  const users = recentMessages.filter((m) => m && m.role === 'user' && typeof m.content === 'string' && m.content.trim());
+  if (!users.length) return '';
+  const latest = users[users.length - 1].content.trim();
+  if (latest.length >= 20) return latest.slice(0, 600);
+  return users.slice(-2).map((m) => m.content.trim()).join('\n').slice(0, 600);
+}
+
+function retrieveKbChunks(kbList, queryText) {
+  const query = String(queryText || '').trim();
+  if (!Array.isArray(kbList) || !kbList.length) return [];
+
+  const pool = [];
+  for (const kb of kbList) {
+    ensureKbIndexedInMemory(kb);
+    if (!Array.isArray(kb.chunks) || !kb.chunks.length) continue;
+    const cfg = normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS);
+    for (const chunk of kb.chunks) {
+      if (!chunk || typeof chunk.text !== 'string' || !chunk.text.trim()) continue;
+      pool.push({ kb, chunk, cfg });
+    }
+  }
+  if (!pool.length) return [];
+
+  const queryTokens = Array.from(new Set(tokenizeRagText(query))).slice(0, 60);
+  if (!queryTokens.length) {
+    const seenKb = new Set();
+    return pool.filter(({ kb }) => {
+      if (seenKb.has(kb.id)) return false;
+      seenKb.add(kb.id);
+      return true;
+    }).slice(0, 4).map((entry) => ({ ...entry, score: 0.01 }));
+  }
+
+  const docs = pool.map((entry) => {
+    const tokens = tokenizeRagText(entry.chunk.text);
+    const tf = buildTokenFreq(tokens);
+    return { ...entry, tf, dl: Math.max(1, tokens.length) };
+  });
+
+  const N = docs.length;
+  const avgdl = docs.reduce((sum, d) => sum + d.dl, 0) / Math.max(1, N);
+  const df = new Map();
+  for (const term of queryTokens) {
+    let count = 0;
+    for (const d of docs) if (d.tf.has(term)) count += 1;
+    df.set(term, count);
+  }
+
+  const k1 = 1.2;
+  const b = 0.75;
+  const scored = docs.map((d) => {
+    let score = 0;
+    for (const term of queryTokens) {
+      const tf = d.tf.get(term) || 0;
+      if (!tf) continue;
+      const dfi = df.get(term) || 0;
+      const idf = Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5));
+      score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (d.dl / Math.max(1, avgdl)))));
+    }
+    if (query && query.length >= 6 && String(d.chunk.text || '').includes(query.slice(0, 120))) score += 0.8;
+    if (String(d.kb.name || '').trim() && query.toLowerCase().includes(String(d.kb.name || '').trim().toLowerCase())) score += 0.25;
+    return { ...d, score };
+  }).filter((d) => d.score > d.cfg.minScore);
+
+  if (!scored.length) return docs.slice(0, 4).map((d) => ({ ...d, score: 0.01 }));
+
+  scored.sort((a, b) => b.score - a.score);
+  const perKbCount = new Map();
+  const out = [];
+  for (const item of scored) {
+    const cur = perKbCount.get(item.kb.id) || 0;
+    const kbTopK = normalizeKbRagConfig(item.kb.ragConfig || {}, KB_RAG_DEFAULTS).topK;
+    if (cur >= kbTopK) continue;
+    out.push(item);
+    perKbCount.set(item.kb.id, cur + 1);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function buildKbInjectedContext(knowledgeBaseIds, recentMessages) {
+  if (!Array.isArray(knowledgeBaseIds) || !knowledgeBaseIds.length) return '';
+  const enabled = (appConfig.knowledgeBases || [])
+    .filter((kb) => knowledgeBaseIds.includes(kb.id) && kb.enabled && kb.content);
+  if (!enabled.length) return '';
+
+  const queryText = buildKbSearchQueryText(recentMessages);
+  const hits = retrieveKbChunks(enabled, queryText);
+  if (!hits.length) return '';
+
+  let usedChars = 0;
+  let maxChars = KB_RAG_DEFAULTS.maxContextChars;
+  const lines = ['【知识库检索片段（自定义 RAG）】'];
+  if (queryText) lines.push(`检索查询：${queryText.slice(0, 200)}`);
+
+  for (const hit of hits) {
+    const cfg = normalizeKbRagConfig(hit.kb.ragConfig || {}, KB_RAG_DEFAULTS);
+    maxChars = Math.max(maxChars, cfg.maxContextChars || KB_RAG_DEFAULTS.maxContextChars);
+    const chunkText = String(hit.chunk.text || '').trim();
+    if (!chunkText) continue;
+    const remain = maxChars - usedChars;
+    if (remain < 120) break;
+    const clipped = chunkText.slice(0, remain);
+    lines.push(`- [${hit.kb.name}#${hit.chunk.id}] score=${hit.score.toFixed(3)}`);
+    lines.push(clipped);
+    usedChars += clipped.length;
+  }
+
+  if (!usedChars) return '';
+  lines.push('请优先依据以上检索片段回答；若片段不足以支持结论，请明确说明。');
+  return lines.join('\n');
+}
+
 app.get('/api/knowledge-bases', (req, res) => {
-  const list = (appConfig.knowledgeBases || []).map(kb => ({
-    id: kb.id, name: kb.name, enabled: kb.enabled,
-    charCount: (kb.content || '').length, createdAt: kb.createdAt
-  }));
+  const list = (appConfig.knowledgeBases || []).map((kb) => {
+    ensureKbIndexedInMemory(kb);
+    return {
+      id: kb.id,
+      name: kb.name,
+      enabled: kb.enabled,
+      charCount: (kb.content || '').length,
+      chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
+      createdAt: kb.createdAt,
+      updatedAt: kb.updatedAt,
+      ragConfig: normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS),
+      sourceMeta: (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : { type: 'text', parser: 'builtin', fileName: '', fileExt: '' }
+    };
+  });
   res.json({ knowledgeBases: list });
 });
 
 app.post('/api/knowledge-bases', (req, res) => {
-  const { name, content, id: editId } = req.body || {};
+  const { name, content, id: editId, ragConfig, parser } = req.body || {};
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Bad Request', message: '需要名称。' });
   if (!content || typeof content !== 'string') return res.status(400).json({ error: 'Bad Request', message: '需要内容。' });
   if (!appConfig.knowledgeBases) appConfig.knowledgeBases = [];
   const id = editId || `kb-${Date.now()}`;
   const existing = appConfig.knowledgeBases.find(kb => kb.id === id);
-  const kb = { id, name: name.trim(), content: content.trim(), enabled: true, createdAt: existing ? existing.createdAt : Date.now() };
+  const kb = buildKbRecord({
+    id,
+    name,
+    content,
+    existing,
+    ragConfig,
+    sourceMeta: {
+      type: 'text',
+      parser: parser || existing?.sourceMeta?.parser || 'builtin'
+    }
+  });
   if (existing) Object.assign(existing, kb);
   else appConfig.knowledgeBases.push(kb);
   if (!saveAppConfig()) return res.status(500).json({ error: 'SaveFailed' });
-  res.json({ ok: true, id });
+  res.json({
+    ok: true,
+    id,
+    chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
+    ragConfig: kb.ragConfig,
+    sourceMeta: kb.sourceMeta
+  });
 });
 
 app.delete('/api/knowledge-bases/:id', (req, res) => {
@@ -763,7 +1090,15 @@ app.post('/api/knowledge-bases/:id/toggle', (req, res) => {
 app.get('/api/knowledge-bases/:id/content', (req, res) => {
   const kb = (appConfig.knowledgeBases || []).find(k => k.id === req.params.id);
   if (!kb) return res.status(404).json({ error: 'Not Found' });
-  res.json({ id: kb.id, name: kb.name, content: kb.content });
+  ensureKbIndexedInMemory(kb);
+  res.json({
+    id: kb.id,
+    name: kb.name,
+    content: kb.content,
+    ragConfig: normalizeKbRagConfig(kb.ragConfig || {}, KB_RAG_DEFAULTS),
+    chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
+    sourceMeta: (kb.sourceMeta && typeof kb.sourceMeta === 'object') ? kb.sourceMeta : { type: 'text', parser: 'builtin', fileName: '', fileExt: '' }
+  });
 });
 
 app.post('/api/knowledge-bases/upload', upload.single('file'), async (req, res) => {
@@ -789,9 +1124,36 @@ app.post('/api/knowledge-bases/upload', upload.single('file'), async (req, res) 
   if (!text.trim()) return res.status(400).json({ error: 'Empty', message: '文件内容为空。' });
   if (!appConfig.knowledgeBases) appConfig.knowledgeBases = [];
   const id = `kb-${Date.now()}`;
-  appConfig.knowledgeBases.push({ id, name: String(name).trim(), content: text.trim(), enabled: true, createdAt: Date.now() });
+  const ragConfig = normalizeKbRagConfig({
+    chunkSize: req.body?.ragChunkSize,
+    chunkOverlap: req.body?.ragChunkOverlap,
+    topK: req.body?.ragTopK,
+    maxContextChars: req.body?.ragMaxContextChars,
+    minScore: req.body?.ragMinScore
+  }, KB_RAG_DEFAULTS);
+  const kb = buildKbRecord({
+    id,
+    name: String(name).trim(),
+    content: text.trim(),
+    existing: null,
+    ragConfig,
+    sourceMeta: {
+      type: 'file',
+      parser: req.body?.parser || 'builtin',
+      fileName: req.file.originalname || '',
+      fileExt: ext || ''
+    }
+  });
+  appConfig.knowledgeBases.push(kb);
   if (!saveAppConfig()) return res.status(500).json({ error: 'SaveFailed' });
-  res.json({ ok: true, id, charCount: text.trim().length });
+  res.json({
+    ok: true,
+    id,
+    charCount: text.trim().length,
+    chunkCount: Array.isArray(kb.chunks) ? kb.chunks.length : 0,
+    ragConfig: kb.ragConfig,
+    sourceMeta: kb.sourceMeta
+  });
 });
 
 // Cleanup on exit
@@ -1137,14 +1499,11 @@ app.post('/api/chat', async (req, res) => {
       llmMessages[0].content += `\n\n【联网搜索结果（仅供参考，请结合自身知识判断准确性）】\n${searchCtx}`;
     }
 
-    /* 知识库注入 */
+    /* 自定义 RAG 检索片段注入 */
     if (knowledgeBaseIds.length && llmMessages.length) {
-      const kbTexts = (appConfig.knowledgeBases || [])
-        .filter(kb => knowledgeBaseIds.includes(kb.id) && kb.enabled && kb.content)
-        .map(kb => `【${kb.name}】\n${kb.content.slice(0, CHAT_CTX_LIMIT)}`)
-        .join('\n\n');
-      if (kbTexts) {
-        llmMessages[0].content += `\n\n【知识库参考资料】\n${kbTexts}`;
+      const kbContext = buildKbInjectedContext(knowledgeBaseIds, recent);
+      if (kbContext) {
+        llmMessages[0].content += `\n\n${kbContext}`;
       }
     }
 
@@ -1419,41 +1778,64 @@ app.post('/api/translate', async (req, res) => {
     const providerId = req.body?.providerId || null;
     const chatModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
     const targetLang = normalizeChatPrefLang(req.body?.targetLang, 'zh-CN');
+    const fastMode = Boolean(req.body?.fastMode);
     const provider = (providerId && getProvider(providerId)) || getActiveProvider();
     const model = chatModel || (provider.models && provider.models[0]) || OLLAMA_MODEL;
+    const cacheKey = buildTranslateCacheKey({ text: trimmed, targetLang, provider, model, fastMode });
+    const cached = getCachedTranslateResult(cacheKey);
+    if (cached) {
+      return res.json({ ok: true, ...cached, targetLang, cacheHit: true });
+    }
+
     const pref = {
       uiLanguage: targetLang,
       translateEnabled: true,
       translateTo: targetLang
     };
-    const sameAsSource = (text) => String(text || '').trim() === trimmed;
+    const sameAsSource = (value) => String(value || '').trim() === trimmed;
     const likelyNeedsTranslation = targetLang !== 'en-US' && /[A-Za-z]{8,}/.test(trimmed);
 
-    let content = '';
-    let fallbackUsed = false;
-    let primaryError = null;
-    try {
-      content = await translateAvatarReplyContent(trimmed, pref, provider, model);
-    } catch (error) {
-      primaryError = error;
+    let job = translateInFlight.get(cacheKey);
+    if (!job) {
+      job = (async () => {
+        let content = '';
+        let fallbackUsed = false;
+        let primaryError = null;
+        try {
+          content = await translateAvatarReplyContent(trimmed, pref, provider, model);
+        } catch (error) {
+          primaryError = error;
+        }
+
+        const providerIsOllama = !provider || provider.type === 'ollama';
+        const shouldFallbackToLocal =
+          !providerIsOllama &&
+          (primaryError || (!fastMode && sameAsSource(content) && likelyNeedsTranslation));
+
+        if (shouldFallbackToLocal) {
+          try {
+            const localProvider = defaultOllamaProvider();
+            content = await translateAvatarReplyContent(trimmed, pref, localProvider, OLLAMA_MODEL);
+            fallbackUsed = true;
+          } catch (fallbackError) {
+            throw primaryError || fallbackError;
+          }
+        } else if (primaryError) {
+          throw primaryError;
+        }
+
+        const result = { content: content || trimmed, fallbackUsed };
+        setCachedTranslateResult(cacheKey, result);
+        return result;
+      })().finally(() => {
+        const current = translateInFlight.get(cacheKey);
+        if (current === job) translateInFlight.delete(cacheKey);
+      });
+      translateInFlight.set(cacheKey, job);
     }
 
-    const providerIsOllama = !provider || provider.type === 'ollama';
-    const shouldFallbackToLocal =
-      !providerIsOllama &&
-      (primaryError || (sameAsSource(content) && likelyNeedsTranslation));
-
-    if (shouldFallbackToLocal) {
-      try {
-        const localProvider = defaultOllamaProvider();
-        content = await translateAvatarReplyContent(trimmed, pref, localProvider, OLLAMA_MODEL);
-        fallbackUsed = true;
-      } catch (fallbackError) {
-        throw primaryError || fallbackError;
-      }
-    }
-
-    return res.json({ ok: true, content: content || trimmed, targetLang, fallbackUsed });
+    const result = await job;
+    return res.json({ ok: true, ...result, targetLang, cacheHit: false });
   } catch (error) {
     return res.status(500).json({
       error: 'TranslateFailed',
@@ -1637,6 +2019,71 @@ function getClientIp(req) {
   if (ip.startsWith('::ffff:')) ip = ip.slice(7);
   if (ip === '::1') ip = '127.0.0.1';
   return ip;
+}
+
+function normalizeClientId(raw) {
+  if (!RATE_LIMIT_TRUST_CLIENT_ID) return '';
+  const id = String(raw || '').trim();
+  if (!id || id.length > 128) return '';
+  if (!/^[a-zA-Z0-9._:-]+$/.test(id)) return '';
+  return id;
+}
+
+function getRateLimitBucketKey(req, ip) {
+  const clientId = normalizeClientId(req.get('x-client-id'));
+  if (clientId) return `cid:${clientId}`;
+  return `ip:${ip || 'unknown'}`;
+}
+
+function stableSha1(text) {
+  return crypto.createHash('sha1').update(String(text || ''), 'utf8').digest('hex');
+}
+
+function buildTranslateCacheKey({ text, targetLang, provider, model, fastMode }) {
+  const providerKey = provider && typeof provider === 'object'
+    ? [provider.id || '', provider.type || '', provider.baseUrl || ''].join('|')
+    : '';
+  return [targetLang || 'zh-CN', model || '', providerKey, fastMode ? 'fast' : 'full', stableSha1(text || '')].join('|');
+}
+
+function pruneTranslateCache(now = Date.now()) {
+  if (TRANSLATE_CACHE_TTL_MS <= 0 || TRANSLATE_CACHE_MAX_ITEMS <= 0) {
+    if (translateResultCache.size) translateResultCache.clear();
+    return;
+  }
+
+  for (const [key, entry] of translateResultCache.entries()) {
+    if (!entry || entry.expiresAt <= now) translateResultCache.delete(key);
+  }
+
+  while (translateResultCache.size > TRANSLATE_CACHE_MAX_ITEMS) {
+    const oldestKey = translateResultCache.keys().next().value;
+    if (!oldestKey) break;
+    translateResultCache.delete(oldestKey);
+  }
+}
+
+function getCachedTranslateResult(cacheKey) {
+  if (!cacheKey || TRANSLATE_CACHE_TTL_MS <= 0 || TRANSLATE_CACHE_MAX_ITEMS <= 0) return null;
+  const entry = translateResultCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    translateResultCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value || null;
+}
+
+function setCachedTranslateResult(cacheKey, value) {
+  if (!cacheKey || !value || TRANSLATE_CACHE_TTL_MS <= 0 || TRANSLATE_CACHE_MAX_ITEMS <= 0) return;
+  const now = Date.now();
+  translateResultCache.set(cacheKey, {
+    value,
+    expiresAt: now + TRANSLATE_CACHE_TTL_MS
+  });
+  if (translateResultCache.size > TRANSLATE_CACHE_MAX_ITEMS || (translateResultCache.size % 50) === 0) {
+    pruneTranslateCache(now);
+  }
 }
 
 function isPrivateOrLanIp(ip) {

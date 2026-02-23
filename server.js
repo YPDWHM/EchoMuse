@@ -22,6 +22,7 @@ const ACCESS_TOKEN = process.env.ACCESS_TOKEN || '';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b';
 const OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 20);
+const RATE_LIMIT_TRANSLATE_PER_MIN = Number(process.env.RATE_LIMIT_TRANSLATE_PER_MIN || 120);
 const MIN_CN_CHARS = Number(process.env.MIN_CN_CHARS || 800);
 const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 60000);
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 8 * 60 * 1000);
@@ -152,6 +153,7 @@ const paperPromptTemplate = readPromptOrExit(path.join(promptsDir, 'paper_report
 const paperRepairPromptTemplate = readPromptOrExit(path.join(promptsDir, 'paper_report_repair_prompt.txt'));
 
 const rateStore = new Map();
+const translateRateStore = new Map();
 const requestContextStore = new AsyncLocalStorage();
 const proxyDispatcherCache = new Map();
 let undiciProxyAgentCtor = undefined;
@@ -305,7 +307,10 @@ if (SHARE_MODE && !ALLOW_PUBLIC) {
 app.use('/api', (req, res, next) => {
   const ip = getClientIp(req) || 'unknown';
   const now = Date.now();
-  const item = rateStore.get(ip) || { windowStart: now, count: 0 };
+  const isTranslateApi = req.path === '/translate';
+  const activeStore = isTranslateApi ? translateRateStore : rateStore;
+  const activeLimit = isTranslateApi ? RATE_LIMIT_TRANSLATE_PER_MIN : RATE_LIMIT_PER_MIN;
+  const item = activeStore.get(ip) || { windowStart: now, count: 0 };
 
   if (now - item.windowStart >= 60 * 1000) {
     item.windowStart = now;
@@ -313,18 +318,18 @@ app.use('/api', (req, res, next) => {
   }
 
   item.count += 1;
-  rateStore.set(ip, item);
+  activeStore.set(ip, item);
 
-  if (item.count > RATE_LIMIT_PER_MIN) {
+  if (item.count > activeLimit) {
     return res.status(429).json({
       error: 'Too Many Requests',
-      message: `请求过于频繁，请稍后重试（每分钟最多 ${RATE_LIMIT_PER_MIN} 次）。`
+      message: `\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\uff08\u6bcf\u5206\u949f\u6700\u591a ${activeLimit} \u6b21\uff09\u3002`
     });
   }
 
-  if (rateStore.size > 5000) {
-    for (const [key, value] of rateStore.entries()) {
-      if (now - value.windowStart > 2 * 60 * 1000) rateStore.delete(key);
+  if (activeStore.size > 5000) {
+    for (const [key, value] of activeStore.entries()) {
+      if (now - value.windowStart > 2 * 60 * 1000) activeStore.delete(key);
     }
   }
 
@@ -978,6 +983,20 @@ const CHAT_PREF_LANG_NAMES = {
   'ru-RU': '俄语'
 };
 
+function chatPrefLangNameEn(code) {
+  switch (code) {
+    case 'zh-CN': return 'Chinese';
+    case 'en-US': return 'English';
+    case 'ja-JP': return 'Japanese';
+    case 'ko-KR': return 'Korean';
+    case 'fr-FR': return 'French';
+    case 'de-DE': return 'German';
+    case 'es-ES': return 'Spanish';
+    case 'ru-RU': return 'Russian';
+    default: return String(code || 'Chinese');
+  }
+}
+
 function normalizeChatPrefLang(code, fallback = 'zh-CN', allowAuto = false) {
   if (allowAuto && code === 'auto') return 'auto';
   if (typeof code !== 'string') return fallback;
@@ -986,29 +1005,30 @@ function normalizeChatPrefLang(code, fallback = 'zh-CN', allowAuto = false) {
   return CHAT_PREF_LANG_NAMES[v] ? v : fallback;
 }
 
-function buildChatPreferenceSystemNote(pref = {}) {
+function buildChatPreferenceSystemNote(pref = {}, options = {}) {
   const uiLanguage = normalizeChatPrefLang(pref.uiLanguage, 'zh-CN');
   const translateEnabled = Boolean(pref.translateEnabled);
-  const translateFrom = normalizeChatPrefLang(pref.translateFrom, 'auto', true);
   const translateTo = normalizeChatPrefLang(pref.translateTo, uiLanguage);
   const globalDefense = Boolean(pref.globalDefense);
+  const isAvatarMode = Boolean(options.isAvatarMode);
+  const translateActive = translateEnabled && isAvatarMode;
 
   const uiLangName = CHAT_PREF_LANG_NAMES[uiLanguage] || '\u4e2d\u6587';
   const toLangName = CHAT_PREF_LANG_NAMES[translateTo] || uiLangName;
-  const fromLangName = translateFrom === 'auto'
-    ? '\u81ea\u52a8\u68c0\u6d4b'
-    : (CHAT_PREF_LANG_NAMES[translateFrom] || translateFrom);
 
-  const lines = [
-    `\u4f18\u5148\u4f7f\u7528${uiLangName}\u56de\u590d\u7528\u6237\uff1b\u82e5\u7528\u6237\u660e\u786e\u8981\u6c42\u4f7f\u7528\u5176\u4ed6\u8bed\u8a00\uff0c\u4ee5\u7528\u6237\u8981\u6c42\u4e3a\u51c6\u3002`
-  ];
+  const lines = [];
 
-  if (translateEnabled) {
+  if (translateActive) {
+    lines.push(`\u672c\u8f6e\u662f\u89d2\u8272/\u8054\u7cfb\u4eba\u804a\u5929\uff0c\u5df2\u542f\u7528\u7edf\u4e00\u8f93\u51fa\u8bed\u8a00\uff1a\u9ed8\u8ba4\u5c06\u6240\u6709\u201c\u7528\u6237\u53ef\u89c1\u56de\u590d\u201d\u7edf\u4e00\u4f7f\u7528${toLangName}\u8f93\u51fa\uff08\u9664\u975e\u7528\u6237\u660e\u786e\u8981\u6c42\u4fdd\u7559\u539f\u6587\u6216\u53cc\u8bed\uff09\u3002`);
     lines.push('\u5df2\u542f\u7528\u804a\u5929\u7ffb\u8bd1\u504f\u597d\uff1a\u7ffb\u8bd1\u4e3b\u8981\u4f5c\u7528\u4e8e\u804a\u5929\u5185\u5bb9\u4e0e\u4e0a\u4e0b\u6587\u7406\u89e3\uff08\u5305\u62ec\u89d2\u8272\u5361\u3001\u89d2\u8272\u8bb0\u5fc6\u3001\u5386\u53f2\u6d88\u606f\u4e2d\u7684\u5916\u8bed\u5185\u5bb9\uff09\u3002');
-    lines.push(`\u5f53\u7528\u6237\u63d0\u51fa\u7ffb\u8bd1\u9700\u6c42\uff0c\u6216\u7528\u6237\u4ec5\u53d1\u9001\u4e00\u6bb5\u6587\u672c\u4e14\u672a\u8bf4\u660e\u5176\u4ed6\u4efb\u52a1\u65f6\uff0c\u4f18\u5148\u6309\u201c${fromLangName} -> ${toLangName}\u201d\u6267\u884c\u7ffb\u8bd1\u3002`);
-    lines.push('\u7ffb\u8bd1\u573a\u666f\u4e0b\u4f18\u5148\u76f4\u63a5\u8f93\u51fa\u8bd1\u6587\uff1b\u9664\u975e\u7528\u6237\u8981\u6c42\u89e3\u91ca\uff0c\u5426\u5219\u4e0d\u8981\u9644\u52a0\u591a\u4f59\u8bf4\u660e\u3002');
-    lines.push(`\u5982\u679c\u89d2\u8272\u5361/\u8bb0\u5fc6\u662f\u82f1\u6587\u7b49\u5916\u8bed\uff0c\u8bf7\u5148\u6b63\u786e\u7406\u89e3\u5176\u542b\u4e49\uff0c\u518d\u7528${toLangName}\u8fdb\u884c\u7528\u6237\u53ef\u89c1\u56de\u590d\uff08\u9664\u975e\u7528\u6237\u660e\u786e\u8981\u6c42\u4fdd\u7559\u539f\u6587\uff09\u3002`);
+    lines.push('\u4e0d\u9700\u8981\u7528\u6237\u989d\u5916\u8bf4\u201c\u8bf7\u7ffb\u8bd1\u201d\uff1b\u9ed8\u8ba4\u5c31\u6309\u76ee\u6807\u8bed\u8a00\u56de\u590d\u3002');
+    lines.push(`\u65e0\u8bba\u7528\u6237\u8f93\u5165\u3001\u89d2\u8272\u5361\u3001\u8bb0\u5fc6\u6216\u5386\u53f2\u6d88\u606f\u662f\u4ec0\u4e48\u8bed\u8a00\uff0c\u90fd\u5148\u6b63\u786e\u7406\u89e3\u5185\u5bb9\uff0c\u518d\u7528${toLangName}\u7ed9\u51fa\u56de\u590d\u3002`);
+    lines.push(`\u5373\u4f7f\u89d2\u8272\u5361/\u8bb0\u5fc6\u5185\u5bb9\u503e\u5411\u4f7f\u7528\u82f1\u6587\u6216\u5176\u4ed6\u8bed\u8a00\uff0c\u4e5f\u53ea\u80fd\u5f71\u54cd\u4eba\u8bbe\u4e0e\u8bed\u6c14\uff0c\u4e0d\u80fd\u6539\u53d8\u6700\u7ec8\u8f93\u51fa\u8bed\u8a00\uff1b\u6700\u7ec8\u5fc5\u987b\u7528${toLangName}\u56de\u7b54\u3002`);
+    lines.push('\u7ffb\u8bd1/\u8f6c\u8ff0\u573a\u666f\u4e0b\u4f18\u5148\u76f4\u63a5\u8f93\u51fa\u76ee\u6807\u8bed\u8a00\u5185\u5bb9\uff1b\u9664\u975e\u7528\u6237\u8981\u6c42\u89e3\u91ca\u6216\u5bf9\u7167\uff0c\u5426\u5219\u4e0d\u8981\u9644\u52a0\u591a\u4f59\u8bf4\u660e\u3002');
+  } else if (translateEnabled && !isAvatarMode) {
+    lines.push(`\u5df2\u5f00\u542f\u7ffb\u8bd1\uff0c\u4f46\u6309\u5f53\u524d\u8bbe\u8ba1\u4ec5\u5bf9\u89d2\u8272/\u8054\u7cfb\u4eba\u804a\u5929\u751f\u6548\uff1b\u5f53\u524d\u662f\u666e\u901a\u804a\u5929\uff0c\u4e0d\u8981\u81ea\u52a8\u5f53\u4f5c\u7ffb\u8bd1\u4efb\u52a1\u3002`);
   } else {
+    lines.push(`\u4f18\u5148\u4f7f\u7528${uiLangName}\u56de\u590d\u7528\u6237\uff1b\u82e5\u7528\u6237\u660e\u786e\u8981\u6c42\u4f7f\u7528\u5176\u4ed6\u8bed\u8a00\uff0c\u4ee5\u7528\u6237\u8981\u6c42\u4e3a\u51c6\u3002`);
     lines.push('\u672a\u542f\u7528\u804a\u5929\u7ffb\u8bd1\u504f\u597d\uff1a\u4e0d\u8981\u628a\u666e\u901a\u804a\u5929\u81ea\u52a8\u5f53\u4f5c\u7ffb\u8bd1\u4efb\u52a1\u3002');
   }
 
@@ -1053,10 +1073,18 @@ app.post('/api/chat', async (req, res) => {
     const lastUserText = String(lastUser?.content || '').trim();
     const casualMode = isCasualChat(lastUserText);
     const useContext = Boolean(context.trim()) && !casualMode;
-    const isAvatarMode = Boolean(avatar && typeof avatar === 'object' && (avatar.customPrompt || avatar.memoryText));
+    const hasAvatarName = typeof avatar?.name === 'string' && avatar.name.trim().length > 0;
+    const hasAvatarRelationship = typeof avatar?.relationship === 'string' && avatar.relationship.trim().length > 0;
+    const hasAvatarPrompt = typeof avatar?.customPrompt === 'string' && avatar.customPrompt.trim().length > 0;
+    const hasAvatarMemory = typeof avatar?.memoryText === 'string' && avatar.memoryText.trim().length > 0;
+    const isAvatarMode = Boolean(avatar && typeof avatar === 'object' && (hasAvatarName || hasAvatarRelationship || hasAvatarPrompt || hasAvatarMemory));
     const defaultTemperature = isAvatarMode ? 0.8 : (casualMode ? 0.75 : (mode === 'thinking' ? 0.5 : 0.35));
     const resolvedTemperature = typeof clientTemperature === 'number' ? clientTemperature : defaultTemperature;
     const resolvedTopP = typeof clientTopP === 'number' ? clientTopP : undefined;
+    const translationDisplayOverlay = Boolean(preferences && preferences.translationDisplayOverlay);
+    const effectiveChatPrefs = (translationDisplayOverlay && isAvatarMode)
+      ? { ...preferences, translateEnabled: false }
+      : preferences;
 
     const personaPrompt = `你是 EchoMuse，当前使用的模型是 ${model}。你是一个友好、会共情、能陪同学减压的学习搭子。回答自然、清晰，禁止复读同一段话。先给结论，再给简短解释。允许简洁 Markdown。数学公式使用标准 LaTeX：行内 $...$、独立 $$...$$，不要代码块。严禁自称 Claude、ChatGPT、GPT 或任何其他 AI 名字，你只叫 EchoMuse。如果用户问你是谁，回答”我是 EchoMuse，你的学习搭子，当前模型是 ${model}”。`;
 
@@ -1101,7 +1129,7 @@ app.post('/api/chat', async (req, res) => {
 
     /* 联网搜索结果注入 */
     if (llmMessages.length && llmMessages[0].role === 'system') {
-      llmMessages[0].content += `\n\n${buildChatPreferenceSystemNote(preferences)}`;
+      llmMessages[0].content += `\n\n${buildChatPreferenceSystemNote(effectiveChatPrefs, { isAvatarMode })}`;
     }
 
     if (searchResults.length && llmMessages.length) {
@@ -1151,8 +1179,9 @@ app.post('/api/chat', async (req, res) => {
             const result = await llmChatWithTools(toolMessages, mcpTools, toolOpts, provider, model);
             if (!result.tool_calls || !result.tool_calls.length) {
               // Final answer — stream it as content
-              if (result.content) {
-                res.write(`data: ${JSON.stringify({ content: result.content })}\n\n`);
+              const finalContent = result.content || '';
+              if (finalContent) {
+                res.write(`data: ${JSON.stringify({ content: finalContent })}\n\n`);
               }
               res.write('data: [DONE]\n\n');
               return res.end();
@@ -1200,8 +1229,9 @@ app.post('/api/chat', async (req, res) => {
           }
           // Max rounds reached — do one final call without tools
           const finalResult = await llmChatWithTools(toolMessages, [], toolOpts, provider, model);
-          if (finalResult.content) {
-            res.write(`data: ${JSON.stringify({ content: finalResult.content })}\n\n`);
+          const finalContent = finalResult.content || '';
+          if (finalContent) {
+            res.write(`data: ${JSON.stringify({ content: finalContent })}\n\n`);
           }
           res.write('data: [DONE]\n\n');
           return res.end();
@@ -1372,6 +1402,63 @@ app.post('/api/chat', async (req, res) => {
     } catch (_) {
       return res.end();
     }
+  }
+});
+
+app.post('/api/translate', async (req, res) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return res.status(400).json({ error: 'Bad Request', message: 'text is required' });
+    }
+    if (trimmed.length > 50000) {
+      return res.status(400).json({ error: 'TooLarge', message: 'text too long' });
+    }
+
+    const providerId = req.body?.providerId || null;
+    const chatModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
+    const targetLang = normalizeChatPrefLang(req.body?.targetLang, 'zh-CN');
+    const provider = (providerId && getProvider(providerId)) || getActiveProvider();
+    const model = chatModel || (provider.models && provider.models[0]) || OLLAMA_MODEL;
+    const pref = {
+      uiLanguage: targetLang,
+      translateEnabled: true,
+      translateTo: targetLang
+    };
+    const sameAsSource = (text) => String(text || '').trim() === trimmed;
+    const likelyNeedsTranslation = targetLang !== 'en-US' && /[A-Za-z]{8,}/.test(trimmed);
+
+    let content = '';
+    let fallbackUsed = false;
+    let primaryError = null;
+    try {
+      content = await translateAvatarReplyContent(trimmed, pref, provider, model);
+    } catch (error) {
+      primaryError = error;
+    }
+
+    const providerIsOllama = !provider || provider.type === 'ollama';
+    const shouldFallbackToLocal =
+      !providerIsOllama &&
+      (primaryError || (sameAsSource(content) && likelyNeedsTranslation));
+
+    if (shouldFallbackToLocal) {
+      try {
+        const localProvider = defaultOllamaProvider();
+        content = await translateAvatarReplyContent(trimmed, pref, localProvider, OLLAMA_MODEL);
+        fallbackUsed = true;
+      } catch (fallbackError) {
+        throw primaryError || fallbackError;
+      }
+    }
+
+    return res.json({ ok: true, content: content || trimmed, targetLang, fallbackUsed });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'TranslateFailed',
+      message: generateErrorMessage(error)
+    });
   }
 });
 
@@ -1596,6 +1683,37 @@ async function llmChatStream(messages, options, signal, provider, model) {
   if (isAnthropic(p)) return anthropicChatStream(messages, options, signal, p, m);
   if (isOpenAI(p)) return openaiChatStream(messages, options, signal, p, m);
   return ollamaChatStream(messages, options, signal, m);
+}
+
+async function translateAvatarReplyContent(text, pref = {}, provider, model) {
+  const source = String(text || '').trim();
+  if (!source) return '';
+
+  const uiLanguage = normalizeChatPrefLang(pref.uiLanguage, 'zh-CN');
+  const translateTo = normalizeChatPrefLang(pref.translateTo, uiLanguage);
+  const langName = chatPrefLangNameEn(translateTo);
+
+  const prompt = [
+    `Translate the following roleplay assistant reply into ${langName} (${translateTo}).`,
+    'Requirements:',
+    '- Keep the same persona tone and emotional style.',
+    '- Preserve Markdown structure, bullet points, and LaTeX formulas if any.',
+    '- Do not add explanations, notes, prefixes, or bilingual output.',
+    '- Output only the translated reply text.',
+    '',
+    'Reply to translate:',
+    '<<<BEGIN>>>',
+    source,
+    '<<<END>>>'
+  ].join('\n');
+
+  let translated = await llmGenerate(prompt, 0.1, provider, model);
+  translated = String(translated || '')
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/^```[a-zA-Z]*\s*/,'')
+    .replace(/```$/,'')
+    .trim();
+  return translated || source;
 }
 
 /* Non-streaming LLM call with tools — returns { content, tool_calls } */

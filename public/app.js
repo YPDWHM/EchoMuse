@@ -897,9 +897,20 @@ const state = {
     inlineArtifactTabs: {},
     editAvailableModels: [],
     editSelectedModels: [],
-    sidebarTab: localStorage.getItem('chatbox_sidebar_tab_v1') || 'sessions'
+    sidebarTab: localStorage.getItem('chatbox_sidebar_tab_v1') || 'sessions',
+    activeContactAvatarId: ''
   },
   pdfjsLib: null
+};
+
+const translationOverlayRuntime = {
+  queue: [],
+  pending: new Set(),
+  active: 0,
+  maxConcurrent: 2,
+  lastErrorAt: 0,
+  pauseUntil: 0,
+  resumeTimer: 0
 };
 
 const sharedUtils = window.EchoMuseUtils;
@@ -1174,6 +1185,12 @@ function saveSettings() {
   localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(state.settings));
 }
 
+function getTranslateTargetRowLabelText() {
+  const lang = String(state.settings.language || 'zh-CN');
+  if (lang === 'zh-CN') return '翻译输出语言';
+  return 'Translation Output Language';
+}
+
 function applySettings() {
   applyTheme(state.settings.theme);
   applyFontSize(state.settings.fontSize);
@@ -1208,10 +1225,11 @@ function applyFontSize(sizeKey) {
 }
 
 function syncSettingsUI() {
+  state.settings.translateFrom = 'auto';
   if (els.uiLangSelect) els.uiLangSelect.value = state.settings.language || 'zh-CN';
   if (els.globalDefenseToggle) els.globalDefenseToggle.checked = Boolean(state.settings.globalDefense);
   if (els.translateEnableToggle) els.translateEnableToggle.checked = Boolean(state.settings.translateEnabled);
-  if (els.translateFromSelect) els.translateFromSelect.value = state.settings.translateFrom || 'auto';
+  if (els.translateFromSelect) els.translateFromSelect.value = 'auto';
   if (els.translateToSelect) els.translateToSelect.value = state.settings.translateTo || 'zh-CN';
   if (els.fontSizeSelect) els.fontSizeSelect.value = String(normalizeFontSizePx(state.settings.fontSize));
   updateFontSizeValueLabel();
@@ -1377,7 +1395,7 @@ function applyLanguage() {
   setSettingRowLabel(els.showAccessBtn, pack.mobileAccess);
   setSettingRowLabel(els.globalDefenseToggle, pack.globalDefense);
   setSettingRowLabel(els.translateEnableToggle, pack.translateEnabled);
-  setSettingRowLabel(els.translateFromSelect, pack.translateDirection);
+  setSettingRowLabel(els.translateToSelect, getTranslateTargetRowLabelText());
   setSettingRowLabel(els.fontSizeSelect, pack.fontSize);
   setSettingRowLabel(els.themeSelect, pack.theme);
 
@@ -1495,8 +1513,19 @@ function applyLanguage() {
 
 function updateTranslateSettingsUI() {
   const enabled = Boolean(state.settings.translateEnabled);
-  if (els.translateFromSelect) els.translateFromSelect.disabled = !enabled;
+  state.settings.translateFrom = 'auto';
+  if (els.translateFromSelect) {
+    els.translateFromSelect.value = 'auto';
+    els.translateFromSelect.disabled = true;
+    els.translateFromSelect.style.display = 'none';
+    els.translateFromSelect.setAttribute('aria-hidden', 'true');
+    els.translateFromSelect.tabIndex = -1;
+  }
   if (els.translateToSelect) els.translateToSelect.disabled = !enabled;
+  if (els.translateToSelect) {
+    els.translateToSelect.style.flex = '1';
+    els.translateToSelect.style.width = '100%';
+  }
 }
 
 function updateProxyFieldsUI() {
@@ -1583,7 +1612,8 @@ function getChatClientPreferences() {
   return {
     uiLanguage: String(state.settings.language || 'zh-CN'),
     translateEnabled: Boolean(state.settings.translateEnabled),
-    translateFrom: String(state.settings.translateFrom || 'auto'),
+    translationDisplayOverlay: true,
+    translateFrom: 'auto',
     translateTo: String(state.settings.translateTo || 'zh-CN'),
     globalDefense: Boolean(state.settings.globalDefense)
   };
@@ -1693,11 +1723,14 @@ function bindEvents() {
       state.settings.translateEnabled = Boolean(els.translateEnableToggle.checked);
       saveSettings();
       updateTranslateSettingsUI();
+      renderMessages();
+      renderContactList();
     });
   }
   if (els.translateFromSelect) {
     els.translateFromSelect.addEventListener('change', () => {
-      state.settings.translateFrom = els.translateFromSelect.value || 'auto';
+      state.settings.translateFrom = 'auto';
+      els.translateFromSelect.value = 'auto';
       saveSettings();
     });
   }
@@ -1705,6 +1738,8 @@ function bindEvents() {
     els.translateToSelect.addEventListener('change', () => {
       state.settings.translateTo = els.translateToSelect.value || 'zh-CN';
       saveSettings();
+      renderMessages();
+      renderContactList();
     });
   }
   if (els.fontSizeSelect) {
@@ -2458,9 +2493,70 @@ function updateAvatar(id, data) {
 
 function deleteAvatar(id) {
   state.avatars = state.avatars.filter((a) => a.id !== id);
-  state.sessions.forEach((s) => { if (s.avatarId === id) s.avatarId = null; });
+  state.sessions.forEach((s) => {
+    if (s.avatarId === id) s.avatarId = null;
+    if (s.contactOwnerAvatarId === id) delete s.contactOwnerAvatarId;
+  });
   persistAvatars();
   persistSessionsState();
+}
+
+function resolveContactSession(avatarId, options = {}) {
+  const { createIfMissing = false, focus = false } = options;
+  if (!avatarId) return null;
+  const avatar = getAvatarById(avatarId);
+  if (!avatar) return null;
+
+  let session = null;
+  if (avatar.contactSessionId) {
+    session = state.sessions.find((s) => s.id === avatar.contactSessionId && s.avatarId === avatarId) || null;
+  }
+
+  if (!session) {
+    const candidates = state.sessions.filter((s) => s.avatarId === avatarId);
+    session = candidates.find((s) => s.contactOwnerAvatarId === avatarId) || null;
+    if (!session) {
+      session = candidates.find((s) => String(s.title || '').trim() === String(avatar.name || '').trim()) || null;
+    }
+    if (!session && candidates.length) {
+      // Fallback to the oldest bound session; imported contact session is usually the earliest one.
+      session = candidates.slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))[0];
+    }
+    if (session) {
+      session.contactOwnerAvatarId = avatarId;
+      avatar.contactSessionId = session.id;
+      persistAvatars();
+      persistSessionsState();
+    }
+  }
+
+  if (!session && createIfMissing) {
+    createSession(avatar.name || '联系人会话');
+    session = getActiveSession();
+    if (session) {
+      session.avatarId = avatarId;
+      session.contactOwnerAvatarId = avatarId;
+      avatar.contactSessionId = session.id;
+      touchSession(session);
+      persistAvatars();
+      persistSessionsState();
+      renderSessionList();
+      renderAvatarSelectPanel();
+    }
+  }
+
+  if (session && focus) {
+    switchSession(session.id);
+  }
+  return session;
+}
+
+function isContactDedicatedSession(session) {
+  return Boolean(session && session.contactOwnerAvatarId);
+}
+
+function getRegularSessions() {
+  return state.sessions.filter((s) => !isContactDedicatedSession(s));
 }
 
 /* ── Tavern Character Card Import (酒馆卡片导入) ── */
@@ -2503,6 +2599,8 @@ async function handleTavernImport(file) {
   const session = getActiveSession();
   if (session) {
     session.avatarId = avatar.id;
+    session.contactOwnerAvatarId = avatar.id;
+    avatar.contactSessionId = session.id;
     if (card.firstMessage) {
       session.messages.push({
         id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -2513,6 +2611,7 @@ async function handleTavernImport(file) {
       });
     }
     touchSession(session);
+    persistAvatars();
     persistSessionsState();
   }
 
@@ -2526,18 +2625,37 @@ async function handleTavernImport(file) {
 /* ── Sidebar Tabs + Contact List + Group ── */
 
 function switchSidebarTab(tab) {
+  if (tab === 'sessions') {
+    const active = getActiveSession();
+    if (!active || isContactDedicatedSession(active)) {
+      const regular = sortSessions(getRegularSessions())[0] || null;
+      if (regular) {
+        switchSession(regular.id);
+      } else {
+        createSession('新会话');
+        syncMaterialsFromSession();
+        renderMessages();
+        renderDrawer();
+        renderAvatarSelectPanel();
+      }
+    }
+  }
+
   state.ui.sidebarTab = tab;
   localStorage.setItem('chatbox_sidebar_tab_v1', tab);
   if (els.tabSessions) els.tabSessions.classList.toggle('active', tab === 'sessions');
   if (els.tabContacts) els.tabContacts.classList.toggle('active', tab === 'contacts');
   if (els.sessionsPane) els.sessionsPane.classList.toggle('hidden', tab !== 'sessions');
   if (els.contactsPane) els.contactsPane.classList.toggle('hidden', tab !== 'contacts');
+  if (tab === 'sessions') renderSessionList();
   if (tab === 'contacts') renderContactList();
 }
 
 function renderContactList() {
   if (!els.contactList) return;
   const avatars = state.avatars;
+  const activeSession = getActiveSession();
+  const activeAvatarId = (state.ui.activeContactAvatarId || (activeSession && activeSession.avatarId) || '');
   if (!avatars.length) {
     els.contactList.innerHTML = '<div class="muted">还没有联系人，导入酒馆卡片或在设置中创建角色</div>';
     return;
@@ -2548,11 +2666,12 @@ function renderContactList() {
     const iconHtml = iconVal.startsWith('data:image')
       ? `<img src="${iconVal}" alt="avatar">`
       : iconVal;
-    const boundSession = state.sessions.find((s) => s.avatarId === a.id);
-    const preview = boundSession ? getSessionPreview(boundSession) : '暂无消息';
+    const boundSession = resolveContactSession(a.id, { createIfMissing: false, focus: false });
+    const preview = boundSession ? getOverlaySessionPreview(boundSession) : '暂无消息';
     const badge = isGroup ? '<span class="contact-badge">群组</span>' : '';
+    const isActive = activeAvatarId && a.id === activeAvatarId;
     return `
-      <button class="contact-item" data-action="open-contact" data-avatar-id="${a.id}" type="button">
+      <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}">
         <span class="contact-icon">${iconHtml}</span>
         <div class="contact-info">
           <div class="contact-name">${escapeHtml(a.name)} ${badge}</div>
@@ -2564,24 +2683,15 @@ function renderContactList() {
 }
 
 function openContact(avatarId) {
-  const existing = state.sessions.find((s) => s.avatarId === avatarId);
-  if (existing) {
-    switchSession(existing.id);
-  } else {
-    const avatar = getAvatarById(avatarId);
-    if (!avatar) return;
-    createSession(avatar.name);
-    const session = getActiveSession();
-    if (session) {
-      session.avatarId = avatarId;
-      touchSession(session);
-      persistSessionsState();
-    }
-    renderSessionList();
-    renderMessages();
-    renderAvatarSelectPanel();
+  if (!avatarId) return;
+  state.ui.activeContactAvatarId = avatarId;
+  const session = resolveContactSession(avatarId, { createIfMissing: true, focus: true });
+  if (!session) return;
+  updateAvatarBtnLabel();
+  if (state.ui.sidebarTab === 'contacts') {
+    renderContactList();
   }
-  switchSidebarTab('sessions');
+  if (els.chatInput) els.chatInput.focus();
 }
 
 function openGroupDialog() {
@@ -2731,7 +2841,7 @@ function updateAvatarBtnLabel() {
 
 function renderSessionList() {
   els.sessionList.innerHTML = buildSessionListHtml({
-    sessions: state.sessions,
+    sessions: getRegularSessions(),
     activeId: state.activeSessionId,
     search: state.search,
     sortSessions,
@@ -2745,6 +2855,184 @@ function renderSessionList() {
 function syncMaterialsFromSession() {}
 
 function updateCharHint() {}
+
+function isAvatarTranslationOverlayEnabled(session) {
+  return Boolean(
+    session &&
+    session.avatarId &&
+    state.settings &&
+    state.settings.translateEnabled &&
+    state.settings.translateTo
+  );
+}
+
+function getOverlayTranslationTaskKey(sessionId, messageId, lang, sourceText) {
+  return `${sessionId}:${messageId}:${lang}:${String(sourceText || '').length}`;
+}
+
+function isTranslatableAssistantMessage(session, message) {
+  if (!session || !message) return false;
+  if (!isAvatarTranslationOverlayEnabled(session)) return false;
+  if (message.kind && message.kind !== 'chat') return false;
+  if (message.role !== 'assistant') return false;
+  if (message.isThinking) return false;
+  if (!String(message.content || '').trim()) return false;
+  const lastMsg = session.messages && session.messages.length ? session.messages[session.messages.length - 1] : null;
+  if (state.ui.chatStreaming && lastMsg && lastMsg.id === message.id) return false;
+  return true;
+}
+
+function getMessageTranslationCache(message, lang) {
+  if (!message || !lang || !message.translatedByLang || typeof message.translatedByLang !== 'object') return null;
+  const entry = message.translatedByLang[lang];
+  if (!entry) return null;
+  if (typeof entry === 'string') {
+    return { text: entry, source: '' };
+  }
+  if (typeof entry === 'object' && typeof entry.text === 'string') {
+    return { text: entry.text, source: String(entry.source || '') };
+  }
+  return null;
+}
+
+function setMessageTranslationCache(message, lang, sourceText, translatedText) {
+  if (!message || !lang) return;
+  if (!message.translatedByLang || typeof message.translatedByLang !== 'object') {
+    message.translatedByLang = {};
+  }
+  message.translatedByLang[lang] = {
+    text: String(translatedText || ''),
+    source: String(sourceText || '')
+  };
+}
+
+function getOverlayDisplayContent(session, message) {
+  const raw = String((message && message.content) || '');
+  if (!isTranslatableAssistantMessage(session, message)) return raw;
+  const lang = String(state.settings.translateTo || 'zh-CN');
+  const cached = getMessageTranslationCache(message, lang);
+  if (cached && cached.text && cached.source === raw) return cached.text;
+  const pendingKey = getOverlayTranslationTaskKey(session.id, message.id, lang, raw);
+  if (translationOverlayRuntime.pending.has(pendingKey)) {
+    return `${raw}\n\n[\u7ffb\u8bd1\u4e2d...]`;
+  }
+  return raw;
+}
+
+function getOverlaySessionPreview(session) {
+  const base = getSessionPreview(session);
+  if (!session || !Array.isArray(session.messages) || !session.messages.length) return base;
+  if (!isAvatarTranslationOverlayEnabled(session)) return base;
+  const last = session.messages[session.messages.length - 1];
+  if (!last || (last.kind && last.kind !== 'chat') || last.role !== 'assistant') return base;
+  const display = getOverlayDisplayContent(session, last);
+  return String(display || '').replace(/\s+/g, ' ').slice(0, 44) || base;
+}
+
+function enqueueOverlayTranslation(session, message) {
+  if (!isTranslatableAssistantMessage(session, message)) return;
+  const lang = String(state.settings.translateTo || 'zh-CN');
+  const sourceText = String(message.content || '');
+  const cached = getMessageTranslationCache(message, lang);
+  if (cached && cached.text && cached.source === sourceText) return;
+
+  const queueKey = getOverlayTranslationTaskKey(session.id, message.id, lang, sourceText);
+  if (translationOverlayRuntime.pending.has(queueKey)) return;
+
+  translationOverlayRuntime.pending.add(queueKey);
+  translationOverlayRuntime.queue.push({
+    key: queueKey,
+    sessionId: session.id,
+    messageId: message.id,
+    lang,
+    sourceText
+  });
+  pumpOverlayTranslationQueue();
+}
+
+function scheduleOverlayQueueResume() {
+  if (!translationOverlayRuntime.pauseUntil) return;
+  if (translationOverlayRuntime.resumeTimer) return;
+  const delay = Math.max(50, translationOverlayRuntime.pauseUntil - Date.now());
+  translationOverlayRuntime.resumeTimer = window.setTimeout(() => {
+    translationOverlayRuntime.resumeTimer = 0;
+    pumpOverlayTranslationQueue();
+  }, delay);
+}
+
+async function pumpOverlayTranslationQueue() {
+  if (translationOverlayRuntime.pauseUntil && Date.now() < translationOverlayRuntime.pauseUntil) {
+    scheduleOverlayQueueResume();
+    return;
+  }
+  if (translationOverlayRuntime.pauseUntil && Date.now() >= translationOverlayRuntime.pauseUntil) {
+    translationOverlayRuntime.pauseUntil = 0;
+  }
+
+  while (translationOverlayRuntime.active < translationOverlayRuntime.maxConcurrent && translationOverlayRuntime.queue.length) {
+    const task = translationOverlayRuntime.queue.shift();
+    translationOverlayRuntime.active += 1;
+    runOverlayTranslationTask(task)
+      .catch((error) => {
+        const msg = String(error && (error.message || error) || '');
+        const isRateLimited = Number(error && error.status) === 429 || /Too Many Requests|\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41/.test(msg);
+        if (isRateLimited) {
+          const now = Date.now();
+          translationOverlayRuntime.pauseUntil = Math.max(translationOverlayRuntime.pauseUntil || 0, now + 15000);
+          scheduleOverlayQueueResume();
+          if (now - translationOverlayRuntime.lastErrorAt > 3000) {
+            translationOverlayRuntime.lastErrorAt = now;
+            setStatus('\u7ffb\u8bd1\u8bf7\u6c42\u8fc7\u5feb\uff0c\u5df2\u6682\u505c 15 \u79d2\u540e\u7ee7\u7eed\u3002');
+          }
+          return;
+        }
+        console.error('[overlay-translate] failed:', error);
+        const now = Date.now();
+        if (now - translationOverlayRuntime.lastErrorAt > 3000) {
+          translationOverlayRuntime.lastErrorAt = now;
+          setStatus(`翻译显示失败：${error.message || error}`);
+        }
+      })
+      .finally(() => {
+        translationOverlayRuntime.active = Math.max(0, translationOverlayRuntime.active - 1);
+        translationOverlayRuntime.pending.delete(task.key);
+        if (translationOverlayRuntime.queue.length) {
+          pumpOverlayTranslationQueue();
+        }
+      });
+  }
+}
+
+async function runOverlayTranslationTask(task) {
+  const session = state.sessions.find((s) => s.id === task.sessionId);
+  if (!session) return;
+  const message = (session.messages || []).find((m) => m.id === task.messageId);
+  if (!message) return;
+  if (!isTranslatableAssistantMessage(session, message)) return;
+  if (String(message.content || '') !== String(task.sourceText || '')) return;
+
+  const payload = await apiRequest('/api/translate', {
+    method: 'POST',
+    body: JSON.stringify({
+      text: task.sourceText,
+      targetLang: task.lang,
+      providerId: state.ui.selectedProviderId || undefined,
+      model: state.ui.selectedModel || undefined
+    })
+  });
+
+  const translated = String((payload && payload.content) || '').trim();
+  if (!translated) return;
+
+  setMessageTranslationCache(message, task.lang, task.sourceText, translated);
+  persistSessionsState();
+
+  const activeSession = getActiveSession();
+  if (activeSession && activeSession.id === session.id) {
+    renderMessages();
+    renderContactList();
+  }
+}
 
 function renderMessages() {
   const session = getActiveSession();
@@ -2776,9 +3064,12 @@ function renderMessages() {
     const avatarHtml = avatarVal.startsWith('data:image')
       ? `<img src="${avatarVal}" alt="avatar">`
       : avatarVal;
+    const displayText = role === 'assistant'
+      ? getOverlayDisplayContent(session, message)
+      : String(message.content || '');
     const content = role === 'assistant'
-      ? renderAssistantMessageContent(message.content || '')
-      : escapeHtml(message.content || '').replace(/\n/g, '<br>');
+      ? renderAssistantMessageContent(displayText || '')
+      : escapeHtml(displayText || '').replace(/\n/g, '<br>');
     const isStreaming = state.ui.chatStreaming && role === 'assistant' && !message.content;
     let thinkHtml = '';
     if (message.isThinking || isStreaming) {
@@ -2802,6 +3093,12 @@ function renderMessages() {
     const metaHtml = renderMessageMeta(message, role);
     return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${content}${metaHtml}</div></div>`;
   }).join('');
+
+  if (isAvatarTranslationOverlayEnabled(session)) {
+    for (const message of session.messages) {
+      enqueueOverlayTranslation(session, message);
+    }
+  }
 
   els.messageList.scrollTop = els.messageList.scrollHeight;
 }
@@ -2988,6 +3285,13 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
 }
 
 async function sendChatMessage() {
+  if (state.ui.sidebarTab === 'contacts' && state.ui.activeContactAvatarId) {
+    const active = getActiveSession();
+    const required = resolveContactSession(state.ui.activeContactAvatarId, { createIfMissing: true, focus: false });
+    if (!active || !required || active.id !== required.id) {
+      openContact(state.ui.activeContactAvatarId);
+    }
+  }
   const session = getActiveSession();
   if (!session || state.ui.chatStreaming) return;
 
@@ -4196,7 +4500,10 @@ async function apiRequest(url, options) {
   }
 
   if (!response.ok) {
-    throw new Error(payload.message || payload.error || `请求失败：${response.status}`);
+    const err = new Error(payload.message || payload.error || `请求失败：${response.status}`);
+    err.status = response.status;
+    err.payload = payload;
+    throw err;
   }
 
   return payload;

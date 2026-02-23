@@ -932,7 +932,10 @@ const translationOverlayRuntime = {
   pending: new Set(),
   active: 0,
   maxConcurrent: 3,
-  renderLookback: 12,
+  renderLookback: 1,
+  requestTimeoutMs: 35000,
+  retryTimeoutMs: 60000,
+  failureCooldownMs: 12000,
   lastErrorAt: 0,
   pauseUntil: 0,
   resumeTimer: 0,
@@ -1194,6 +1197,8 @@ function boot() {
   ensurePersonasSettingsSectionNav();
   ensureTeamSharingSettingsSection();
   ensureLorebookSettingsSection();
+  ensureAvatarScenarioManagerUi();
+  renderAvatarScenarioDraftList();
   applySettings();
   syncSettingsUI();
   registerServiceWorker();
@@ -1553,6 +1558,31 @@ function applyLanguage() {
   updateChatSettingsUI();
   updateConnectionUI();
   updateTranslateSettingsUI();
+  refreshDynamicUiLanguageLabels();
+}
+
+function isZhUiLanguage() {
+  return String(state.settings.language || 'zh-CN') === 'zh-CN';
+}
+
+function uiText(zh, nonZh) {
+  return isZhUiLanguage() ? zh : nonZh;
+}
+
+function refreshDynamicUiLanguageLabels() {
+  if (els.toggleSearchBtn) {
+    els.toggleSearchBtn.textContent = uiText('🔎 联网', '🔎 Web');
+  }
+  if (els.mcpGoSettingsBtn) {
+    els.mcpGoSettingsBtn.textContent = uiText('⚙ 管理 MCP 工具', '⚙ Manage MCP Tools');
+  }
+  if (els.kbGoSettingsBtn) {
+    els.kbGoSettingsBtn.textContent = uiText('⚙ 管理知识库', '⚙ Manage Knowledge Base');
+  }
+  applyToolModeUI();
+  try { refreshMcpQuickPanel(); } catch (_) {}
+  try { refreshKbQuickPanel(); } catch (_) {}
+  try { refreshContactsLorebookShortcut(); } catch (_) {}
 }
 
 function updateTranslateSettingsUI() {
@@ -1748,7 +1778,9 @@ function bindEvents() {
       s.classList.toggle('hidden', s.dataset.section !== section);
     });
     if (section === 'personas') {
+      ensureAvatarScenarioManagerUi();
       renderAvatarList();
+      renderAvatarScenarioDraftList();
       renderAvatarSelectPanel();
     }
     if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
@@ -1782,6 +1814,9 @@ function bindEvents() {
       updateTranslateSettingsUI();
       renderMessages();
       renderContactList();
+      if (state.settings.translateEnabled) {
+        triggerOverlayTranslationForActiveSession({ force: true, maxCount: 2 });
+      }
     });
   }
   if (els.translateFromSelect) {
@@ -1797,6 +1832,9 @@ function bindEvents() {
       saveSettings();
       renderMessages();
       renderContactList();
+      if (state.settings.translateEnabled) {
+        triggerOverlayTranslationForActiveSession({ force: true, maxCount: 2 });
+      }
     });
   }
   if (els.fontSizeSelect) {
@@ -2173,7 +2211,8 @@ function bindEvents() {
         icon: iconFromPreview,
         relationship: String(els.avatarRelInput?.value || '').trim(),
         customPrompt: String(els.avatarPromptInput.value || '').trim(),
-        memoryText: String(els.avatarMemoryInput.value || '').trim()
+        memoryText: String(els.avatarMemoryInput.value || '').trim(),
+        openingScenarios: getAvatarScenarioDraftItems()
       };
       const editId = els.avatarEditId.value;
       if (editId) { updateAvatar(editId, data); } else { createAvatar(data); }
@@ -2193,6 +2232,11 @@ function bindEvents() {
         els.avatarIconPreview.innerHTML = val;
         els.avatarIconPreview.dataset.value = val;
       }
+    });
+  }
+  if (els.avatarNameInput) {
+    els.avatarNameInput.addEventListener('input', () => {
+      renderAvatarScenarioDraftList();
     });
   }
   if (els.avatarIconUploadBtn && els.avatarIconFile) {
@@ -2252,8 +2296,21 @@ function bindEvents() {
       if (!file) return;
       try {
         if (els.tavernImportStatus) els.tavernImportStatus.textContent = '姝ｅ湪??...';
-        const name = await handleTavernImport(file);
-        if (els.tavernImportStatus) els.tavernImportStatus.textContent = `Imported role: ${name}`;
+        const result = await handleTavernImport(file);
+        if (els.tavernImportStatus) {
+          const name = typeof result === 'string' ? result : String(result && result.name || '');
+          const tagsCount = Number(result && result.tagsCount || 0) || 0;
+          const lorebookTotal = Number(result && result.lorebookTotal || 0) || 0;
+          const lorebookImported = Number(result && result.lorebookImported || 0) || 0;
+          const lorebookFailed = Number(result && result.lorebookFailed || 0) || 0;
+          const parts = [`已导入角色：${name || '未命名角色'}`];
+          if (tagsCount > 0) parts.push(`标签 ${tagsCount}`);
+          if (lorebookTotal > 0) {
+            parts.push(`世界书 ${lorebookImported}/${lorebookTotal}`);
+            if (lorebookFailed > 0) parts.push(`失败 ${lorebookFailed}`);
+          }
+          els.tavernImportStatus.textContent = parts.join(' · ');
+        }
       } catch (err) {
         if (els.tavernImportStatus) els.tavernImportStatus.textContent = `Import failed: ${err.message}`;
       }
@@ -2327,6 +2384,9 @@ function bindEvents() {
     session.messages = [];
     session.artifacts = [];
     state.ui.activeArtifactId = '';
+    delete session.scenePresetApplied;
+    delete session.scenePickerDismissed;
+    delete session.openingScenarioId;
     touchSession(session);
     persistSessionsState();
     renderSessionList();
@@ -2416,7 +2476,7 @@ function applyToolModeUI() {
     els.toggleStudyBtn.textContent = `📘 ${toolName(activeTool)}`;
     els.toggleStudyBtn.classList.add('active-tool');
   } else {
-    els.toggleStudyBtn.textContent = '📘 学习模式';
+    els.toggleStudyBtn.textContent = uiText('📘 学习模式', '📘 Study');
     els.toggleStudyBtn.classList.remove('active-tool');
   }
 }
@@ -2516,12 +2576,151 @@ function touchSession(session) {
 
 /* ── Avatar (角色) CRUD ── */
 
+function generateAvatarScenarioId(prefix = 'scn') {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeAvatarScenario(raw, existing = null) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  const id = String(src.id || prev.id || generateAvatarScenarioId()).trim().slice(0, 64);
+  const title = String(src.title || prev.title || '').trim().slice(0, 80) || '默认开场';
+  const description = String(src.description || prev.description || '').trim().slice(0, 240);
+  const openingMessage = String(src.openingMessage || prev.openingMessage || '').replace(/\r/g, '').trim().slice(0, 4000);
+  const tagsRaw = Array.isArray(src.tags) ? src.tags : (typeof src.tags === 'string' ? src.tags.split(/[\r\n,，;；]+/g) : (Array.isArray(prev.tags) ? prev.tags : []));
+  const tags = [];
+  const seen = new Set();
+  for (const t of tagsRaw) {
+    const s = String(t || '').trim().slice(0, 24);
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(s);
+    if (tags.length >= 12) break;
+  }
+  const createdAt = Number(src.createdAt || prev.createdAt) || Date.now();
+  const updatedAt = Number(src.updatedAt || prev.updatedAt) || Date.now();
+  const useCount = Math.max(0, Number(src.useCount || prev.useCount || 0) || 0);
+  return {
+    id,
+    title,
+    description,
+    openingMessage,
+    tags,
+    createdAt,
+    updatedAt,
+    useCount
+  };
+}
+
+function normalizeAvatarScenarios(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => normalizeAvatarScenario(item))
+    .filter((item) => item && item.openingMessage)
+    .slice(0, 50);
+}
+
+function cloneAvatarScenarios(list) {
+  return normalizeAvatarScenarios(list).map((item) => ({ ...item, tags: [...(item.tags || [])] }));
+}
+
+function getAvatarOpeningScenarios(avatar) {
+  if (!avatar || typeof avatar !== 'object') return [];
+  if (!Array.isArray(avatar.openingScenarios)) avatar.openingScenarios = [];
+  avatar.openingScenarios = normalizeAvatarScenarios(avatar.openingScenarios);
+  return avatar.openingScenarios;
+}
+
+function normalizeAvatarTags(raw, fallback = []) {
+  const src = raw != null ? raw : fallback;
+  const list = Array.isArray(src)
+    ? src
+    : (typeof src === 'string' ? src.split(/[\r\n,，;；|]+/g) : []);
+  const out = [];
+  const seen = new Set();
+  for (const item of list) {
+    const tag = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 32);
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function getAvatarTags(avatar) {
+  if (!avatar || typeof avatar !== 'object') return [];
+  avatar.tags = normalizeAvatarTags(avatar.tags || []);
+  return avatar.tags;
+}
+
+function getAvatarScenarioDraftItems() {
+  return cloneAvatarScenarios(avatarScenarioRuntime.draftItems || []);
+}
+
+function setAvatarScenarioDraftItems(list) {
+  avatarScenarioRuntime.draftItems = cloneAvatarScenarios(list || []);
+}
+
+function hasChatMessages(session) {
+  return Boolean(session && Array.isArray(session.messages) && session.messages.some((m) => m && m.kind === 'chat'));
+}
+
+function clampAvatarRating(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(5, Math.round(n)));
+}
+
+function getAvatarRating(avatar) {
+  return clampAvatarRating(avatar && avatar.rating);
+}
+
+function setAvatarRating(avatarId, rating) {
+  const avatar = getAvatarById(avatarId);
+  if (!avatar) return false;
+  avatar.rating = clampAvatarRating(rating);
+  persistAvatars();
+  if (state.ui.sidebarTab === 'contacts') renderContactList();
+  renderAvatarList();
+  renderAvatarSelectPanel();
+  if (avatarGalleryRuntime.modalReady) renderAvatarGallery();
+  if (avatarGalleryRuntime.detailModalReady && avatarGalleryRuntime.detailUi && avatarGalleryRuntime.detailUi.backdrop.classList.contains('open')) {
+    renderAvatarGalleryDetail(getAvatarById(avatarId) || avatar);
+  }
+  return true;
+}
+
+function recordAvatarUsage(avatarId, amount = 1) {
+  const avatar = getAvatarById(avatarId);
+  if (!avatar) return;
+  const inc = Math.max(1, Number(amount || 1) || 1);
+  avatar.usageCount = Math.max(0, Number(avatar.usageCount || 0) || 0) + inc;
+  persistAvatars();
+  if (avatarGalleryRuntime.modalReady) renderAvatarGallery();
+  if (avatarGalleryRuntime.detailModalReady && avatarGalleryRuntime.detailUi && avatarGalleryRuntime.detailUi.backdrop.classList.contains('open')) {
+    renderAvatarGalleryDetail(getAvatarById(avatarId) || avatar);
+  }
+}
+
 function loadAvatars() {
   try {
     const raw = localStorage.getItem(STORAGE_AVATARS_KEY);
     if (!raw) { state.avatars = []; return; }
     const parsed = JSON.parse(raw);
-    state.avatars = Array.isArray(parsed) ? parsed.filter(isValidAvatar) : [];
+    state.avatars = Array.isArray(parsed)
+      ? parsed.filter(isValidAvatar).map((avatar) => ({
+          ...avatar,
+          rating: clampAvatarRating(avatar.rating),
+          usageCount: Math.max(0, Number(avatar.usageCount || 0) || 0),
+          tags: normalizeAvatarTags(avatar.tags || []),
+          openingScenarios: normalizeAvatarScenarios(avatar.openingScenarios || [])
+        }))
+      : [];
   } catch (_) { state.avatars = []; }
 }
 
@@ -2543,6 +2742,10 @@ function createAvatar(data) {
     promptMode: derivePromptMode(data.customPrompt, data.memoryText),
     customPrompt: data.customPrompt || '',
     memoryText: data.memoryText || '',
+    rating: clampAvatarRating(data.rating || 0),
+    usageCount: Math.max(0, Number(data.usageCount || 0) || 0),
+    tags: normalizeAvatarTags(data.tags || []),
+    openingScenarios: normalizeAvatarScenarios(data.openingScenarios || []),
     createdAt: now
   };
   state.avatars.unshift(avatar);
@@ -2558,6 +2761,10 @@ function updateAvatar(id, data) {
   avatar.relationship = data.relationship || '';
   avatar.customPrompt = data.customPrompt || '';
   avatar.memoryText = data.memoryText || '';
+  avatar.rating = clampAvatarRating(data.rating != null ? data.rating : avatar.rating);
+  avatar.tags = normalizeAvatarTags(data.tags != null ? data.tags : avatar.tags || []);
+  avatar.openingScenarios = normalizeAvatarScenarios(data.openingScenarios || avatar.openingScenarios || []);
+  avatar.usageCount = Math.max(0, Number(avatar.usageCount || 0) || 0);
   avatar.promptMode = derivePromptMode(avatar.customPrompt, avatar.memoryText);
   persistAvatars();
 }
@@ -2632,6 +2839,126 @@ function getRegularSessions() {
 
 /* ── Tavern Character Card Import (酒馆卡片导入) ── */
 
+function getTavernCardData(raw) {
+  return (raw && raw.spec === 'chara_card_v2' && raw.data) ? raw.data : (raw || {});
+}
+
+function collectTagValuesFromUnknown(input, out) {
+  if (!input) return;
+  if (Array.isArray(input)) {
+    for (const item of input) collectTagValuesFromUnknown(item, out);
+    return;
+  }
+  if (typeof input === 'string') {
+    out.push(...normalizeAvatarTags(input));
+    return;
+  }
+  if (typeof input === 'object') {
+    if (typeof input.name === 'string') out.push(input.name);
+    if (typeof input.tag === 'string') out.push(input.tag);
+    if (typeof input.label === 'string') out.push(input.label);
+  }
+}
+
+function extractTavernCardTags(raw) {
+  const d = getTavernCardData(raw);
+  const found = [];
+  collectTagValuesFromUnknown(d.tags, found);
+  collectTagValuesFromUnknown(d.tag, found);
+  if (d.extensions && typeof d.extensions === 'object') {
+    collectTagValuesFromUnknown(d.extensions.tags, found);
+    if (d.extensions.chub && typeof d.extensions.chub === 'object') {
+      collectTagValuesFromUnknown(d.extensions.chub.tags, found);
+      collectTagValuesFromUnknown(d.extensions.chub.tag_list, found);
+      collectTagValuesFromUnknown(d.extensions.chub.categories, found);
+    }
+  }
+  return normalizeAvatarTags(found);
+}
+
+function extractTavernWorldbookRawEntries(raw) {
+  const d = getTavernCardData(raw);
+  const candidates = [
+    d.character_book,
+    d.characterBook,
+    d.worldbook,
+    d.world_book,
+    d.lorebook,
+    raw && raw.character_book,
+    raw && raw.characterBook,
+    raw && raw.worldbook,
+    raw && raw.world_book
+  ];
+  for (const book of candidates) {
+    if (!book) continue;
+    if (Array.isArray(book)) return book;
+    if (Array.isArray(book.entries)) return book.entries;
+    if (book.entries && typeof book.entries === 'object') return Object.values(book.entries);
+  }
+  return [];
+}
+
+function normalizeImportedTavernLorebookEntries(raw, avatarId = '') {
+  const list = extractTavernWorldbookRawEntries(raw);
+  if (!list.length) return [];
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const src = list[i];
+    if (!src || typeof src !== 'object') continue;
+    const content = String(src.content ?? src.entry ?? src.text ?? '').replace(/\r/g, '').trim();
+    if (!content) continue;
+    const keys = []
+      .concat(Array.isArray(src.keys) ? src.keys : (src.keys != null ? [src.keys] : []))
+      .concat(Array.isArray(src.secondary_keys) ? src.secondary_keys : (src.secondary_keys != null ? [src.secondary_keys] : []))
+      .concat(Array.isArray(src.secondaryKeys) ? src.secondaryKeys : (src.secondaryKeys != null ? [src.secondaryKeys] : []))
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    const keywords = splitLorebookKeywordsInput(keys.join('\n'));
+    const alwaysOn = Boolean(src.constant || src.always_on || src.alwaysOn) || (!keywords.length || src.selective === false);
+    const title = String(
+      src.comment ?? src.name ?? src.title ?? src.key ?? (keywords[0] || `导入世界书词条 ${i + 1}`)
+    ).trim().slice(0, 120) || `导入世界书词条 ${i + 1}`;
+    const tags = normalizeAvatarTags(
+      []
+        .concat(Array.isArray(src.tags) ? src.tags : (src.tags != null ? [src.tags] : []))
+        .concat(Array.isArray(src.group) ? src.group : (src.group != null ? [src.group] : []))
+        .concat(Array.isArray(src.category) ? src.category : (src.category != null ? [src.category] : []))
+    );
+    out.push({
+      title,
+      content: content.slice(0, 12000),
+      keywords,
+      enabled: src.enabled !== false,
+      alwaysOn: Boolean(alwaysOn),
+      priority: Math.max(0, Math.min(1000, Number(src.insertion_order ?? src.order ?? src.priority ?? 50) || 50)),
+      scopeType: 'avatar',
+      scopeId: String(avatarId || '').trim(),
+      tags
+    });
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+
+async function importLorebookEntriesForAvatar(avatarId, entries) {
+  const id = String(avatarId || '').trim();
+  const list = Array.isArray(entries) ? entries : [];
+  if (!id || !list.length) return { total: 0, imported: 0, failed: 0 };
+  const results = await Promise.allSettled(
+    list.map((entry) => apiRequest('/api/lorebooks', {
+      method: 'POST',
+      body: JSON.stringify({ ...entry, scopeType: 'avatar', scopeId: id })
+    }))
+  );
+  let imported = 0;
+  let failed = 0;
+  for (const item of results) {
+    if (item.status === 'fulfilled') imported += 1;
+    else failed += 1;
+  }
+  return { total: list.length, imported, failed };
+}
+
 async function handleTavernImport(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   let raw = null;
@@ -2657,12 +2984,22 @@ async function handleTavernImport(file) {
 
   const card = normalizeTavernCard(raw);
   if (!card) throw new Error('无法识别角色卡格式');
+  const importedCardTags = extractTavernCardTags(raw);
 
   const avatar = createAvatar({
     name: card.name,
     icon: iconDataUrl || '🎭',
     customPrompt: card.customPrompt,
-    memoryText: ''
+    memoryText: '',
+    tags: importedCardTags,
+    openingScenarios: card.firstMessage
+      ? [{
+          title: '默认开场',
+          description: '导入酒馆卡时自动生成',
+          openingMessage: String(card.firstMessage || '').trim(),
+          tags: ['导入']
+        }]
+      : []
   });
 
   // create a new session bound to this avatar
@@ -2686,11 +3023,28 @@ async function handleTavernImport(file) {
     persistSessionsState();
   }
 
+  let lorebookImport = { total: 0, imported: 0, failed: 0 };
+  const importedLorebookEntries = normalizeImportedTavernLorebookEntries(raw, avatar.id);
+  if (importedLorebookEntries.length) {
+    try {
+      lorebookImport = await importLorebookEntriesForAvatar(avatar.id, importedLorebookEntries);
+    } catch (_) {
+      lorebookImport = { total: importedLorebookEntries.length, imported: 0, failed: importedLorebookEntries.length };
+    }
+    try { if (lorebookRuntime && lorebookRuntime.sectionReady) loadLorebookList({ force: true, silent: true }); } catch (_) {}
+  }
+
   renderAvatarList();
   renderAvatarSelectPanel();
   renderSessionList();
   renderMessages();
-  return card.name;
+  return {
+    name: card.name,
+    tagsCount: importedCardTags.length,
+    lorebookTotal: lorebookImport.total,
+    lorebookImported: lorebookImport.imported,
+    lorebookFailed: lorebookImport.failed
+  };
 }
 
 /* ── Sidebar Tabs + Contact List + Group ── */
@@ -2773,6 +3127,7 @@ function renderContactList() {
 function openContact(avatarId) {
   if (!avatarId) return;
   state.ui.activeContactAvatarId = avatarId;
+  const avatar = getAvatarById(avatarId);
   const session = resolveContactSession(avatarId, { createIfMissing: true, focus: true });
   if (!session) return;
   updateAvatarBtnLabel();
@@ -2780,6 +3135,11 @@ function openContact(avatarId) {
     renderContactList();
   }
   refreshContactsLorebookShortcut();
+  if (avatar) {
+    setTimeout(() => {
+      try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) {}
+    }, 0);
+  }
   if (els.chatInput) els.chatInput.focus();
 }
 
@@ -2849,12 +3209,14 @@ function renderAvatarList() {
     const iconHtml = iconVal.startsWith('data:image')
       ? `<img src="${iconVal}" alt="avatar" class="avatar-card-icon">`
       : `<span class="avatar-card-icon">${iconVal}</span>`;
+    const sceneCount = getAvatarOpeningScenarios(a).length;
+    const usageCount = Math.max(0, Number(a.usageCount || 0) || 0);
     return `
     <div class="avatar-card" data-avatar-id="${a.id}">
       ${iconHtml}
       <div class="avatar-card-info">
         <span class="avatar-card-name">${escapeHtml(a.name)}</span>
-        <span class="avatar-tag">${promptModeLabel(a.promptMode)}</span>
+        <span class="avatar-tag">${promptModeLabel(a.promptMode)} · 开场${sceneCount} · 使用${usageCount}</span>
       </div>
       <div class="avatar-card-actions">
         <button class="btn ghost" data-action="edit-avatar" data-avatar-id="${a.id}" type="button">编辑</button>
@@ -2875,6 +3237,8 @@ function resetAvatarForm() {
   if (els.avatarIconPreview) els.avatarIconPreview.innerHTML = '😀';
   if (els.avatarIconPreview) els.avatarIconPreview.dataset.value = '😀';
   if (els.avatarMemoryFileStatus) els.avatarMemoryFileStatus.textContent = '';
+  setAvatarScenarioDraftItems([]);
+  renderAvatarScenarioDraftList();
   els.avatarFormTitle.textContent = '新建角色';
   els.avatarCancelBtn.classList.add('hidden');
   if (els.avatarStatus) els.avatarStatus.textContent = '';
@@ -2895,8 +3259,917 @@ function fillAvatarForm(avatar) {
     els.avatarIconPreview.dataset.value = iconVal;
   }
   if (els.avatarMemoryFileStatus) els.avatarMemoryFileStatus.textContent = '';
+  setAvatarScenarioDraftItems(getAvatarOpeningScenarios(avatar));
+  renderAvatarScenarioDraftList();
   els.avatarFormTitle.textContent = '编辑角色';
   els.avatarCancelBtn.classList.remove('hidden');
+}
+
+function getPersonasSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="personas"]') : null;
+}
+
+function ensureAvatarScenarioManagerUi() {
+  const section = getPersonasSettingsSection();
+  if (!section) return null;
+  let host = section.querySelector('#avatarScenarioManagerBlock');
+  if (host) return host;
+  ensureToolUiInjectedStyle();
+
+  const actionsRow = section.querySelector('.setting-row-actions');
+  host = document.createElement('div');
+  host.id = 'avatarScenarioManagerBlock';
+  host.className = 'settings-group';
+  host.innerHTML = `
+    <h4>情景预设 / 开场白</h4>
+    <div style="padding:12px 14px;border:1px solid rgba(148,163,184,.28);border-radius:12px;background:rgba(248,250,252,.75);">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="min-width:0;flex:1;">
+          <div style="font-weight:700;">角色开场场景</div>
+          <div id="avatarScenarioSummary" class="muted" style="font-size:12px;line-height:1.45;margin-top:4px;">为当前角色绑定多个开场场景，聊天时可选一个直接开始。</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="avatarScenarioGalleryBtn" class="btn ghost" type="button">🖼️ 打开画廊</button>
+          <button id="avatarScenarioAddBtn" class="btn ghost" type="button">+ 添加场景</button>
+          <button id="avatarScenarioClearBtn" class="btn ghost" type="button">清空草稿</button>
+        </div>
+      </div>
+      <div id="avatarScenarioDraftList" style="display:grid;gap:10px;margin-top:10px;"></div>
+      <div id="avatarScenarioDraftStatus" class="muted" style="font-size:12px;margin-top:8px;min-height:18px;"></div>
+    </div>
+  `;
+  if (actionsRow && actionsRow.parentElement === section) section.insertBefore(host, actionsRow);
+  else section.appendChild(host);
+
+  const listEl = host.querySelector('#avatarScenarioDraftList');
+  const galleryBtn = host.querySelector('#avatarScenarioGalleryBtn');
+  const addBtn = host.querySelector('#avatarScenarioAddBtn');
+  const clearBtn = host.querySelector('#avatarScenarioClearBtn');
+  const statusEl = host.querySelector('#avatarScenarioDraftStatus');
+
+  if (galleryBtn) {
+    galleryBtn.addEventListener('click', () => {
+      const selectedAvatarId = String(els.avatarEditId && els.avatarEditId.value || '').trim();
+      const avatarName = String(els.avatarNameInput && els.avatarNameInput.value || '').trim();
+      openAvatarGalleryModal({
+        source: 'personas',
+        selectedAvatarId: selectedAvatarId || '',
+        search: selectedAvatarId ? '' : avatarName
+      });
+    });
+  }
+  if (addBtn) addBtn.addEventListener('click', () => openAvatarScenarioEditorModal({ mode: 'create' }));
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      if (!avatarScenarioRuntime.draftItems.length) return;
+      if (!window.confirm('确认清空当前角色表单中的开场场景草稿？')) return;
+      setAvatarScenarioDraftItems([]);
+      renderAvatarScenarioDraftList();
+      if (statusEl) statusEl.textContent = '已清空开场场景草稿。';
+    });
+  }
+  if (listEl) {
+    listEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action][data-scenario-id]');
+      if (!btn) return;
+      const action = btn.dataset.action || '';
+      const scenarioId = btn.dataset.scenarioId || '';
+      if (!action || !scenarioId) return;
+      if (action === 'edit') {
+        const item = (avatarScenarioRuntime.draftItems || []).find((s) => s.id === scenarioId);
+        if (item) openAvatarScenarioEditorModal({ mode: 'edit', scenario: item });
+        return;
+      }
+      if (action === 'delete') {
+        avatarScenarioRuntime.draftItems = (avatarScenarioRuntime.draftItems || []).filter((s) => s.id !== scenarioId);
+        renderAvatarScenarioDraftList();
+        if (statusEl) statusEl.textContent = '场景已删除（角色保存后生效）。';
+      }
+    });
+  }
+
+  avatarScenarioRuntime.initialized = true;
+  return host;
+}
+
+function renderAvatarScenarioDraftList() {
+  const host = ensureAvatarScenarioManagerUi();
+  if (!host) return;
+  const listEl = host.querySelector('#avatarScenarioDraftList');
+  const summaryEl = host.querySelector('#avatarScenarioSummary');
+  const statusEl = host.querySelector('#avatarScenarioDraftStatus');
+  if (!listEl || !summaryEl) return;
+
+  const avatarName = String(els.avatarNameInput && els.avatarNameInput.value || '').trim();
+  const items = cloneAvatarScenarios(avatarScenarioRuntime.draftItems || []);
+  avatarScenarioRuntime.draftItems = items;
+  summaryEl.textContent = avatarName
+    ? `当前角色：${avatarName} · 已绑定 ${items.length} 个开场场景。用户可在开始聊天时直接选择开场。`
+    : `当前为新角色草稿 · 已配置 ${items.length} 个开场场景。保存角色后可使用。`;
+  if (statusEl && !statusEl.textContent) statusEl.textContent = '';
+
+  if (!items.length) {
+    listEl.innerHTML = '<div class="muted" style="padding:8px 2px;">暂无开场场景。可添加“咖啡馆偶遇”“雨天图书馆”等不同开局。</div>';
+    return;
+  }
+
+  listEl.innerHTML = items.map((item) => {
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    const tagHtml = tags.length
+      ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">${tags.map((tag) => `<span style="font-size:12px;color:#4338ca;background:rgba(99,102,241,.08);padding:2px 8px;border-radius:999px;">${escapeHtml(tag)}</span>`).join('')}</div>`
+      : '';
+    const preview = String(item.openingMessage || '').replace(/\s+/g, ' ').trim();
+    return `
+      <div class="toolui-switch-block" style="background:#fff;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong style="color:#0f172a;">${escapeHtml(item.title || '开场场景')}</strong>
+              <span class="hint">使用 ${Number(item.useCount || 0)} 次</span>
+            </div>
+            ${item.description ? `<div class="hint" style="margin-top:4px;">${escapeHtml(item.description)}</div>` : ''}
+            ${tagHtml}
+            <div style="margin-top:8px;font-size:13px;color:#334155;line-height:1.45;white-space:pre-wrap;word-break:break-word;">${escapeHtml(preview.slice(0, 220))}${preview.length > 220 ? '…' : ''}</div>
+          </div>
+        </div>
+        <div class="toolui-actions-row" style="margin-top:10px;">
+          <button type="button" class="btn ghost" data-action="edit" data-scenario-id="${escapeHtml(item.id)}">编辑场景</button>
+          <button type="button" class="btn ghost" data-action="delete" data-scenario-id="${escapeHtml(item.id)}">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function ensureAvatarScenarioEditorModal() {
+  if (avatarScenarioRuntime.editorModalReady && avatarScenarioRuntime.editorUi) return avatarScenarioRuntime.editorUi;
+  ensureToolUiInjectedStyle();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal narrow" role="dialog" aria-modal="true" aria-labelledby="avatarScenarioEditorTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="avatarScenarioEditorTitle">开场场景</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <input id="avatarScenarioEditId" type="hidden">
+          <div class="toolui-row">
+            <label for="avatarScenarioTitleInput">场景标题 *</label>
+            <input id="avatarScenarioTitleInput" class="toolui-input" type="text" placeholder="例如：咖啡馆偶遇 / 雨天图书馆">
+          </div>
+          <div class="toolui-row">
+            <label for="avatarScenarioDescInput">场景描述（可选）</label>
+            <input id="avatarScenarioDescInput" class="toolui-input" type="text" placeholder="简短描述这个开局氛围或时间地点">
+          </div>
+          <div class="toolui-row">
+            <label for="avatarScenarioTagsInput">标签（可选）</label>
+            <input id="avatarScenarioTagsInput" class="toolui-input" type="text" placeholder="日常, 校园, 暧昧, 夜晚（逗号分隔）">
+          </div>
+          <div class="toolui-row">
+            <label for="avatarScenarioOpeningInput">开场白 / 开局内容 *</label>
+            <textarea id="avatarScenarioOpeningInput" class="toolui-textarea" rows="8" placeholder="将作为角色的第一条消息插入会话，例如：*咖啡馆里，窗边传来轻轻的雨声…*"></textarea>
+            <div class="hint">选择场景后会直接把这段作为角色第一条消息写入会话，用户无需手动铺垫。</div>
+          </div>
+          <div id="avatarScenarioEditorStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button id="avatarScenarioSaveBtn" type="button" class="btn primary">保存场景</button>
+        <button type="button" class="btn ghost" data-close>取消</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    editId: backdrop.querySelector('#avatarScenarioEditId'),
+    title: backdrop.querySelector('#avatarScenarioTitleInput'),
+    desc: backdrop.querySelector('#avatarScenarioDescInput'),
+    tags: backdrop.querySelector('#avatarScenarioTagsInput'),
+    opening: backdrop.querySelector('#avatarScenarioOpeningInput'),
+    status: backdrop.querySelector('#avatarScenarioEditorStatus'),
+    saveBtn: backdrop.querySelector('#avatarScenarioSaveBtn'),
+    titleEl: backdrop.querySelector('#avatarScenarioEditorTitle')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeAvatarScenarioEditorModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeAvatarScenarioEditorModal()));
+  if (ui.saveBtn) ui.saveBtn.addEventListener('click', () => saveAvatarScenarioEditorModal());
+
+  avatarScenarioRuntime.editorModalReady = true;
+  avatarScenarioRuntime.editorUi = ui;
+  return ui;
+}
+
+function closeAvatarScenarioEditorModal() {
+  const ui = ensureAvatarScenarioEditorModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function openAvatarScenarioEditorModal(options = {}) {
+  ensureAvatarScenarioManagerUi();
+  const ui = ensureAvatarScenarioEditorModal();
+  const mode = options.mode === 'edit' ? 'edit' : 'create';
+  const item = options.scenario || null;
+  ui.editId.value = item ? String(item.id || '') : '';
+  ui.title.value = item ? String(item.title || '') : '';
+  ui.desc.value = item ? String(item.description || '') : '';
+  ui.tags.value = item && Array.isArray(item.tags) ? item.tags.join(', ') : '';
+  ui.opening.value = item ? String(item.openingMessage || '') : '';
+  if (ui.titleEl) ui.titleEl.textContent = mode === 'edit' ? '编辑开场场景' : '新增开场场景';
+  setToolUiStatus(ui.status, '', '');
+  ui.backdrop.classList.add('open');
+  if (ui.title) ui.title.focus();
+}
+
+function saveAvatarScenarioEditorModal() {
+  const ui = ensureAvatarScenarioEditorModal();
+  const title = String(ui.title.value || '').trim();
+  const openingMessage = String(ui.opening.value || '').trim();
+  if (!title) {
+    setToolUiStatus(ui.status, '请填写场景标题。', 'error');
+    return;
+  }
+  if (!openingMessage) {
+    setToolUiStatus(ui.status, '请填写开场白内容。', 'error');
+    return;
+  }
+  const tags = String(ui.tags.value || '')
+    .split(/[\r\n,，;；]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const editId = String(ui.editId.value || '').trim();
+  const existing = editId ? (avatarScenarioRuntime.draftItems || []).find((s) => s.id === editId) : null;
+  const scenario = normalizeAvatarScenario({
+    id: editId || undefined,
+    title,
+    description: String(ui.desc.value || '').trim(),
+    openingMessage,
+    tags,
+    useCount: existing ? existing.useCount : 0,
+    createdAt: existing ? existing.createdAt : Date.now(),
+    updatedAt: Date.now()
+  }, existing || undefined);
+
+  if (existing) {
+    avatarScenarioRuntime.draftItems = (avatarScenarioRuntime.draftItems || []).map((s) => (s.id === existing.id ? scenario : s));
+  } else {
+    avatarScenarioRuntime.draftItems = [scenario, ...(avatarScenarioRuntime.draftItems || [])];
+  }
+  renderAvatarScenarioDraftList();
+  const host = ensureAvatarScenarioManagerUi();
+  const statusEl = host ? host.querySelector('#avatarScenarioDraftStatus') : null;
+  if (statusEl) statusEl.textContent = editId ? '场景已更新（角色保存后生效）。' : '场景已添加（角色保存后生效）。';
+  closeAvatarScenarioEditorModal();
+}
+
+function ensureAvatarScenePickerModal() {
+  if (avatarScenarioRuntime.pickerModalReady && avatarScenarioRuntime.pickerUi) return avatarScenarioRuntime.pickerUi;
+  ensureToolUiInjectedStyle();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal" role="dialog" aria-modal="true" aria-labelledby="avatarScenePickerTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="avatarScenePickerTitle">选择开场场景</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div id="avatarScenePickerHint" class="muted" style="margin-bottom:10px;">为这个角色选择一个开场场景，直接开始对话。</div>
+        <div id="avatarScenePickerList" style="display:grid;gap:10px;"></div>
+        <div id="avatarScenePickerStatus" class="toolui-status"></div>
+      </div>
+      <div class="toolui-foot">
+        <button id="avatarScenePickerSkipBtn" type="button" class="btn ghost">跳过本会话</button>
+        <button type="button" class="btn ghost" data-close>关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    title: backdrop.querySelector('#avatarScenePickerTitle'),
+    hint: backdrop.querySelector('#avatarScenePickerHint'),
+    list: backdrop.querySelector('#avatarScenePickerList'),
+    status: backdrop.querySelector('#avatarScenePickerStatus'),
+    skipBtn: backdrop.querySelector('#avatarScenePickerSkipBtn')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeAvatarScenePickerModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeAvatarScenePickerModal()));
+  if (ui.skipBtn) {
+    ui.skipBtn.addEventListener('click', () => {
+      const session = state.sessions.find((s) => s.id === avatarScenarioRuntime.pendingSessionId);
+      if (session) {
+        session.scenePickerDismissed = true;
+        touchSession(session);
+        persistSessionsState();
+      }
+      closeAvatarScenePickerModal();
+    });
+  }
+  if (ui.list) {
+    ui.list.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-action="use-scene"][data-scene-id]');
+      if (!btn) return;
+      const sceneId = btn.dataset.sceneId || '';
+      const avatar = getAvatarById(avatarScenarioRuntime.pendingAvatarId);
+      const session = state.sessions.find((s) => s.id === avatarScenarioRuntime.pendingSessionId);
+      if (!avatar || !session) return;
+      const scene = getAvatarOpeningScenarios(avatar).find((s) => s.id === sceneId);
+      if (!scene) return;
+      applyAvatarOpeningScenarioToSession(session, avatar, scene);
+      closeAvatarScenePickerModal();
+    });
+  }
+
+  avatarScenarioRuntime.pickerModalReady = true;
+  avatarScenarioRuntime.pickerUi = ui;
+  return ui;
+}
+
+function closeAvatarScenePickerModal() {
+  const ui = ensureAvatarScenePickerModal();
+  ui.backdrop.classList.remove('open');
+  avatarScenarioRuntime.pendingSessionId = '';
+  avatarScenarioRuntime.pendingAvatarId = '';
+}
+
+function applyAvatarOpeningScenarioToSession(session, avatar, scene) {
+  if (!session || !avatar || !scene) return;
+  if (!Array.isArray(session.messages)) session.messages = [];
+  if (!hasChatMessages(session)) {
+    session.messages.push({
+      id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      role: 'assistant',
+      content: String(scene.openingMessage || '').trim(),
+      createdAt: Date.now()
+    });
+  }
+  session.scenePresetApplied = true;
+  session.scenePickerDismissed = false;
+  session.openingScenarioId = scene.id;
+  touchSession(session);
+
+  avatar.usageCount = Math.max(0, Number(avatar.usageCount || 0) || 0) + 1;
+  avatar.openingScenarios = getAvatarOpeningScenarios(avatar).map((item) => (
+    item.id === scene.id
+      ? { ...item, useCount: Math.max(0, Number(item.useCount || 0) || 0) + 1, updatedAt: Date.now() }
+      : item
+  ));
+
+  persistSessionsState();
+  persistAvatars();
+  renderMessages();
+  renderSessionList();
+  if (state.ui.sidebarTab === 'contacts') renderContactList();
+  renderAvatarList();
+}
+
+function maybeOfferAvatarOpeningScene(session, avatar) {
+  if (!session || !avatar) return;
+  if (avatar.type === 'group') return;
+  const scenes = getAvatarOpeningScenarios(avatar);
+  if (!scenes.length) return;
+  if (hasChatMessages(session)) return;
+  if (session.scenePresetApplied || session.scenePickerDismissed) return;
+  if (state.ui.chatStreaming) return;
+  if (avatarScenarioRuntime.pendingSessionId) return;
+
+  const ui = ensureAvatarScenePickerModal();
+  avatarScenarioRuntime.pendingSessionId = session.id;
+  avatarScenarioRuntime.pendingAvatarId = avatar.id;
+  if (ui.title) ui.title.textContent = `选择开场场景 · ${avatar.name}`;
+  if (ui.hint) {
+    ui.hint.textContent = `为「${avatar.name}」选择一个开场场景，系统会直接插入角色的第一条消息。`;
+  }
+  ui.list.innerHTML = scenes.map((scene) => {
+    const tags = Array.isArray(scene.tags) ? scene.tags : [];
+    const tagsHtml = tags.length
+      ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">${tags.map((tag) => `<span style="font-size:12px;color:#4338ca;background:rgba(99,102,241,.08);padding:2px 8px;border-radius:999px;">${escapeHtml(tag)}</span>`).join('')}</div>`
+      : '';
+    const preview = String(scene.openingMessage || '').replace(/\s+/g, ' ').trim();
+    return `
+      <div class="toolui-switch-block" style="background:#fff;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div style="min-width:0;flex:1;">
+            <div style="font-weight:700;color:#0f172a;">${escapeHtml(scene.title || '开场场景')}</div>
+            ${scene.description ? `<div class="hint" style="margin-top:4px;">${escapeHtml(scene.description)}</div>` : ''}
+            ${tagsHtml}
+            <div style="margin-top:8px;font-size:13px;line-height:1.45;color:#334155;white-space:pre-wrap;word-break:break-word;">${escapeHtml(preview.slice(0, 280))}${preview.length > 280 ? '…' : ''}</div>
+            <div class="hint" style="margin-top:6px;">已使用 ${Number(scene.useCount || 0)} 次</div>
+          </div>
+          <div style="display:flex;align-items:flex-start;">
+            <button type="button" class="btn primary" data-action="use-scene" data-scene-id="${escapeHtml(scene.id)}">使用此开场</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  setToolUiStatus(ui.status, '', '');
+  ui.backdrop.classList.add('open');
+}
+
+function getAvatarGalleryTagLabel(tagValue) {
+  const v = String(tagValue || 'all');
+  if (v === 'all') return '全部';
+  if (v === 'type:single') return '单人角色';
+  if (v === 'type:group') return '群组';
+  if (v === 'prompt:custom') return '仅自定义Prompt';
+  if (v === 'prompt:memory') return '仅记忆风格';
+  if (v === 'prompt:both') return '混合风格';
+  if (v === 'scene:has') return '有开场场景';
+  if (v === 'scene:none') return '无开场场景';
+  if (v === 'rating:4+') return '高评分（4-5）';
+  if (v === 'rating:none') return '未评分';
+  if (v.startsWith('avatar-tag:')) return `角色标签：${v.slice('avatar-tag:'.length)}`;
+  if (v.startsWith('scene-tag:')) return `场景标签：${v.slice('scene-tag:'.length)}`;
+  return v;
+}
+
+function getAvatarGalleryTagOptions() {
+  const options = ['all', 'type:single', 'type:group', 'scene:has', 'scene:none', 'rating:4+', 'rating:none'];
+  const tagSet = new Set();
+  for (const avatar of state.avatars || []) {
+    if (!avatar) continue;
+    tagSet.add(`prompt:${derivePromptMode(avatar.customPrompt, avatar.memoryText)}`);
+    for (const tag of getAvatarTags(avatar)) {
+      const t = String(tag || '').trim();
+      if (t) tagSet.add(`avatar-tag:${t}`);
+    }
+    for (const scene of getAvatarOpeningScenarios(avatar)) {
+      for (const tag of (scene.tags || [])) {
+        const t = String(tag || '').trim();
+        if (t) tagSet.add(`scene-tag:${t}`);
+      }
+    }
+  }
+  const sortedAvatarTags = Array.from(tagSet)
+    .filter((v) => v.startsWith('avatar-tag:'))
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const sortedSceneTags = Array.from(tagSet)
+    .filter((v) => v.startsWith('scene-tag:'))
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const promptTags = ['prompt:custom', 'prompt:memory', 'prompt:both'].filter((v) => tagSet.has(v));
+  return options
+    .concat(promptTags)
+    .concat(sortedAvatarTags)
+    .concat(sortedSceneTags)
+    .filter((v, idx, arr) => arr.indexOf(v) === idx);
+}
+
+function avatarMatchesGalleryTag(avatar, tagValue) {
+  const tag = String(tagValue || 'all');
+  if (tag === 'all') return true;
+  if (tag === 'type:single') return avatar.type !== 'group';
+  if (tag === 'type:group') return avatar.type === 'group';
+  if (tag === 'scene:has') return getAvatarOpeningScenarios(avatar).length > 0;
+  if (tag === 'scene:none') return getAvatarOpeningScenarios(avatar).length === 0;
+  if (tag === 'rating:4+') return getAvatarRating(avatar) >= 4;
+  if (tag === 'rating:none') return getAvatarRating(avatar) <= 0;
+  if (tag.startsWith('prompt:')) {
+    return derivePromptMode(avatar.customPrompt, avatar.memoryText) === tag.slice('prompt:'.length);
+  }
+  if (tag.startsWith('avatar-tag:')) {
+    const needle = tag.slice('avatar-tag:'.length).toLowerCase();
+    return getAvatarTags(avatar).some((t) => String(t || '').toLowerCase() === needle);
+  }
+  if (tag.startsWith('scene-tag:')) {
+    const needle = tag.slice('scene-tag:'.length).toLowerCase();
+    return getAvatarOpeningScenarios(avatar).some((scene) => (scene.tags || []).some((t) => String(t || '').toLowerCase() === needle));
+  }
+  return true;
+}
+
+function avatarMatchesGallerySearch(avatar, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  const chunks = [
+    avatar.name,
+    avatar.relationship,
+    ...(getAvatarTags(avatar)),
+    avatar.customPrompt,
+    avatar.memoryText,
+    avatar.type === 'group' ? '群组' : '角色'
+  ];
+  for (const scene of getAvatarOpeningScenarios(avatar)) {
+    chunks.push(scene.title, scene.description, scene.openingMessage, ...(scene.tags || []));
+  }
+  return chunks.some((item) => String(item || '').toLowerCase().includes(q));
+}
+
+function getAvatarGalleryFilteredList() {
+  const search = avatarGalleryRuntime.search || '';
+  const tag = avatarGalleryRuntime.tag || 'all';
+  return (state.avatars || [])
+    .filter((avatar) => avatar && avatarMatchesGalleryTag(avatar, tag) && avatarMatchesGallerySearch(avatar, search))
+    .sort((a, b) => {
+      const au = Number(a.usageCount || 0) || 0;
+      const bu = Number(b.usageCount || 0) || 0;
+      if (bu !== au) return bu - au;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN');
+    });
+}
+
+function renderAvatarGalleryStars(avatarId, rating, opts = {}) {
+  const current = clampAvatarRating(rating);
+  const interactive = opts.interactive !== false;
+  let html = '<span style="display:inline-flex;align-items:center;gap:4px;">';
+  for (let i = 1; i <= 5; i += 1) {
+    const active = i <= current;
+    if (interactive) {
+      html += `<button type="button" data-action="rate-avatar" data-avatar-id="${escapeHtml(avatarId)}" data-rating="${i}" style="border:none;background:none;padding:0;cursor:pointer;font-size:16px;line-height:1;color:${active ? '#f59e0b' : '#cbd5e1'};" title="评分 ${i} 星">${active ? '★' : '☆'}</button>`;
+    } else {
+      html += `<span style="font-size:16px;line-height:1;color:${active ? '#f59e0b' : '#cbd5e1'};">${active ? '★' : '☆'}</span>`;
+    }
+  }
+  if (interactive) {
+    html += `<button type="button" data-action="rate-avatar" data-avatar-id="${escapeHtml(avatarId)}" data-rating="0" style="margin-left:4px;border:none;background:none;padding:0;cursor:pointer;font-size:12px;color:#64748b;">清空</button>`;
+  }
+  html += '</span>';
+  return html;
+}
+
+function ensureAvatarGalleryModal() {
+  if (avatarGalleryRuntime.modalReady && avatarGalleryRuntime.ui) return avatarGalleryRuntime.ui;
+  ensureToolUiInjectedStyle();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal" role="dialog" aria-modal="true" aria-labelledby="avatarGalleryTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="avatarGalleryTitle">角色画廊 / 卡片管理器</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <div class="toolui-grid two-col">
+            <div class="toolui-row">
+              <label for="avatarGallerySearchInput">搜索</label>
+              <input id="avatarGallerySearchInput" class="toolui-input" type="text" placeholder="搜索角色名、关系、场景、标签...">
+            </div>
+            <div class="toolui-row">
+              <label for="avatarGalleryTagFilterSelect">标签筛选</label>
+              <select id="avatarGalleryTagFilterSelect" class="toolui-input"></select>
+            </div>
+          </div>
+          <div id="avatarGallerySummary" class="muted" style="font-size:12px;line-height:1.45;"></div>
+          <div class="toolui-row">
+            <label>角色卡片（缩略图画廊，点击查看详情）</label>
+            <div class="hint" style="margin-bottom:8px;">只显示图片和名字，点击卡片后再弹出详细信息。</div>
+            <div id="avatarGalleryGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(138px,1fr));gap:12px;max-height:min(62vh,560px);overflow:auto;padding:2px 2px 6px 2px;"></div>
+          </div>
+          <div id="avatarGalleryStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button id="avatarGalleryRefreshBtn" type="button" class="btn ghost">刷新</button>
+        <button id="avatarGalleryToPersonasBtn" type="button" class="btn ghost">打开角色设置</button>
+        <button type="button" class="btn ghost" data-close>关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    title: backdrop.querySelector('#avatarGalleryTitle'),
+    search: backdrop.querySelector('#avatarGallerySearchInput'),
+    tag: backdrop.querySelector('#avatarGalleryTagFilterSelect'),
+    summary: backdrop.querySelector('#avatarGallerySummary'),
+    grid: backdrop.querySelector('#avatarGalleryGrid'),
+    status: backdrop.querySelector('#avatarGalleryStatus'),
+    refreshBtn: backdrop.querySelector('#avatarGalleryRefreshBtn'),
+    toPersonasBtn: backdrop.querySelector('#avatarGalleryToPersonasBtn')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeAvatarGalleryModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeAvatarGalleryModal()));
+  if (ui.search) {
+    ui.search.addEventListener('input', () => {
+      avatarGalleryRuntime.search = String(ui.search.value || '');
+      renderAvatarGallery();
+    });
+  }
+  if (ui.tag) {
+    ui.tag.addEventListener('change', () => {
+      avatarGalleryRuntime.tag = ui.tag.value || 'all';
+      renderAvatarGallery();
+    });
+  }
+  if (ui.refreshBtn) ui.refreshBtn.addEventListener('click', () => renderAvatarGallery());
+  if (ui.toPersonasBtn) {
+    ui.toPersonasBtn.addEventListener('click', async () => {
+      closeAvatarGalleryModal();
+      await openSettingsSection('personas');
+    });
+  }
+  if (ui.grid) {
+    ui.grid.addEventListener('click', async (e) => {
+      const card = e.target.closest('[data-avatar-gallery-card]');
+      if (!card) return;
+      avatarGalleryRuntime.selectedAvatarId = card.dataset.avatarGalleryCard || '';
+      renderAvatarGallery();
+      const avatar = getAvatarById(avatarGalleryRuntime.selectedAvatarId);
+      if (avatar) openAvatarGalleryDetailModal(avatar.id);
+    });
+  }
+
+  avatarGalleryRuntime.modalReady = true;
+  avatarGalleryRuntime.ui = ui;
+  return ui;
+}
+
+function closeAvatarGalleryModal() {
+  const ui = ensureAvatarGalleryModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function setAvatarGalleryStatus(text, type = '') {
+  const ui = ensureAvatarGalleryModal();
+  setToolUiStatus(ui.status, text, type);
+}
+
+function ensureAvatarGalleryDetailModal() {
+  if (avatarGalleryRuntime.detailModalReady && avatarGalleryRuntime.detailUi) return avatarGalleryRuntime.detailUi;
+  ensureToolUiInjectedStyle();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal narrow" role="dialog" aria-modal="true" aria-labelledby="avatarGalleryDetailTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="avatarGalleryDetailTitle">角色详情</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div id="avatarGalleryDetailBody" class="toolui-grid"></div>
+        <div id="avatarGalleryDetailStatus" class="toolui-status"></div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn ghost" data-close>关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    title: backdrop.querySelector('#avatarGalleryDetailTitle'),
+    body: backdrop.querySelector('#avatarGalleryDetailBody'),
+    status: backdrop.querySelector('#avatarGalleryDetailStatus')
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeAvatarGalleryDetailModal();
+    const btn = e.target.closest('button[data-action][data-avatar-id]');
+    if (!btn) return;
+    e.preventDefault();
+    const avatarId = String(btn.dataset.avatarId || '').trim();
+    const action = String(btn.dataset.action || '').trim();
+    const avatar = getAvatarById(avatarId);
+    if (!avatar) return;
+    if (action === 'rate-avatar') {
+      const rating = clampAvatarRating(btn.dataset.rating);
+      setAvatarRating(avatarId, rating);
+      setToolUiStatus(ui.status, `已为「${avatar.name}」评分：${rating || 0} 星`, 'success');
+      return;
+    }
+    if (action === 'gallery-edit-avatar') {
+      closeAvatarGalleryDetailModal();
+      closeAvatarGalleryModal();
+      Promise.resolve(openSettingsSection('personas')).then(() => {
+        fillAvatarForm(avatar);
+        ensureAvatarScenarioManagerUi();
+        renderAvatarScenarioDraftList();
+      }).catch(() => {});
+      return;
+    }
+    if (action === 'gallery-open-contact') {
+      closeAvatarGalleryDetailModal();
+      closeAvatarGalleryModal();
+      if (avatar.type === 'group') {
+        applyAvatarSelection(avatar.id);
+      } else {
+        switchSidebarTab('contacts');
+        openContact(avatar.id);
+      }
+    }
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeAvatarGalleryDetailModal()));
+
+  avatarGalleryRuntime.detailModalReady = true;
+  avatarGalleryRuntime.detailUi = ui;
+  return ui;
+}
+
+function closeAvatarGalleryDetailModal() {
+  const ui = ensureAvatarGalleryDetailModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function renderAvatarGalleryDetail(avatar) {
+  const ui = ensureAvatarGalleryDetailModal();
+  if (!ui.body) return;
+  if (!avatar) {
+    if (ui.title) ui.title.textContent = '角色详情';
+    ui.body.innerHTML = '<div class="muted">未找到角色信息。</div>';
+    return;
+  }
+  if (ui.title) ui.title.textContent = `角色详情 · ${avatar.name || '未命名角色'}`;
+  const iconVal = avatar.icon || (avatar.type === 'group' ? '👥' : '😀');
+  const iconHtml = iconVal.startsWith('data:image')
+    ? `<img src="${iconVal}" alt="avatar" style="width:100%;max-height:280px;object-fit:cover;border-radius:14px;border:1px solid rgba(148,163,184,.22);background:#fff;">`
+    : `<div style="width:100%;height:220px;display:flex;align-items:center;justify-content:center;font-size:88px;border-radius:14px;background:#fff;border:1px solid rgba(148,163,184,.22);">${iconVal}</div>`;
+  const avatarTags = getAvatarTags(avatar);
+  const avatarTagHtml = avatarTags.length
+    ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">${avatarTags.map((tag) => `<span style="font-size:12px;color:#1d4ed8;background:rgba(59,130,246,.08);padding:2px 8px;border-radius:999px;">${escapeHtml(tag)}</span>`).join('')}</div>`
+    : '';
+  const scenes = getAvatarOpeningScenarios(avatar);
+  const sceneHtml = scenes.length
+    ? `<div style="display:grid;gap:8px;">${scenes.slice(0, 6).map((scene) => {
+      const sceneTags = Array.isArray(scene.tags) ? scene.tags : [];
+      const sceneTagsHtml = sceneTags.length
+        ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">${sceneTags.slice(0, 8).map((tag) => `<span style="font-size:11px;color:#4338ca;background:rgba(99,102,241,.08);padding:2px 6px;border-radius:999px;">${escapeHtml(tag)}</span>`).join('')}</div>`
+        : '';
+      return `<div style="padding:10px;border:1px solid rgba(148,163,184,.18);border-radius:10px;background:#fff;">
+        <div style="font-weight:700;color:#0f172a;">${escapeHtml(scene.title || '开场')}</div>
+        ${scene.description ? `<div class="hint" style="margin-top:2px;">${escapeHtml(scene.description)}</div>` : ''}
+        ${sceneTagsHtml}
+        <div class="hint" style="margin-top:4px;">使用 ${Number(scene.useCount || 0)} 次</div>
+      </div>`;
+    }).join('')}</div>`
+    : '<div class="muted">暂无开场场景</div>';
+  const promptPreview = String(avatar.customPrompt || '').trim().replace(/\s+/g, ' ');
+  const memoryPreview = String(avatar.memoryText || '').trim().replace(/\s+/g, ' ');
+  ui.body.innerHTML = `
+    <div class="toolui-row">
+      ${iconHtml}
+    </div>
+    <div class="toolui-row">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <strong style="font-size:18px;color:#0f172a;">${escapeHtml(avatar.name || '角色')}</strong>
+        <span class="hint">${avatar.type === 'group' ? '群组' : '角色'}</span>
+        <span class="hint">使用 ${Number(avatar.usageCount || 0)} 次</span>
+        <span class="hint">开场 ${scenes.length} 个</span>
+      </div>
+      ${avatar.relationship ? `<div class="hint" style="margin-top:4px;">关系：${escapeHtml(avatar.relationship)}</div>` : ''}
+      ${avatarTagHtml}
+      <div style="margin-top:8px;">评分：${renderAvatarGalleryStars(avatar.id, getAvatarRating(avatar), { interactive: true })}</div>
+    </div>
+    <div class="toolui-row">
+      <label>开场场景</label>
+      ${sceneHtml}
+    </div>
+    <div class="toolui-row">
+      <label>角色设定预览</label>
+      <div class="toolui-filebox" style="line-height:1.5;white-space:pre-wrap;word-break:break-word;">
+        ${escapeHtml((promptPreview || memoryPreview || '未配置角色设定').slice(0, 900))}
+        ${(promptPreview || memoryPreview).length > 900 ? '…' : ''}
+      </div>
+    </div>
+    <div class="toolui-actions-row">
+      <button type="button" class="btn ghost" data-action="gallery-edit-avatar" data-avatar-id="${escapeHtml(avatar.id)}">编辑角色</button>
+      <button type="button" class="btn primary" data-action="gallery-open-contact" data-avatar-id="${escapeHtml(avatar.id)}">${avatar.type === 'group' ? '作为当前角色使用' : '打开联系人聊天'}</button>
+    </div>
+  `;
+}
+
+function openAvatarGalleryDetailModal(avatarId) {
+  const avatar = typeof avatarId === 'string' ? getAvatarById(avatarId) : avatarId;
+  const ui = ensureAvatarGalleryDetailModal();
+  avatarGalleryRuntime.selectedAvatarId = avatar ? avatar.id : '';
+  setToolUiStatus(ui.status, '', '');
+  renderAvatarGalleryDetail(avatar);
+  ui.backdrop.classList.add('open');
+}
+
+function renderAvatarGalleryPreview(avatar) {
+  const ui = ensureAvatarGalleryModal();
+  if (!ui.preview) return;
+  if (!avatar) {
+    ui.preview.innerHTML = '<div class="muted">选择一张角色卡查看大图预览和详细信息。</div>';
+    return;
+  }
+  const iconVal = avatar.icon || (avatar.type === 'group' ? '👥' : '😀');
+  const iconHtml = iconVal.startsWith('data:image')
+    ? `<img src="${iconVal}" alt="avatar" style="width:96px;height:96px;border-radius:18px;object-fit:cover;border:1px solid rgba(148,163,184,.28);">`
+    : `<div style="width:96px;height:96px;border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:54px;background:#fff;border:1px solid rgba(148,163,184,.28);">${iconVal}</div>`;
+  const scenes = getAvatarOpeningScenarios(avatar);
+  const topScenes = scenes.slice(0, 3);
+  const topSceneHtml = topScenes.length
+    ? topScenes.map((scene) => `<li style="margin-bottom:6px;"><strong>${escapeHtml(scene.title)}</strong>${scene.description ? ` · <span class="muted">${escapeHtml(scene.description)}</span>` : ''}<br><span class="muted">使用 ${Number(scene.useCount || 0)} 次</span></li>`).join('')
+    : '<li class="muted">暂无开场场景</li>';
+  const promptPreview = String(avatar.customPrompt || '').trim().replace(/\s+/g, ' ');
+  const relationship = String(avatar.relationship || '').trim();
+  ui.preview.innerHTML = `
+    <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+      ${iconHtml}
+      <div style="min-width:0;flex:1;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong style="font-size:16px;color:#0f172a;">${escapeHtml(avatar.name || '角色')}</strong>
+          <span class="hint">${avatar.type === 'group' ? '群组' : '角色'}</span>
+          <span class="hint">使用 ${Number(avatar.usageCount || 0)} 次</span>
+          <span class="hint">开场 ${scenes.length} 个</span>
+        </div>
+        ${relationship ? `<div class="hint" style="margin-top:4px;">关系：${escapeHtml(relationship)}</div>` : ''}
+        <div style="margin-top:8px;">评分：${renderAvatarGalleryStars(avatar.id, getAvatarRating(avatar), { interactive: true })}</div>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <div style="font-weight:700;color:#334155;margin-bottom:6px;">代表场景</div>
+      <ul style="margin:0 0 0 18px;padding:0;">${topSceneHtml}</ul>
+    </div>
+    <div style="margin-top:12px;">
+      <div style="font-weight:700;color:#334155;margin-bottom:6px;">角色风格预览</div>
+      <div style="font-size:13px;line-height:1.45;color:#334155;white-space:pre-wrap;word-break:break-word;">${escapeHtml(promptPreview.slice(0, 320) || (avatar.memoryText ? '已配置记忆风格（未展示全文）' : '未配置自定义 Prompt'))}${promptPreview.length > 320 ? '…' : ''}</div>
+    </div>
+    <div class="toolui-actions-row" style="margin-top:12px;">
+      <button type="button" class="btn ghost" data-action="gallery-edit-avatar" data-avatar-id="${escapeHtml(avatar.id)}">编辑角色</button>
+      <button type="button" class="btn primary" data-action="gallery-open-contact" data-avatar-id="${escapeHtml(avatar.id)}">${avatar.type === 'group' ? '作为当前角色' : '打开联系人聊天'}</button>
+    </div>
+  `;
+}
+
+function renderAvatarGallery() {
+  const ui = ensureAvatarGalleryModal();
+  const tagOptions = getAvatarGalleryTagOptions();
+  if (!tagOptions.includes(avatarGalleryRuntime.tag)) avatarGalleryRuntime.tag = 'all';
+  if (ui.tag) {
+    ui.tag.innerHTML = tagOptions.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(getAvatarGalleryTagLabel(v))}</option>`).join('');
+    ui.tag.value = avatarGalleryRuntime.tag;
+  }
+  if (ui.search && ui.search.value !== avatarGalleryRuntime.search) ui.search.value = avatarGalleryRuntime.search;
+
+  const filtered = getAvatarGalleryFilteredList();
+  const all = Array.isArray(state.avatars) ? state.avatars : [];
+  const totalUsage = all.reduce((sum, avatar) => sum + (Number(avatar && avatar.usageCount || 0) || 0), 0);
+  const rated = all.filter((avatar) => getAvatarRating(avatar) > 0);
+  const avgRating = rated.length
+    ? (rated.reduce((sum, avatar) => sum + getAvatarRating(avatar), 0) / rated.length).toFixed(1)
+    : '0.0';
+  if (ui.summary) {
+    ui.summary.textContent = `全部 ${all.length} 张 · 当前筛选 ${filtered.length} 张 · 总使用 ${totalUsage} 次 · 已评分 ${rated.length} 张（均分 ${avgRating}）`;
+  }
+
+  if (!avatarGalleryRuntime.selectedAvatarId || !filtered.some((a) => a.id === avatarGalleryRuntime.selectedAvatarId)) {
+    avatarGalleryRuntime.selectedAvatarId = filtered[0] ? filtered[0].id : '';
+  }
+  if (ui.grid) {
+    if (!filtered.length) {
+      ui.grid.innerHTML = '<div class="muted" style="grid-column:1/-1;padding:8px 2px;">没有匹配的角色卡。试试清空筛选或修改搜索关键词。</div>';
+    } else {
+      ui.grid.innerHTML = filtered.map((avatar) => {
+        const isSelected = avatar.id === avatarGalleryRuntime.selectedAvatarId;
+        const iconVal = avatar.icon || (avatar.type === 'group' ? '👥' : '😀');
+        const iconHtml = iconVal.startsWith('data:image')
+          ? `<img src="${iconVal}" alt="avatar" style="width:100%;height:156px;object-fit:cover;border-radius:12px;border:1px solid rgba(148,163,184,.18);display:block;background:#fff;">`
+          : `<div style="width:100%;height:156px;display:flex;align-items:center;justify-content:center;font-size:64px;border-radius:12px;background:#fff;border:1px solid rgba(148,163,184,.18);">${iconVal}</div>`;
+        const roleTags = getAvatarTags(avatar);
+        const roleTagLine = roleTags.length ? ` · ${escapeHtml(roleTags.slice(0, 1)[0])}` : '';
+        return `
+          <div
+            data-avatar-gallery-card="${escapeHtml(avatar.id)}"
+            title="点击查看角色详情"
+            style="border:1px solid ${isSelected ? 'rgba(59,130,246,.38)' : 'rgba(148,163,184,.2)'};border-radius:14px;padding:8px;background:${isSelected ? 'rgba(239,246,255,.55)' : '#fff'};cursor:pointer;transition:border-color .15s ease, box-shadow .15s ease;"
+          >
+            ${iconHtml}
+            <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <strong style="font-size:13px;color:#0f172a;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(avatar.name || '角色')}</strong>
+              <span class="hint" style="font-size:11px;">${avatar.type === 'group' ? '群组' : '角色'}</span>
+            </div>
+            <div class="hint" style="margin-top:3px;min-height:16px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(avatar.relationship || '').trim() || '未设置关系')}${roleTagLine}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+}
+
+function openAvatarGalleryModal(options = {}) {
+  const ui = ensureAvatarGalleryModal();
+  avatarGalleryRuntime.source = String(options.source || '');
+  if (typeof options.search === 'string') avatarGalleryRuntime.search = options.search;
+  if (typeof options.tag === 'string') avatarGalleryRuntime.tag = options.tag;
+  if (typeof options.selectedAvatarId === 'string') avatarGalleryRuntime.selectedAvatarId = options.selectedAvatarId;
+  if (ui.title) {
+    ui.title.textContent = avatarGalleryRuntime.source === 'contacts'
+      ? '角色画廊 / 联系人卡片管理器'
+      : '角色画廊 / 卡片管理器';
+  }
+  setAvatarGalleryStatus('', '');
+  renderAvatarGallery();
+  ui.backdrop.classList.add('open');
 }
 
 function renderAvatarSelectPanel() {
@@ -2919,6 +4192,14 @@ function applyAvatarSelection(avatarId) {
   persistSessionsState();
   renderAvatarSelectPanel();
   renderSessionList();
+  if (avatarId) {
+    const avatar = getAvatarById(avatarId);
+    if (avatar) {
+      setTimeout(() => {
+        try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) {}
+      }, 0);
+    }
+  }
 }
 
 function updateAvatarBtnLabel() {
@@ -2984,6 +4265,34 @@ function getMessageTranslationCache(message, lang) {
   return null;
 }
 
+function getMessageTranslationError(message, lang) {
+  if (!message || !lang || !message.translationErrorsByLang || typeof message.translationErrorsByLang !== 'object') return null;
+  const entry = message.translationErrorsByLang[lang];
+  if (!entry || typeof entry !== 'object') return null;
+  return {
+    source: String(entry.source || ''),
+    message: String(entry.message || ''),
+    failedAt: Number(entry.failedAt || 0) || 0
+  };
+}
+
+function clearMessageTranslationError(message, lang) {
+  if (!message || !lang || !message.translationErrorsByLang || typeof message.translationErrorsByLang !== 'object') return;
+  delete message.translationErrorsByLang[lang];
+}
+
+function setMessageTranslationError(message, lang, sourceText, errorText) {
+  if (!message || !lang) return;
+  if (!message.translationErrorsByLang || typeof message.translationErrorsByLang !== 'object') {
+    message.translationErrorsByLang = {};
+  }
+  message.translationErrorsByLang[lang] = {
+    source: String(sourceText || ''),
+    message: String(errorText || '翻译失败'),
+    failedAt: Date.now()
+  };
+}
+
 function setMessageTranslationCache(message, lang, sourceText, translatedText) {
   if (!message || !lang) return;
   if (!message.translatedByLang || typeof message.translatedByLang !== 'object') {
@@ -3003,7 +4312,14 @@ function getOverlayDisplayContent(session, message) {
   if (cached && cached.text && cached.source === raw) return cached.text;
   const pendingKey = getOverlayTranslationTaskKey(session.id, message.id, lang, raw);
   if (translationOverlayRuntime.pending.has(pendingKey)) {
-    return `${raw}\n\n[\u7ffb\u8bd1\u4e2d...]`;
+    return `${raw}\n\n[翻译中…]`;
+  }
+  const err = getMessageTranslationError(message, lang);
+  if (err && err.source === raw) {
+    const age = Date.now() - Number(err.failedAt || 0);
+    if (age < Number(translationOverlayRuntime.failureCooldownMs || 12000)) {
+      return `${raw}\n\n[翻译失败：${err.message || '请稍后重试'}]`;
+    }
   }
   return raw;
 }
@@ -3018,25 +4334,68 @@ function getOverlaySessionPreview(session) {
   return String(display || '').replace(/\s+/g, ' ').slice(0, 44) || base;
 }
 
-function enqueueOverlayTranslation(session, message) {
+function enqueueOverlayTranslation(session, message, options = {}) {
   if (!isTranslatableAssistantMessage(session, message)) return;
   const lang = String(state.settings.translateTo || 'zh-CN');
   const sourceText = String(message.content || '');
   const cached = getMessageTranslationCache(message, lang);
   if (cached && cached.text && cached.source === sourceText) return;
+  const force = Boolean(options && options.force);
+  const lastError = getMessageTranslationError(message, lang);
+  if (!force && lastError && lastError.source === sourceText) {
+    const age = Date.now() - Number(lastError.failedAt || 0);
+    if (age < Number(translationOverlayRuntime.failureCooldownMs || 12000)) return;
+  }
 
   const queueKey = getOverlayTranslationTaskKey(session.id, message.id, lang, sourceText);
   if (translationOverlayRuntime.pending.has(queueKey)) return;
 
   translationOverlayRuntime.pending.add(queueKey);
-  translationOverlayRuntime.queue.push({
+  const task = {
     key: queueKey,
     sessionId: session.id,
     messageId: message.id,
     lang,
     sourceText
-  });
+  };
+  const activeSession = getActiveSession();
+  const isActiveSession = Boolean(activeSession && activeSession.id === session.id);
+  const lastMessage = Array.isArray(session.messages) && session.messages.length ? session.messages[session.messages.length - 1] : null;
+  const isLatestAssistant = Boolean(lastMessage && lastMessage.id === message.id && lastMessage.role === 'assistant');
+  if (isActiveSession && isLatestAssistant) {
+    translationOverlayRuntime.queue = translationOverlayRuntime.queue.filter((item) => item && item.sessionId !== session.id);
+    translationOverlayRuntime.queue.unshift(task);
+    // Force a near-immediate rerender so the user can at least see “翻译中…”
+    scheduleOverlayTranslationRefresh(session.id);
+  } else {
+    translationOverlayRuntime.queue.push(task);
+  }
   pumpOverlayTranslationQueue();
+}
+
+function queueRecentAssistantMessagesForOverlayTranslation(session, options = {}) {
+  if (!session || !Array.isArray(session.messages) || !session.messages.length) return 0;
+  if (!isAvatarTranslationOverlayEnabled(session)) return 0;
+  const force = Boolean(options && options.force);
+  const maxCount = Math.max(1, Number(options.maxCount || 2) || 2);
+  let queued = 0;
+  for (let i = session.messages.length - 1; i >= 0; i -= 1) {
+    const msg = session.messages[i];
+    if (!msg || msg.role !== 'assistant') continue;
+    if (msg.kind && msg.kind !== 'chat') continue;
+    enqueueOverlayTranslation(session, msg, { force });
+    queued += 1;
+    if (queued >= maxCount) break;
+  }
+  return queued;
+}
+
+function triggerOverlayTranslationForActiveSession(options = {}) {
+  const session = getActiveSession();
+  if (!session) return 0;
+  const queued = queueRecentAssistantMessagesForOverlayTranslation(session, options);
+  if (queued > 0) scheduleOverlayTranslationRefresh(session.id);
+  return queued;
 }
 
 function scheduleOverlayQueueResume() {
@@ -3063,11 +4422,153 @@ function scheduleOverlayTranslationRefresh(sessionId) {
   translationOverlayRuntime.refreshTimer = window.setTimeout(() => {
     translationOverlayRuntime.refreshTimer = 0;
     renderContactList();
-    const activeSession = getActiveSession();
-    if (activeSession && activeSession.id === translationOverlayRuntime.refreshSessionId) {
-      renderMessages();
+    renderMessages();
+  }, 40);
+}
+
+function likelyNeedsVisibleTranslation(sourceText, targetLang) {
+  const src = String(sourceText || '').trim();
+  const target = String(targetLang || '');
+  if (!src) return false;
+  if (target === 'en-US') return false;
+  const latinWords = (src.match(/[A-Za-z]{3,}/g) || []).length;
+  const cjkChars = (src.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  return latinWords >= 6 && cjkChars < 6;
+}
+
+function isLikelyUntranslatedResult(sourceText, translatedText, targetLang) {
+  const src = String(sourceText || '').trim();
+  const out = String(translatedText || '').trim();
+  if (!src || !out) return true;
+  if (out === src) return likelyNeedsVisibleTranslation(src, targetLang);
+  return false;
+}
+
+function getLiveModelSelectElement() {
+  try {
+    const live = document.getElementById('modelSelect');
+    if (live && live !== els.modelSelect) {
+      els.modelSelect = live;
     }
-  }, 120);
+    return live || els.modelSelect || null;
+  } catch (_) {
+    return els.modelSelect || null;
+  }
+}
+
+function getCurrentTranslateRequestProviderSelection() {
+  const fallback = {
+    providerId: String(state.ui && state.ui.selectedProviderId || '').trim(),
+    model: String(state.ui && state.ui.selectedModel || '').trim()
+  };
+  try {
+    const modelSelectEl = getLiveModelSelectElement();
+    const raw = String(modelSelectEl && modelSelectEl.value || '').trim();
+    if (!raw) return fallback;
+    const parts = raw.split('::');
+    return {
+      providerId: String(parts[0] || fallback.providerId || '').trim(),
+      model: String(parts[1] || fallback.model || '').trim()
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function splitOverlayTranslationSourceChunks(text, maxChars = 1200) {
+  const src = String(text || '');
+  const limit = Math.max(300, Number(maxChars || 1200) || 1200);
+  if (!src || src.length <= limit) return [src];
+  const chunks = [];
+  let start = 0;
+  while (start < src.length) {
+    let end = Math.min(src.length, start + limit);
+    if (end < src.length) {
+      const probeStart = Math.min(end - 1, start + Math.floor(limit * 0.55));
+      const probe = src.slice(probeStart, end);
+      const tokens = ['\n\n', '\n', '。', '！', '？', '. ', '! ', '? ', '; ', '；', ', ', '，'];
+      let bestIdx = -1;
+      let bestLen = 0;
+      for (const token of tokens) {
+        const idx = probe.lastIndexOf(token);
+        if (idx > bestIdx) {
+          bestIdx = idx;
+          bestLen = token.length;
+        }
+      }
+      if (bestIdx >= 0) end = probeStart + bestIdx + bestLen;
+    }
+    if (end <= start) end = Math.min(src.length, start + limit);
+    chunks.push(src.slice(start, end));
+    start = end;
+  }
+  return chunks.filter(Boolean);
+}
+
+function isLikelyLocalOllamaProviderId(providerId) {
+  const id = String(providerId || '').trim().toLowerCase();
+  return id === 'ollama-default' || id.startsWith('ollama') || id.includes('ollama');
+}
+
+async function requestOverlayTranslationContent(task, fastMode, timeoutMs) {
+  const providerSel = getCurrentTranslateRequestProviderSelection();
+  const sourceLen = String(task && task.sourceText || '').length;
+  const isLocalOllama = isLikelyLocalOllamaProviderId(providerSel.providerId);
+  const baseTimeout = Number(timeoutMs || translationOverlayRuntime.requestTimeoutMs || 18000);
+  const scaledTimeout = isLocalOllama
+    ? Math.min(180000, Math.max(baseTimeout, 20000 + sourceLen * (fastMode ? 20 : 34)))
+    : Math.min(90000, Math.max(baseTimeout, 12000 + sourceLen * (fastMode ? 5 : 8)));
+  const payload = await apiRequest('/api/translate', {
+    method: 'POST',
+    timeoutMs: scaledTimeout,
+    body: JSON.stringify({
+      text: task.sourceText,
+      targetLang: task.lang,
+      fastMode: Boolean(fastMode),
+      providerId: providerSel.providerId || undefined,
+      model: providerSel.model || undefined,
+      allowLocalFallback: false
+    })
+  });
+  return String((payload && payload.content) || '').trim();
+}
+
+async function requestOverlayTranslationWithRetry(task, sourceText, opts = {}) {
+  const chunkTask = sourceText === task.sourceText ? task : { ...task, sourceText };
+  let translated = await requestOverlayTranslationContent(
+    chunkTask,
+    true,
+    Number(opts.fastTimeoutMs || translationOverlayRuntime.requestTimeoutMs || 18000)
+  );
+  if (isLikelyUntranslatedResult(sourceText, translated, task.lang)) {
+    translated = await requestOverlayTranslationContent(
+      chunkTask,
+      false,
+      Number(opts.retryTimeoutMs || translationOverlayRuntime.retryTimeoutMs || 32000)
+    );
+  }
+  return String(translated || '').trim();
+}
+
+async function translateOverlayTaskSourceWithChunking(task) {
+  const source = String(task && task.sourceText || '');
+  if (!source) return '';
+  const providerSel = getCurrentTranslateRequestProviderSelection();
+  const isLocalOllama = isLikelyLocalOllamaProviderId(providerSel.providerId);
+  const chunkSize = isLocalOllama ? 650 : (source.length > 2200 ? 900 : 1100);
+  const chunks = splitOverlayTranslationSourceChunks(source, chunkSize);
+  if (chunks.length <= 1) {
+    return requestOverlayTranslationWithRetry(task, source);
+  }
+  const output = [];
+  for (const chunk of chunks) {
+    const translated = await requestOverlayTranslationWithRetry(task, chunk, {
+      fastTimeoutMs: isLocalOllama ? 45000 : Math.min(22000, Number(translationOverlayRuntime.requestTimeoutMs || 18000) + 4000),
+      retryTimeoutMs: isLocalOllama ? 90000 : Math.min(45000, Number(translationOverlayRuntime.retryTimeoutMs || 32000) + 8000)
+    });
+    output.push(translated || chunk);
+  }
+  return output.join('');
 }
 
 async function pumpOverlayTranslationQueue() {
@@ -3085,6 +4586,17 @@ async function pumpOverlayTranslationQueue() {
     runOverlayTranslationTask(task)
       .catch((error) => {
         const msg = String(error && (error.message || error) || '');
+        try {
+          const session = state.sessions.find((s) => s.id === task.sessionId);
+          const message = session && Array.isArray(session.messages)
+            ? session.messages.find((m) => m && m.id === task.messageId)
+            : null;
+          if (message) {
+            setMessageTranslationError(message, task.lang, task.sourceText, msg || '翻译失败');
+            scheduleOverlayTranslationPersist();
+            scheduleOverlayTranslationRefresh(task.sessionId);
+          }
+        } catch (_) {}
         const isRateLimited = Number(error && error.status) === 429 || /Too Many Requests|\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41/.test(msg);
         if (isRateLimited) {
           const now = Date.now();
@@ -3110,6 +4622,7 @@ async function pumpOverlayTranslationQueue() {
       .finally(() => {
         translationOverlayRuntime.active = Math.max(0, translationOverlayRuntime.active - 1);
         translationOverlayRuntime.pending.delete(task.key);
+        scheduleOverlayTranslationRefresh(task.sessionId);
         if (translationOverlayRuntime.queue.length) {
           pumpOverlayTranslationQueue();
         }
@@ -3125,19 +4638,9 @@ async function runOverlayTranslationTask(task) {
   if (!isTranslatableAssistantMessage(session, message)) return;
   if (String(message.content || '') !== String(task.sourceText || '')) return;
 
-  const payload = await apiRequest('/api/translate', {
-    method: 'POST',
-    body: JSON.stringify({
-      text: task.sourceText,
-      targetLang: task.lang,
-      fastMode: true,
-      providerId: state.ui.selectedProviderId || undefined,
-      model: state.ui.selectedModel || undefined
-    })
-  });
-
-  const translated = String((payload && payload.content) || '').trim();
+  let translated = await translateOverlayTaskSourceWithChunking(task);
   if (!translated) return;
+  clearMessageTranslationError(message, task.lang);
 
   setMessageTranslationCache(message, task.lang, task.sourceText, translated);
   scheduleOverlayTranslationPersist();
@@ -3226,11 +4729,18 @@ function renderMessages() {
   }).join('');
 
   if (isAvatarTranslationOverlayEnabled(session)) {
-    let queued = 0;
+    let queuedAssistantCount = 0;
     for (let i = session.messages.length - 1; i >= 0; i -= 1) {
-      enqueueOverlayTranslation(session, session.messages[i]);
-      queued += 1;
-      if (queued >= translationOverlayRuntime.renderLookback) break;
+      const msg = session.messages[i];
+      if (!isTranslatableAssistantMessage(session, msg)) continue;
+      enqueueOverlayTranslation(session, msg);
+      queuedAssistantCount += 1;
+      if (queuedAssistantCount >= translationOverlayRuntime.renderLookback) break;
+    }
+    // Also translate the first assistant message (character greeting) if not already queued
+    const firstAssistant = session.messages.find((m) => m.role === 'assistant' && (!m.kind || m.kind === 'chat'));
+    if (firstAssistant && isTranslatableAssistantMessage(session, firstAssistant)) {
+      enqueueOverlayTranslation(session, firstAssistant);
     }
   }
 
@@ -3419,6 +4929,19 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
     updateMessage(messageId, (m) => ({ ...m, isThinking: false }));
     renderMessages();
   }
+  try {
+    window.setTimeout(() => {
+      try {
+        const session = getActiveSession();
+        const message = session && Array.isArray(session.messages)
+          ? session.messages.find((m) => m && m.id === messageId)
+          : null;
+        if (session && message) {
+          enqueueOverlayTranslation(session, message, { force: true });
+        }
+      } catch (_) {}
+    }, 0);
+  } catch (_) {}
   return full;
 }
 
@@ -3530,6 +5053,7 @@ async function sendSingleChatMessage(session) {
       return;
     }
 
+    if (session.avatarId) recordAvatarUsage(session.avatarId, 1);
     await streamSSEResponse(response, assistant.id, requestStartedAt);
   } catch (error) {
     updateMessage(assistant.id, (m) => ({ ...m, content: `测试失败：${error.message || error}`, isThinking: false }));
@@ -3538,6 +5062,7 @@ async function sendSingleChatMessage(session) {
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
     persistSessionsState();
+    renderMessages();
     renderSessionList();
   }
 }
@@ -3619,6 +5144,7 @@ async function sendGroupChatMessage(session, group) {
         continue;
       }
 
+      recordAvatarUsage(member.id, 1);
       const finalContent = await streamSSEResponse(response, assistant.id, requestStartedAt);
       /* append this member's response to context for next member */
       payloadMessages.push({ role: 'assistant', content: `[${member.name}]: ${finalContent}` });
@@ -3630,6 +5156,7 @@ async function sendGroupChatMessage(session, group) {
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
     persistSessionsState();
+    renderMessages();
     renderSessionList();
   }
 }
@@ -4069,6 +5596,7 @@ async function openSettingsPanel() {
   ensurePersonasSettingsSectionNav();
   ensureTeamSharingSettingsSection();
   ensureLorebookSettingsSection();
+  ensureAvatarScenarioManagerUi();
   refreshAvatarPreviews();
   els.tokenInput.value = state.token || '';
   els.userAvatarInput.value = state.ui.userAvatar || '';
@@ -4077,6 +5605,7 @@ async function openSettingsPanel() {
   resetProviderForm();
   resetAvatarForm();
   renderAvatarList();
+  renderAvatarScenarioDraftList();
   await loadProviderList();
   loadMcpServerList();
   loadKbList();
@@ -4518,7 +6047,9 @@ async function testProviderPopup(id) {
 window.testProviderPopup = testProviderPopup;
 
 function updateModelSelectFromProviders(providers) {
-  const select = els.modelSelect;
+  const select = getLiveModelSelectElement() || els.modelSelect;
+  if (!select) return;
+  const currentDomValue = String(select.value || '').trim();
   const enabledProviders = (providers || []).filter((p) => p.enabled);
   let html = '';
   for (const p of enabledProviders) {
@@ -4534,14 +6065,21 @@ function updateModelSelectFromProviders(providers) {
   }
   if (!html) html = '<option value="">无可用模型</option>';
   select.innerHTML = html;
-  // Restore previous selection if still valid
+  // Restore selection: prefer current visible value, then state snapshot, then fallback first option
+  const hasOption = (value) => Boolean(value) && Boolean(select.querySelector(`option[value="${CSS.escape(String(value))}"]`));
   const prevKey = state.ui.selectedProviderId && state.ui.selectedModel && state.ui.chatMode
     ? `${state.ui.selectedProviderId}::${state.ui.selectedModel}::${state.ui.chatMode}` : '';
-  if (prevKey && select.querySelector(`option[value="${CSS.escape(prevKey)}"]`)) {
-    select.value = prevKey;
+  let nextValue = '';
+  if (hasOption(currentDomValue)) {
+    nextValue = currentDomValue;
+  } else if (hasOption(prevKey)) {
+    nextValue = prevKey;
   } else if (select.options.length) {
-    select.value = select.options[0].value;
-    parseModelSelectValue(select.value);
+    nextValue = String(select.options[0].value || '');
+  }
+  if (nextValue) {
+    select.value = nextValue;
+    parseModelSelectValue(nextValue);
   }
 }
 
@@ -4639,10 +6177,27 @@ async function apiRequest(url, options) {
   if (proxyHeader) headers.set('x-client-proxy-config', proxyHeader);
 
   let response;
+  const timeoutMs = Number(reqOptions.timeoutMs || 0);
+  let controller = null;
+  let timeoutId = 0;
+  if (timeoutMs > 0 && typeof AbortController !== 'undefined') {
+    controller = new AbortController();
+    timeoutId = window.setTimeout(() => {
+      try { controller.abort(); } catch (_) {}
+    }, timeoutMs);
+  }
   try {
-    response = await fetch(url, { ...reqOptions, headers });
-  } catch (_) {
+    const fetchOpts = { ...reqOptions, headers };
+    if (controller) fetchOpts.signal = controller.signal;
+    delete fetchOpts.timeoutMs;
+    response = await fetch(url, fetchOpts);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error(`请求超时（>${timeoutMs}ms）`);
+    }
     throw new Error('网络错误，请确认本地服务已启动。');
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
   }
 
   const text = await response.text();
@@ -4909,7 +6464,12 @@ function renderInlineMarkdown(text) {
 }
 
 function setStatus(text) {
-  els.fileStatus.textContent = String(text || '');
+  const target = els.fileStatus || document.getElementById('fileStatus') || null;
+  if (target) {
+    target.textContent = String(text || '');
+    return;
+  }
+  if (text) console.warn('[status]', text);
 }
 
 /* Phase-1 split: pure/shared utility helpers moved to /public/js/utils-core.js */
@@ -4970,6 +6530,29 @@ const lorebookRuntime = {
   filterScope: 'all',
   filterAvatarId: '',
   createScopeAvatarId: ''
+};
+
+const avatarScenarioRuntime = {
+  initialized: false,
+  draftItems: [],
+  pickerModalReady: false,
+  pickerUi: null,
+  editorModalReady: false,
+  editorUi: null,
+  editingScenarioId: '',
+  pendingSessionId: '',
+  pendingAvatarId: ''
+};
+
+const avatarGalleryRuntime = {
+  modalReady: false,
+  detailModalReady: false,
+  ui: null,
+  detailUi: null,
+  search: '',
+  tag: 'all',
+  selectedAvatarId: '',
+  source: ''
 };
 
 function getEmbeddingCapableProviders(type = '') {
@@ -5811,14 +7394,53 @@ function ensureContactsLorebookShortcut() {
   host.id = 'contactsLorebookShortcutRow';
   host.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 2px 10px 2px;';
   host.innerHTML = `
-    <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
-      <span aria-hidden="true">📚</span>
-      <span>世界观书</span>
-    </button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button id="contactsAvatarGalleryBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+        <span aria-hidden="true">🖼️</span>
+        <span>角色画廊</span>
+      </button>
+      <button id="contactsScenePickerBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+        <span aria-hidden="true">🎬</span>
+        <span>开场</span>
+      </button>
+      <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+        <span aria-hidden="true">📚</span>
+        <span>世界观书</span>
+      </button>
+    </div>
     <div id="contactsLorebookHint" class="muted" style="font-size:12px;line-height:1.3;text-align:right;min-width:0;"></div>
   `;
   els.contactsPane.insertBefore(host, els.contactList);
+  const galleryBtn = host.querySelector('#contactsAvatarGalleryBtn');
+  const sceneBtn = host.querySelector('#contactsScenePickerBtn');
   const openBtn = host.querySelector('#contactsLorebookOpenBtn');
+  if (galleryBtn) {
+    galleryBtn.addEventListener('click', () => {
+      openAvatarGalleryModal({
+        source: 'contacts',
+        selectedAvatarId: String(state.ui.activeContactAvatarId || '').trim()
+      });
+    });
+  }
+  if (sceneBtn) {
+    sceneBtn.addEventListener('click', () => {
+      const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+      const avatar = avatarId ? getAvatarById(avatarId) : null;
+      if (!avatar) {
+        alert('请先选择一个联系人。');
+        return;
+      }
+      const session = resolveContactSession(avatar.id, { createIfMissing: true, focus: true });
+      if (!session) return;
+      if (hasChatMessages(session)) {
+        alert('当前联系人会话已经有消息。请新建/清空会话后再选择开场场景。');
+        return;
+      }
+      session.scenePickerDismissed = false;
+      persistSessionsState();
+      maybeOfferAvatarOpeningScene(session, avatar);
+    });
+  }
   if (openBtn) {
     openBtn.addEventListener('click', () => {
       openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => {});
@@ -5827,18 +7449,45 @@ function ensureContactsLorebookShortcut() {
   return host;
 }
 
+function localizeContactsShortcutRow(host) {
+  if (!host) return;
+  const galleryBtn = host.querySelector('#contactsAvatarGalleryBtn');
+  const sceneBtn = host.querySelector('#contactsScenePickerBtn');
+  const lorebookBtn = host.querySelector('#contactsLorebookOpenBtn');
+  if (galleryBtn) {
+    const textEl = galleryBtn.querySelector('span:last-child');
+    if (textEl) textEl.textContent = uiText('角色画廊', 'Gallery');
+  }
+  if (sceneBtn) {
+    const textEl = sceneBtn.querySelector('span:last-child');
+    if (textEl) textEl.textContent = uiText('开场', 'Scene');
+  }
+  if (lorebookBtn) {
+    const textEl = lorebookBtn.querySelector('span:last-child');
+    if (textEl) textEl.textContent = uiText('世界观书', 'Lorebook');
+  }
+}
+
 function refreshContactsLorebookShortcut() {
   const host = ensureContactsLorebookShortcut();
   if (!host) return;
+  localizeContactsShortcutRow(host);
   const hint = host.querySelector('#contactsLorebookHint');
   if (!hint) return;
   const avatarId = String(state.ui.activeContactAvatarId || '').trim();
   if (!avatarId) {
-    hint.textContent = '管理全局/联系人词条';
+    hint.textContent = uiText('角色画廊 / 开场场景 / 联系人世界观词条', 'Gallery / opening scene / contact lorebook');
     return;
   }
   const avatar = getAvatarById(avatarId);
-  hint.textContent = avatar ? `当前联系人：${avatar.name}` : '管理联系人词条';
+  if (!avatar) {
+    hint.textContent = uiText('管理角色画廊与联系人词条', 'Manage gallery and contact lorebook entries');
+    return;
+  }
+  const sceneCount = getAvatarOpeningScenarios(avatar).length;
+  hint.textContent = isZhUiLanguage()
+    ? `当前联系人：${avatar.name} · 开场${sceneCount}个 · 可打开角色画廊`
+    : `Contact: ${avatar.name} · Scenes ${sceneCount} · Open gallery`;
 }
 
 function getLorebookSettingsSection() {
@@ -6077,8 +7726,12 @@ function renderLorebookList() {
 
   ui.listWrap.innerHTML = list.map((entry) => {
     const keywords = Array.isArray(entry.keywords) ? entry.keywords : [];
+    const tags = Array.isArray(entry.tags) ? entry.tags : [];
     const keywordText = keywords.length ? keywords.join(' / ') : (entry.alwaysOn ? '常驻（always-on）' : '无关键词');
     const preview = String(entry.content || '').trim().replace(/\s+/g, ' ');
+    const tagHtml = tags.length
+      ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">${tags.slice(0, 12).map((tag) => `<span style="font-size:12px;color:#1d4ed8;background:rgba(59,130,246,.08);padding:2px 8px;border-radius:999px;">${escapeHtml(tag)}</span>`).join('')}</div>`
+      : '';
     const scopeText = entry.scopeType === 'avatar'
       ? `联系人：${escapeHtml(resolveLorebookScopeName(entry.scopeType, entry.scopeId))}`
       : '全局词条';
@@ -6093,6 +7746,7 @@ function renderLorebookList() {
             </div>
             <div class="hint" style="margin-top:4px;">${scopeText} · 优先级 ${Number(entry.priority || 0)} · 更新于 ${escapeHtml(formatLorebookTime(entry.updatedAt))}</div>
             <div class="hint" style="margin-top:2px;">触发词：${escapeHtml(keywordText)}</div>
+            ${tagHtml}
             <div style="margin-top:8px;font-size:13px;line-height:1.45;color:#334155;white-space:pre-wrap;word-break:break-word;">${escapeHtml(preview.slice(0, 260))}${preview.length > 260 ? '…' : ''}</div>
           </div>
         </div>
@@ -6217,6 +7871,10 @@ function ensureLorebookEditorModal() {
             <div class="hint">非“常驻词条”时至少填写一个关键词；对最近几轮用户消息做包含匹配。</div>
           </div>
           <div class="toolui-row">
+            <label for="lorebookTagsInput">标签（可选）</label>
+            <input id="lorebookTagsInput" class="toolui-input" type="text" placeholder="世界观, 组织, 地点, 规则（逗号分隔）">
+          </div>
+          <div class="toolui-row">
             <label for="lorebookContentInput">词条内容 *</label>
             <textarea id="lorebookContentInput" class="toolui-textarea" rows="9" placeholder="写入世界观设定、关系约束、禁忌规则、地点背景等。命中后会注入到聊天上下文。"></textarea>
           </div>
@@ -6241,6 +7899,7 @@ function ensureLorebookEditorModal() {
     enabled: backdrop.querySelector('#lorebookEnabledInput'),
     alwaysOn: backdrop.querySelector('#lorebookAlwaysOnInput'),
     keywords: backdrop.querySelector('#lorebookKeywordsInput'),
+    tags: backdrop.querySelector('#lorebookTagsInput'),
     content: backdrop.querySelector('#lorebookContentInput'),
     status: backdrop.querySelector('#lorebookEditorStatus'),
     saveBtn: backdrop.querySelector('#lorebookSaveBtn')
@@ -6301,6 +7960,7 @@ function fillLorebookEditorModal(entry, opts = {}) {
   ui.enabled.checked = target ? target.enabled !== false : true;
   ui.alwaysOn.checked = target ? Boolean(target.alwaysOn) : false;
   ui.keywords.value = target && Array.isArray(target.keywords) ? target.keywords.join('\n') : '';
+  ui.tags.value = target && Array.isArray(target.tags) ? target.tags.join(', ') : '';
   ui.content.value = target ? String(target.content || '') : '';
   ui.backdrop.querySelector('#lorebookEditorTitle').textContent = mode === 'edit' ? '编辑世界观书词条' : '新增世界观书词条';
   setToolUiStatus(ui.status, '', '');
@@ -6324,6 +7984,13 @@ function splitLorebookKeywordsInput(text) {
     .filter(Boolean);
 }
 
+function splitLorebookTagsInput(text) {
+  return String(text || '')
+    .split(/[\r\n,，;；|]+/g)
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+}
+
 async function saveLorebookEditorModal() {
   const ui = ensureLorebookEditorModal();
   if (lorebookRuntime.saving) return;
@@ -6336,6 +8003,7 @@ async function saveLorebookEditorModal() {
     enabled: Boolean(ui.enabled.checked),
     alwaysOn: Boolean(ui.alwaysOn.checked),
     keywords: splitLorebookKeywordsInput(ui.keywords.value),
+    tags: splitLorebookTagsInput(ui.tags.value),
     content: String(ui.content.value || '').trim()
   };
 
@@ -6413,7 +8081,9 @@ async function openSettingsSection(section) {
     s.classList.toggle('hidden', s.dataset.section !== section);
   });
   if (section === 'personas') {
+    ensureAvatarScenarioManagerUi();
     renderAvatarList();
+    renderAvatarScenarioDraftList();
     renderAvatarSelectPanel();
   }
   if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
@@ -7603,7 +9273,8 @@ async function refreshMcpQuickPanel() {
 
 function updateMcpBtnBadge(count) {
   if (!els.toggleMcpBtn) return;
-  els.toggleMcpBtn.textContent = count > 0 ? `🔌 MCP (${count})` : '🔌 MCP';
+  const label = 'MCP';
+  els.toggleMcpBtn.textContent = count > 0 ? `🔌 ${label} (${count})` : `🔌 ${label}`;
   els.toggleMcpBtn.classList.toggle('active-tool', count > 0);
 }
 
@@ -8229,7 +9900,8 @@ async function refreshKbQuickPanel() {
 
 function updateKbBtnBadge(count) {
   if (!els.toggleKbBtn) return;
-  els.toggleKbBtn.textContent = count > 0 ? ` 📚 知识库 (${count})` : ' 📚 知识库';
+  const label = uiText('知识库', 'Knowledge');
+  els.toggleKbBtn.textContent = count > 0 ? ` 📚 ${label} (${count})` : ` 📚 ${label}`;
   els.toggleKbBtn.classList.toggle('active-tool', count > 0);
 }
 

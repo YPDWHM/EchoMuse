@@ -30,6 +30,7 @@ const MIN_CN_CHARS = Number(process.env.MIN_CN_CHARS || 800);
 const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 60000);
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 8 * 60 * 1000);
 const OLLAMA_CHAT_TIMEOUT_MS = Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 12 * 60 * 1000);
+const TRANSLATE_TIMEOUT_MS = Number(process.env.TRANSLATE_TIMEOUT_MS || 120 * 1000);
 const TRANSLATE_CACHE_TTL_MS = Math.max(0, Number(process.env.TRANSLATE_CACHE_TTL_MS || 30 * 60 * 1000));
 const TRANSLATE_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.TRANSLATE_CACHE_MAX_ITEMS || 500));
 const KB_EMBED_QUERY_CACHE_TTL_MS = Math.max(0, Number(process.env.KB_EMBED_QUERY_CACHE_TTL_MS || 5 * 60 * 1000));
@@ -346,7 +347,7 @@ async function fetchRuntime(url, options) {
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-access-token, Authorization, x-client-id');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-access-token, Authorization, x-client-id, x-client-proxy-config');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
@@ -1120,6 +1121,28 @@ function normalizeLorebookKeywords(raw) {
   return out;
 }
 
+function splitLorebookTags(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') return raw.split(/[\r\n,，;；|]+/g);
+  return [];
+}
+
+function normalizeLorebookTags(raw) {
+  const out = [];
+  const seen = new Set();
+  for (const item of splitLorebookTags(raw)) {
+    const tag = String(item || '').trim().replace(/\s+/g, ' ');
+    if (!tag) continue;
+    const clipped = tag.slice(0, 40);
+    const key = clipped.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clipped);
+    if (out.length >= 32) break;
+  }
+  return out;
+}
+
 function normalizeLorebookEntry(raw, existing) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const prev = existing && typeof existing === 'object' ? existing : {};
@@ -1134,6 +1157,7 @@ function normalizeLorebookEntry(raw, existing) {
     ? String(src.scopeId ?? prev.scopeId ?? '').trim().slice(0, 120)
     : '';
   const keywords = normalizeLorebookKeywords(src.keywords ?? prev.keywords ?? []);
+  const tags = normalizeLorebookTags(src.tags ?? prev.tags ?? []);
   const enabled = typeof src.enabled === 'boolean' ? src.enabled : (prev.enabled !== false);
   const alwaysOn = typeof src.alwaysOn === 'boolean' ? src.alwaysOn : Boolean(prev.alwaysOn);
   const priority = clampInt(src.priority, 0, 1000, clampInt(prev.priority, 0, 1000, 50));
@@ -1144,6 +1168,7 @@ function normalizeLorebookEntry(raw, existing) {
     title: title || 'Untitled Lorebook Entry',
     content: content.slice(0, 12000),
     keywords,
+    tags,
     enabled,
     alwaysOn,
     priority,
@@ -1258,7 +1283,8 @@ function buildLorebookInjectedContext({ recentMessages, avatar } = {}) {
       scopeId: entry.scopeId || '',
       priority: Number(entry.priority || 0) || 0,
       alwaysOn: Boolean(entry.alwaysOn),
-      matchedKeywords: item.matchedKeywords
+      matchedKeywords: item.matchedKeywords,
+      tags: Array.isArray(entry.tags) ? entry.tags : []
     });
   }
   if (!hits.length) return { context: '', hits: [] };
@@ -1274,6 +1300,7 @@ app.get('/api/lorebooks', (req, res) => {
       title: entry.title,
       content: entry.content,
       keywords: Array.isArray(entry.keywords) ? entry.keywords : [],
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
       enabled: entry.enabled !== false,
       alwaysOn: Boolean(entry.alwaysOn),
       priority: Number(entry.priority || 0) || 0,
@@ -2925,8 +2952,10 @@ app.post('/api/translate', async (req, res) => {
     const chatModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
     const targetLang = normalizeChatPrefLang(req.body?.targetLang, 'zh-CN');
     const fastMode = Boolean(req.body?.fastMode);
+    const allowLocalFallback = req.body?.allowLocalFallback !== false;
     const provider = (providerId && getProvider(providerId)) || getActiveProvider();
     const model = chatModel || (provider.models && provider.models[0]) || OLLAMA_MODEL;
+    const translateTimeoutMs = getTranslateRequestTimeoutMs(trimmed, provider, fastMode);
     const cacheKey = buildTranslateCacheKey({ text: trimmed, targetLang, provider, model, fastMode });
     const cached = getCachedTranslateResult(cacheKey);
     if (cached) {
@@ -2948,23 +2977,30 @@ app.post('/api/translate', async (req, res) => {
         let fallbackUsed = false;
         let primaryError = null;
         try {
-          content = await translateAvatarReplyContent(trimmed, pref, provider, model);
+          content = await Promise.race([
+            translateAvatarReplyContent(trimmed, pref, provider, model),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('翻译超时')), translateTimeoutMs))
+          ]);
         } catch (error) {
           primaryError = error;
         }
 
         const providerIsOllama = !provider || provider.type === 'ollama';
         const shouldFallbackToLocal =
+          allowLocalFallback &&
           !providerIsOllama &&
           (primaryError || (!fastMode && sameAsSource(content) && likelyNeedsTranslation));
 
         if (shouldFallbackToLocal) {
           try {
+            // Quick Ollama reachability check before attempting fallback
+            await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/tags`, { method: 'GET' }, 3000);
             const localProvider = defaultOllamaProvider();
             content = await translateAvatarReplyContent(trimmed, pref, localProvider, OLLAMA_MODEL);
             fallbackUsed = true;
           } catch (fallbackError) {
-            throw primaryError || fallbackError;
+            // Ollama unreachable or failed — use primary result if available
+            if (primaryError && !content) throw primaryError;
           }
         } else if (primaryError) {
           throw primaryError;
@@ -3727,6 +3763,19 @@ function buildTranslateCacheKey({ text, targetLang, provider, model, fastMode })
   return [targetLang || 'zh-CN', model || '', providerKey, fastMode ? 'fast' : 'full', stableSha1(text || '')].join('|');
 }
 
+function getTranslateRequestTimeoutMs(text, provider, fastMode) {
+  const src = String(text || '');
+  const p = provider || getActiveProvider();
+  const providerType = String(p && p.type || '');
+  const isLocalOllama = providerType === 'ollama';
+  const base = Math.max(1000, Number(TRANSLATE_TIMEOUT_MS || 15000) || 15000);
+  const perCharMs = isLocalOllama ? (fastMode ? 22 : 36) : (fastMode ? 6 : 10);
+  const floorMs = isLocalOllama ? (fastMode ? 45000 : 90000) : (fastMode ? 22000 : 35000);
+  const capMs = isLocalOllama ? 240000 : 120000;
+  const scaled = base + Math.min(capMs, src.length * perCharMs);
+  return Math.max(floorMs, Math.min(capMs, scaled));
+}
+
 function pruneTranslateCache(now = Date.now()) {
   if (TRANSLATE_CACHE_TTL_MS <= 0 || TRANSLATE_CACHE_MAX_ITEMS <= 0) {
     if (translateResultCache.size) translateResultCache.clear();
@@ -3813,6 +3862,100 @@ async function llmChatStream(messages, options, signal, provider, model) {
   return ollamaChatStream(messages, options, signal, m);
 }
 
+async function llmChatGenerate(messages, options = {}, provider, model) {
+  const p = provider || getActiveProvider();
+  const m = model || (p.models && p.models[0]) || OLLAMA_MODEL;
+  const temperature = typeof (p.temperature ?? options.temperature) === 'number' ? (p.temperature ?? options.temperature) : 0.1;
+  const maxTokens = p.maxTokens || options.maxTokens || 2048;
+
+  if (isAnthropic(p)) {
+    let systemText = '';
+    const apiMessages = [];
+    for (const msg of (Array.isArray(messages) ? messages : [])) {
+      if (!msg || typeof msg !== 'object') continue;
+      if (msg.role === 'system') systemText += (systemText ? '\n\n' : '') + String(msg.content || '');
+      else apiMessages.push({ role: msg.role, content: String(msg.content || '') });
+    }
+    const body = {
+      model: m,
+      max_tokens: maxTokens,
+      messages: apiMessages,
+      temperature
+    };
+    if (systemText) body.system = systemText;
+    const res = await fetchWithTimeout(`${p.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': p.apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Anthropic translate failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const content = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+    return String(content || '').trim();
+  }
+
+  if (isOpenAI(p)) {
+    const body = {
+      model: m,
+      messages,
+      stream: false,
+      temperature,
+      max_tokens: maxTokens
+    };
+    if (options.skipReasoning) {
+      body.reasoning_effort = 'none';
+    }
+    const res = await fetchWithTimeout(`${p.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${p.apiKey}`
+      },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`OpenAI-compatible translate failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    if (typeof content === 'string') return content.trim();
+    if (Array.isArray(content)) {
+      return content.map((part) => (typeof part === 'string' ? part : String(part?.text || ''))).join('').trim();
+    }
+    return '';
+  }
+
+  const res = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: m,
+      messages,
+      stream: false,
+      options: {
+        temperature,
+        top_p: typeof options.topP === 'number' ? options.topP : 0.9,
+        num_predict: Math.max(256, Math.min(8192, Number(maxTokens || 2048) || 2048))
+      }
+    })
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Ollama translate failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const content = data.message?.content || data.response || '';
+  return String(content || '').trim();
+}
+
 async function translateAvatarReplyContent(text, pref = {}, provider, model) {
   const source = String(text || '').trim();
   if (!source) return '';
@@ -3821,25 +3964,54 @@ async function translateAvatarReplyContent(text, pref = {}, provider, model) {
   const translateTo = normalizeChatPrefLang(pref.translateTo, uiLanguage);
   const langName = chatPrefLangNameEn(translateTo);
 
-  const prompt = [
-    `Translate the following roleplay assistant reply into ${langName} (${translateTo}).`,
-    'Requirements:',
-    '- Keep the same persona tone and emotional style.',
-    '- Preserve Markdown structure, bullet points, and LaTeX formulas if any.',
-    '- Do not add explanations, notes, prefixes, or bilingual output.',
-    '- Output only the translated reply text.',
-    '',
-    'Reply to translate:',
-    '<<<BEGIN>>>',
-    source,
-    '<<<END>>>'
-  ].join('\n');
+  const messages = [
+    {
+      role: 'system',
+      content: [
+        'You are a translation engine used only for UI display overlays.',
+        `Translate the user-provided roleplay assistant reply into ${langName} (${translateTo}).`,
+        'Keep persona tone, wording intensity, and emotional style.',
+        'Preserve Markdown structure, bullet points, line breaks, and LaTeX formulas.',
+        'Do not add explanations, notes, prefixes, or bilingual output.',
+        'Do not use <think> tags or reasoning blocks.',
+        'Respond immediately with the translated text only.'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: ['<<<BEGIN>>>', source, '<<<END>>>'].join('\n')
+    }
+  ];
 
-  let translated = await llmGenerate(prompt, 0.1, provider, model);
+  let translated = '';
+  try {
+    translated = await llmChatGenerate(messages, {
+      temperature: 0.05,
+      maxTokens: Math.max(256, Math.min(8192, source.length * 2 + 300)),
+      skipReasoning: true
+    }, provider, model);
+  } catch (_) {
+    // fallback to legacy single-prompt generation for providers/models that behave better there
+    const prompt = [
+      `Translate the following roleplay assistant reply into ${langName} (${translateTo}).`,
+      'Requirements:',
+      '- Keep the same persona tone and emotional style.',
+      '- Preserve Markdown structure, bullet points, and LaTeX formulas if any.',
+      '- Do not add explanations, notes, prefixes, or bilingual output.',
+      '- Output only the translated reply text.',
+      '',
+      'Reply to translate:',
+      '<<<BEGIN>>>',
+      source,
+      '<<<END>>>'
+    ].join('\n');
+    translated = await llmGenerate(prompt, 0.1, provider, model);
+  }
   translated = String(translated || '')
     .replace(/<think>[\s\S]*?<\/think>/g, '')
     .replace(/^```[a-zA-Z]*\s*/,'')
     .replace(/```$/,'')
+    .replace(/^(Translation|译文|翻译)\s*[:：]\s*/i, '')
     .trim();
   return translated || source;
 }
@@ -4306,9 +4478,9 @@ async function ollamaGenerate(prompt, temperature, model) {
   return payload.response.trim();
 }
 
-async function fetchWithTimeout(url, options) {
+async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs || OLLAMA_TIMEOUT_MS);
   try {
     return await fetchRuntime(url, { ...options, signal: controller.signal });
   } finally {

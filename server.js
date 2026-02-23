@@ -37,6 +37,8 @@ const KB_EMBED_QUERY_CACHE_MAX_ITEMS = Math.max(0, Number(process.env.KB_EMBED_Q
 const KB_EMBED_VECTOR_WEIGHT = Math.max(0, Number(process.env.KB_EMBED_VECTOR_WEIGHT || 2.2));
 const KB_EMBED_VECTOR_MIN_SCORE = Math.max(-1, Math.min(1, Number(process.env.KB_EMBED_VECTOR_MIN_SCORE || 0.15)));
 const KB_EMBED_BATCH_SIZE = Math.max(1, Math.min(64, Number(process.env.KB_EMBED_BATCH_SIZE || 16)));
+const LOREBOOK_MAX_INJECT_CHARS = Math.max(200, Number(process.env.LOREBOOK_MAX_INJECT_CHARS || 2800));
+const LOREBOOK_MAX_HITS = Math.max(1, Math.min(24, Number(process.env.LOREBOOK_MAX_HITS || 8)));
 const TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT = Math.max(10, Number(process.env.TEAM_SHARING_MEMBER_RATE_PER_MIN_DEFAULT || 120));
 const CHAT_THINK = process.env.CHAT_THINK !== '0';
 const CHAT_CTX_LIMIT = Number(process.env.CHAT_CTX_LIMIT || 3000);
@@ -111,6 +113,7 @@ function loadAppConfig() {
         activeProviderId: parsed.activeProviderId || parsed.providers[0]?.id || 'ollama-default',
         mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : [],
         knowledgeBases: Array.isArray(parsed.knowledgeBases) ? parsed.knowledgeBases : [],
+        lorebooks: Array.isArray(parsed.lorebooks) ? parsed.lorebooks : [],
         teamSharing: normalizeTeamSharingConfig(parsed.teamSharing || {})
       };
     }
@@ -125,10 +128,10 @@ function loadAppConfig() {
       });
       const providers = [defaultOllamaProvider()];
       if (old.type === 'openai_compatible') providers.push(migrated);
-      return { providers, activeProviderId: migrated.id, mcpServers: [], knowledgeBases: [], teamSharing: normalizeTeamSharingConfig({}) };
+      return { providers, activeProviderId: migrated.id, mcpServers: [], knowledgeBases: [], lorebooks: [], teamSharing: normalizeTeamSharingConfig({}) };
     }
   } catch {}
-  return { providers: [defaultOllamaProvider()], activeProviderId: 'ollama-default', mcpServers: [], knowledgeBases: [], teamSharing: normalizeTeamSharingConfig({}) };
+  return { providers: [defaultOllamaProvider()], activeProviderId: 'ollama-default', mcpServers: [], knowledgeBases: [], lorebooks: [], teamSharing: normalizeTeamSharingConfig({}) };
 }
 
 function saveAppConfig() {
@@ -1090,6 +1093,253 @@ app.get('/api/mcp-tools', async (req, res) => {
 });
 
 /* ── Knowledge Base CRUD ── */
+
+/* Lorebook (RP trigger entries) */
+
+const LOREBOOK_SCOPE_TYPES = new Set(['global', 'avatar']);
+
+function splitLorebookKeywords(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') return raw.split(/[\r\n,，;；]+/g);
+  return [];
+}
+
+function normalizeLorebookKeywords(raw) {
+  const out = [];
+  const seen = new Set();
+  for (const item of splitLorebookKeywords(raw)) {
+    const word = String(item || '').trim().replace(/\s+/g, ' ');
+    if (!word) continue;
+    const clipped = word.slice(0, 80);
+    const key = clipped.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clipped);
+    if (out.length >= 64) break;
+  }
+  return out;
+}
+
+function normalizeLorebookEntry(raw, existing) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  const idRaw = String(src.id || prev.id || '').trim();
+  const id = idRaw || `lb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (!id) return null;
+  const title = String(src.title ?? prev.title ?? '').trim().slice(0, 120);
+  const content = String(src.content ?? prev.content ?? '').replace(/\r/g, '').trim();
+  const scopeTypeCandidate = String(src.scopeType ?? prev.scopeType ?? 'global').trim();
+  const scopeType = LOREBOOK_SCOPE_TYPES.has(scopeTypeCandidate) ? scopeTypeCandidate : 'global';
+  const scopeId = scopeType === 'avatar'
+    ? String(src.scopeId ?? prev.scopeId ?? '').trim().slice(0, 120)
+    : '';
+  const keywords = normalizeLorebookKeywords(src.keywords ?? prev.keywords ?? []);
+  const enabled = typeof src.enabled === 'boolean' ? src.enabled : (prev.enabled !== false);
+  const alwaysOn = typeof src.alwaysOn === 'boolean' ? src.alwaysOn : Boolean(prev.alwaysOn);
+  const priority = clampInt(src.priority, 0, 1000, clampInt(prev.priority, 0, 1000, 50));
+  const createdAt = Number(prev.createdAt || src.createdAt) || Date.now();
+  const updatedAt = Number(src.updatedAt || prev.updatedAt) || Date.now();
+  return {
+    id: id.slice(0, 80),
+    title: title || 'Untitled Lorebook Entry',
+    content: content.slice(0, 12000),
+    keywords,
+    enabled,
+    alwaysOn,
+    priority,
+    scopeType,
+    scopeId,
+    createdAt,
+    updatedAt
+  };
+}
+
+function ensureLorebooks() {
+  if (!Array.isArray(appConfig.lorebooks)) {
+    appConfig.lorebooks = [];
+    return appConfig.lorebooks;
+  }
+  appConfig.lorebooks = appConfig.lorebooks
+    .map((item) => normalizeLorebookEntry(item))
+    .filter(Boolean);
+  return appConfig.lorebooks;
+}
+
+function lorebookScopeMatches(entry, ctx = {}) {
+  if (!entry || entry.enabled === false) return false;
+  if (entry.scopeType === 'global') return true;
+  if (entry.scopeType === 'avatar') {
+    const avatarId = String(ctx.avatarId || '').trim();
+    return Boolean(avatarId) && avatarId === String(entry.scopeId || '').trim();
+  }
+  return false;
+}
+
+function collectLorebookTriggerTexts(recentMessages) {
+  const src = Array.isArray(recentMessages) ? recentMessages : [];
+  const userTexts = src
+    .filter((m) => m && m.role === 'user')
+    .slice(-4)
+    .map((m) => String(m.content || '').trim())
+    .filter(Boolean);
+  if (userTexts.length) return userTexts;
+  return src
+    .slice(-2)
+    .map((m) => String((m && m.content) || '').trim())
+    .filter(Boolean);
+}
+
+function matchLorebookKeywords(entry, triggerTexts) {
+  const keywords = Array.isArray(entry.keywords) ? entry.keywords : [];
+  if (!keywords.length) return [];
+  const hay = (Array.isArray(triggerTexts) ? triggerTexts : []).map((t) => String(t || '').toLowerCase());
+  const matched = [];
+  for (const keyword of keywords) {
+    const kw = String(keyword || '').trim();
+    if (!kw) continue;
+    const needle = kw.toLowerCase();
+    if (!needle) continue;
+    if (hay.some((text) => text.includes(needle))) {
+      matched.push(kw);
+      if (matched.length >= 8) break;
+    }
+  }
+  return matched;
+}
+
+function buildLorebookInjectedContext({ recentMessages, avatar } = {}) {
+  const entries = ensureLorebooks();
+  if (!entries.length) return { context: '', hits: [] };
+
+  const avatarId = typeof avatar?.id === 'string' ? avatar.id.trim() : '';
+  const triggerTexts = collectLorebookTriggerTexts(recentMessages);
+  const candidates = [];
+  for (const entry of entries) {
+    if (!lorebookScopeMatches(entry, { avatarId })) continue;
+    const content = String(entry.content || '').trim();
+    if (!content) continue;
+    let matchedKeywords = [];
+    if (!entry.alwaysOn) {
+      matchedKeywords = matchLorebookKeywords(entry, triggerTexts);
+      if (!matchedKeywords.length) continue;
+    }
+    candidates.push({ entry, matchedKeywords });
+  }
+  if (!candidates.length) return { context: '', hits: [] };
+
+  candidates.sort((a, b) => {
+    if (Boolean(b.entry.alwaysOn) !== Boolean(a.entry.alwaysOn)) return Number(Boolean(b.entry.alwaysOn)) - Number(Boolean(a.entry.alwaysOn));
+    if ((b.entry.priority || 0) !== (a.entry.priority || 0)) return (b.entry.priority || 0) - (a.entry.priority || 0);
+    return (b.entry.updatedAt || 0) - (a.entry.updatedAt || 0);
+  });
+
+  let usedChars = 0;
+  const lines = [
+    '[Lorebook / Worldbook Triggered Entries]',
+    'Use these RP facts/settings as high-priority context for this reply. Keep role consistency.'
+  ];
+  const hits = [];
+  for (const item of candidates) {
+    if (hits.length >= LOREBOOK_MAX_HITS) break;
+    const entry = item.entry;
+    const remain = LOREBOOK_MAX_INJECT_CHARS - usedChars;
+    if (remain < 120) break;
+    const clipped = String(entry.content || '').trim().slice(0, Math.min(remain, 1200));
+    if (!clipped.trim()) continue;
+    const scopeLabel = entry.scopeType === 'avatar' ? `avatar:${entry.scopeId || '-'}` : 'global';
+    const kwLabel = entry.alwaysOn ? 'always-on' : `kw=${item.matchedKeywords.join('|')}`;
+    lines.push(`- ${entry.title} [${scopeLabel}] p=${entry.priority} ${kwLabel}`);
+    lines.push(clipped);
+    usedChars += clipped.length;
+    hits.push({
+      id: entry.id,
+      title: entry.title,
+      scopeType: entry.scopeType,
+      scopeId: entry.scopeId || '',
+      priority: Number(entry.priority || 0) || 0,
+      alwaysOn: Boolean(entry.alwaysOn),
+      matchedKeywords: item.matchedKeywords
+    });
+  }
+  if (!hits.length) return { context: '', hits: [] };
+  return { context: lines.join('\n'), hits };
+}
+
+app.get('/api/lorebooks', (req, res) => {
+  const list = ensureLorebooks()
+    .slice()
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .map((entry) => ({
+      id: entry.id,
+      title: entry.title,
+      content: entry.content,
+      keywords: Array.isArray(entry.keywords) ? entry.keywords : [],
+      enabled: entry.enabled !== false,
+      alwaysOn: Boolean(entry.alwaysOn),
+      priority: Number(entry.priority || 0) || 0,
+      scopeType: entry.scopeType || 'global',
+      scopeId: entry.scopeId || '',
+      createdAt: Number(entry.createdAt || 0) || 0,
+      updatedAt: Number(entry.updatedAt || 0) || 0
+    }));
+  res.json({
+    lorebooks: list,
+    stats: {
+      total: list.length,
+      enabled: list.filter((e) => e.enabled !== false).length,
+      global: list.filter((e) => e.scopeType === 'global').length,
+      avatar: list.filter((e) => e.scopeType === 'avatar').length
+    }
+  });
+});
+
+app.post('/api/lorebooks', (req, res) => {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const title = String(body.title || '').trim();
+  const content = String(body.content || '').trim();
+  if (!title) return res.status(400).json({ error: 'Bad Request', message: 'Lorebook title is required.' });
+  if (!content) return res.status(400).json({ error: 'Bad Request', message: 'Lorebook content is required.' });
+
+  const list = ensureLorebooks();
+  const editId = String(body.id || '').trim();
+  const existing = editId ? list.find((e) => e.id === editId) : null;
+  const entry = normalizeLorebookEntry({ ...body, title, content }, existing || undefined);
+  if (!entry) return res.status(400).json({ error: 'Bad Request', message: 'Invalid lorebook entry.' });
+  if (entry.scopeType === 'avatar' && !entry.scopeId) {
+    return res.status(400).json({ error: 'Bad Request', message: 'Avatar-scoped lorebook entry requires a contact id.' });
+  }
+  if (!entry.alwaysOn && (!Array.isArray(entry.keywords) || !entry.keywords.length)) {
+    return res.status(400).json({ error: 'Bad Request', message: 'Please provide keywords or enable always-on.' });
+  }
+  if (existing) {
+    Object.assign(existing, entry, { createdAt: existing.createdAt || entry.createdAt, updatedAt: Date.now() });
+  } else {
+    entry.createdAt = entry.createdAt || Date.now();
+    entry.updatedAt = Date.now();
+    list.unshift(entry);
+  }
+  if (!saveAppConfig()) return res.status(500).json({ error: 'SaveFailed' });
+  res.json({ ok: true, entry });
+});
+
+app.post('/api/lorebooks/:id/toggle', (req, res) => {
+  const list = ensureLorebooks();
+  const entry = list.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Not Found' });
+  entry.enabled = !(entry.enabled !== false);
+  entry.updatedAt = Date.now();
+  saveAppConfig();
+  res.json({ ok: true, enabled: entry.enabled });
+});
+
+app.delete('/api/lorebooks/:id', (req, res) => {
+  const list = ensureLorebooks();
+  const idx = list.findIndex((e) => e.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ error: 'Not Found' });
+  list.splice(idx, 1);
+  saveAppConfig();
+  res.json({ ok: true });
+});
 
 const KB_RAG_DEFAULTS = Object.freeze({
   chunkSize: 700,
@@ -2294,6 +2544,9 @@ app.post('/api/chat', async (req, res) => {
       ? Math.max(0.1, Math.min(1, Number(req.body.topP)))
       : null;
     const avatar = req.body?.avatar || null;
+    if (avatar && typeof avatar === 'object' && typeof avatar.id === 'string') {
+      avatar.id = avatar.id.trim().slice(0, 120);
+    }
     const groupContext = req.body?.groupContext || null;
     const searchResults = Array.isArray(req.body?.searchResults) ? req.body.searchResults : [];
     const knowledgeBaseIds = Array.isArray(req.body?.knowledgeBaseIds) ? req.body.knowledgeBaseIds : [];
@@ -2368,6 +2621,14 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
+    const lorebookPack = llmMessages.length
+      ? buildLorebookInjectedContext({ recentMessages: recent, avatar })
+      : { context: '', hits: [] };
+    const lorebookHitsForSse = Array.isArray(lorebookPack.hits) ? lorebookPack.hits : [];
+    if (lorebookPack.context && llmMessages.length && llmMessages[0].role === 'system') {
+      llmMessages[0].content += `\n\n${lorebookPack.context}`;
+    }
+
     /* 联网搜索结果注入 */
     if (llmMessages.length && llmMessages[0].role === 'system') {
       llmMessages[0].content += `\n\n${buildChatPreferenceSystemNote(effectiveChatPrefs, { isAvatarMode })}`;
@@ -2402,6 +2663,9 @@ app.post('/api/chat', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
         res.setHeader('X-Accel-Buffering', 'no');
+        if (lorebookHitsForSse.length) {
+          res.write(`data: ${JSON.stringify({ lorebook_hits: lorebookHitsForSse })}\n\n`);
+        }
 
         const toolOpts = {
           temperature: resolvedTemperature,
@@ -2486,6 +2750,9 @@ app.post('/api/chat', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    if (lorebookHitsForSse.length) {
+      res.write(`data: ${JSON.stringify({ lorebook_hits: lorebookHitsForSse })}\n\n`);
+    }
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), OLLAMA_CHAT_TIMEOUT_MS);

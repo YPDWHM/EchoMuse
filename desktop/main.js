@@ -296,7 +296,11 @@ async function bootDesktopApp() {
     await waitForServerReady(baseUrl, 25000);
     if (mainWindow && !mainWindow.isDestroyed()) {
       try {
-        await mainWindow.webContents.session.clearCache();
+        const session = mainWindow.webContents.session;
+        await session.clearCache();
+        await session.clearStorageData({
+          storages: ['serviceworkers', 'cachestorage']
+        });
       } catch (_) {
         // Ignore cache clear failures; load with nonce below still helps.
       }

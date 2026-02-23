@@ -1191,6 +1191,9 @@ function boot() {
   loadSessionsState();
   loadAvatars();
   bindEvents();
+  ensurePersonasSettingsSectionNav();
+  ensureTeamSharingSettingsSection();
+  ensureLorebookSettingsSection();
   applySettings();
   syncSettingsUI();
   registerServiceWorker();
@@ -1668,6 +1671,13 @@ function bindEvents() {
   /* Contact list click */
   if (els.contactList) {
     els.contactList.addEventListener('click', (e) => {
+      const lorebookBtn = e.target.closest('[data-action="open-contact-lorebook"]');
+      if (lorebookBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        openLorebookSettingsForAvatar(lorebookBtn.dataset.avatarId || '', { create: true }).catch(() => {});
+        return;
+      }
       const item = e.target.closest('[data-action="open-contact"]');
       if (!item) return;
       openContact(item.dataset.avatarId || '');
@@ -1737,7 +1747,12 @@ function bindEvents() {
     els.settingsPanel.querySelectorAll('.settings-section').forEach((s) => {
       s.classList.toggle('hidden', s.dataset.section !== section);
     });
+    if (section === 'personas') {
+      renderAvatarList();
+      renderAvatarSelectPanel();
+    }
     if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
+    if (section === 'lorebook') loadLorebookList();
   });
 
   els.saveTokenBtn.addEventListener('click', () => {
@@ -2413,6 +2428,20 @@ function clearToolMode() {
 
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
+  const isDesktop = Boolean(window.EchoMuseDesktop && window.EchoMuseDesktop.isDesktop);
+  if (isDesktop) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.getRegistrations()
+        .then((regs) => Promise.all((regs || []).map((reg) => reg.unregister().catch(() => false))))
+        .catch(() => {});
+      if (window.caches && typeof window.caches.keys === 'function') {
+        caches.keys()
+          .then((keys) => Promise.all((keys || []).map((key) => caches.delete(key))))
+          .catch(() => {});
+      }
+    });
+    return;
+  }
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
@@ -2690,7 +2719,11 @@ function switchSidebarTab(tab) {
   if (els.sessionsPane) els.sessionsPane.classList.toggle('hidden', tab !== 'sessions');
   if (els.contactsPane) els.contactsPane.classList.toggle('hidden', tab !== 'contacts');
   if (tab === 'sessions') renderSessionList();
-  if (tab === 'contacts') renderContactList();
+  if (tab === 'contacts') {
+    ensureContactsLorebookShortcut();
+    refreshContactsLorebookShortcut();
+    renderContactList();
+  }
 }
 
 function renderContactList() {
@@ -2700,6 +2733,7 @@ function renderContactList() {
   const activeAvatarId = (state.ui.activeContactAvatarId || (activeSession && activeSession.avatarId) || '');
   if (!avatars.length) {
     els.contactList.innerHTML = '<div class="muted">还没有联系人，导入酒馆卡片或在设置中创建角色</div>';
+    refreshContactsLorebookShortcut();
     return;
   }
   els.contactList.innerHTML = avatars.map((a) => {
@@ -2713,15 +2747,27 @@ function renderContactList() {
     const badge = isGroup ? '<span class="contact-badge">群组</span>' : '';
     const isActive = activeAvatarId && a.id === activeAvatarId;
     return `
-      <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}">
-        <span class="contact-icon">${iconHtml}</span>
-        <div class="contact-info">
-          <div class="contact-name">${escapeHtml(a.name)} ${badge}</div>
-          <div class="contact-preview">${escapeHtml(preview)}</div>
-        </div>
-      </button>
+      <div class="contact-item-row" style="display:flex;align-items:stretch;gap:8px;">
+        <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}" style="flex:1;min-width:0;">
+          <span class="contact-icon">${iconHtml}</span>
+          <div class="contact-info">
+            <div class="contact-name">${escapeHtml(a.name)} ${badge}</div>
+            <div class="contact-preview">${escapeHtml(preview)}</div>
+          </div>
+        </button>
+        <button
+          class="btn ghost contact-lorebook-shortcut-btn"
+          data-action="open-contact-lorebook"
+          data-avatar-id="${a.id}"
+          type="button"
+          title="打开 ${escapeHtml(a.name)} 的世界观书（Lorebook）"
+          aria-label="打开 ${escapeHtml(a.name)} 的世界观书"
+          style="padding:0 10px;min-width:44px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-size:18px;"
+        >📚</button>
+      </div>
     `;
   }).join('');
+  refreshContactsLorebookShortcut();
 }
 
 function openContact(avatarId) {
@@ -2733,6 +2779,7 @@ function openContact(avatarId) {
   if (state.ui.sidebarTab === 'contacts') {
     renderContactList();
   }
+  refreshContactsLorebookShortcut();
   if (els.chatInput) els.chatInput.focus();
 }
 
@@ -3153,9 +3200,29 @@ function renderMessages() {
         return `<details class="tool-call-indicator ${cls}"><summary>${icon} ${escapeHtml(tc.name)}</summary>${resultHtml}</details>`;
       }).join('');
     }
+    let lorebookHitsHtml = '';
+    if (role === 'assistant' && Array.isArray(message.lorebookHits) && message.lorebookHits.length) {
+      const hitItems = message.lorebookHits.slice(0, 8).map((hit) => {
+        const title = escapeHtml(String(hit && hit.title || '词条'));
+        const scopeType = String(hit && hit.scopeType || 'global');
+        const scopeId = String(hit && hit.scopeId || '');
+        const matched = Array.isArray(hit && hit.matchedKeywords) ? hit.matchedKeywords : [];
+        const matchedText = matched.length ? ` · 关键词：${escapeHtml(matched.join(' / '))}` : '';
+        const scopeText = scopeType === 'avatar'
+          ? `联系人词条${scopeId ? ` (${escapeHtml(resolveLorebookScopeName(scopeType, scopeId))})` : ''}`
+          : '全局词条';
+        return `<div style="font-size:12px;line-height:1.35;color:#64748b;">• <strong style="color:#334155;">${title}</strong> · ${scopeText}${matchedText}</div>`;
+      }).join('');
+      lorebookHitsHtml = `
+        <details class="lorebook-hit-block" style="margin-bottom:8px;border:1px solid rgba(148,163,184,.22);border-radius:10px;background:#f8fafc;">
+          <summary style="cursor:pointer;list-style:none;padding:8px 10px;font-size:12px;color:#475569;font-weight:600;">📚 世界观书命中（${message.lorebookHits.length}）</summary>
+          <div style="padding:0 10px 8px 10px;">${hitItems}</div>
+        </details>
+      `;
+    }
     const speakerHtml = speakerName ? `<div class="msg-speaker-name">${escapeHtml(speakerName)}</div>` : '';
     const metaHtml = renderMessageMeta(message, role);
-    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${content}${metaHtml}</div></div>`;
+    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${lorebookHitsHtml}${content}${metaHtml}</div></div>`;
   }).join('');
 
   if (isAvatarTranslationOverlayEnabled(session)) {
@@ -3291,6 +3358,7 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
   let thinkFull = '';
   let isThinking = false;
   let toolCalls = [];
+  let lorebookHits;
   let firstTokenLatencyMs = null;
   const incrementalRender = Boolean(state.settings.chatStreamOutput);
 
@@ -3314,6 +3382,8 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
         } else if (payload.tool_result) {
           const tc = toolCalls.find(t => t.name === payload.tool_result.name && t.status === 'running');
           if (tc) { tc.status = 'done'; tc.result = payload.tool_result.result; tc.isError = payload.tool_result.isError; }
+        } else if (Array.isArray(payload.lorebook_hits)) {
+          lorebookHits = payload.lorebook_hits;
         } else if (payload.thinking === true) {
           isThinking = true;
         } else if (payload.thinking === false) {
@@ -3332,9 +3402,10 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
           thinkContent: thinkFull || undefined,
           isThinking,
           toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+          lorebookHits: Array.isArray(lorebookHits) ? lorebookHits : m.lorebookHits,
           firstTokenLatencyMs: Number.isFinite(firstTokenLatencyMs) ? firstTokenLatencyMs : m.firstTokenLatencyMs
         }));
-        if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || typeof payload.thinking === 'boolean') {
+        if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || Array.isArray(payload.lorebook_hits) || typeof payload.thinking === 'boolean') {
           renderMessages();
         }
       } catch (_) {}
@@ -3430,7 +3501,14 @@ async function sendSingleChatMessage(session) {
         avatar: (() => {
           const av = session.avatarId ? getAvatarById(session.avatarId) : null;
           if (!av) return undefined;
-          return { name: av.name, relationship: av.relationship || '', customPrompt: av.customPrompt || '', memoryText: av.memoryText || '' };
+          return {
+            id: av.id,
+            type: av.type || 'single',
+            name: av.name,
+            relationship: av.relationship || '',
+            customPrompt: av.customPrompt || '',
+            memoryText: av.memoryText || ''
+          };
         })()
       })
     });
@@ -3512,6 +3590,8 @@ async function sendGroupChatMessage(session, group) {
           ...samplingOptions,
           knowledgeBaseIds: getEnabledKbIds(),
           avatar: {
+            id: member.id,
+            type: member.type || 'single',
             name: member.name,
             relationship: member.relationship || '',
             customPrompt: member.customPrompt || '',
@@ -3986,7 +4066,9 @@ function updateConnectionUI() {
 
 async function openSettingsPanel() {
   els.settingsPanel.classList.remove('hidden');
+  ensurePersonasSettingsSectionNav();
   ensureTeamSharingSettingsSection();
+  ensureLorebookSettingsSection();
   refreshAvatarPreviews();
   els.tokenInput.value = state.token || '';
   els.userAvatarInput.value = state.ui.userAvatar || '';
@@ -3999,6 +4081,7 @@ async function openSettingsPanel() {
   loadMcpServerList();
   loadKbList();
   loadTeamSharingStatus();
+  loadLorebookList();
 }
 
 function closeSettingsPanel() {
@@ -4875,6 +4958,20 @@ const teamSharingRuntime = {
   lastIssuedMemberId: ''
 };
 
+const lorebookRuntime = {
+  sectionReady: false,
+  modalReady: false,
+  ui: null,
+  modalUi: null,
+  list: [],
+  stats: null,
+  loading: false,
+  saving: false,
+  filterScope: 'all',
+  filterAvatarId: '',
+  createScopeAvatarId: ''
+};
+
 function getEmbeddingCapableProviders(type = '') {
   const providers = Array.isArray(state.info.providers) ? state.info.providers : [];
   return providers.filter((p) => {
@@ -5004,6 +5101,29 @@ function kvObjectToLines(obj, sep = '=') {
 
 function getGeneralSettingsSection() {
   return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="general"]') : null;
+}
+
+function ensurePersonasSettingsSectionNav() {
+  if (!els.settingsPanel) return null;
+  const nav = els.settingsPanel.querySelector('.settings-nav');
+  if (!nav) return null;
+  const personaSection = els.settingsPanel.querySelector('.settings-section[data-section="personas"]');
+  if (!personaSection) return null;
+
+  let navBtn = nav.querySelector('.settings-nav-item[data-section="personas"]');
+  if (!navBtn) {
+    navBtn = document.createElement('button');
+    navBtn.className = 'settings-nav-item';
+    navBtn.type = 'button';
+    navBtn.dataset.section = 'personas';
+    navBtn.textContent = '角色';
+    const mcpBtn = nav.querySelector('.settings-nav-item[data-section="mcp"]');
+    const spacer = nav.querySelector('.settings-nav-spacer');
+    if (mcpBtn) nav.insertBefore(navBtn, mcpBtn);
+    else if (spacer) nav.insertBefore(navBtn, spacer);
+    else nav.appendChild(navBtn);
+  }
+  return navBtn;
 }
 
 function getTeamSharingSettingsSection() {
@@ -5662,6 +5782,617 @@ async function deleteTeamSharingMember(memberId) {
   }
 }
 
+function resolveLorebookScopeName(scopeType, scopeId) {
+  const type = String(scopeType || 'global');
+  if (type === 'avatar') {
+    const id = String(scopeId || '').trim();
+    const avatar = id ? getAvatarById(id) : null;
+    return avatar ? avatar.name : (id || '未绑定联系人');
+  }
+  return '全局';
+}
+
+function formatLorebookTime(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '未知时间';
+  try {
+    return new Date(n).toLocaleString();
+  } catch (_) {
+    return String(n);
+  }
+}
+
+function ensureContactsLorebookShortcut() {
+  if (!els.contactsPane || !els.contactList) return null;
+  let host = els.contactsPane.querySelector('#contactsLorebookShortcutRow');
+  if (host) return host;
+
+  host = document.createElement('div');
+  host.id = 'contactsLorebookShortcutRow';
+  host.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 2px 10px 2px;';
+  host.innerHTML = `
+    <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+      <span aria-hidden="true">📚</span>
+      <span>世界观书</span>
+    </button>
+    <div id="contactsLorebookHint" class="muted" style="font-size:12px;line-height:1.3;text-align:right;min-width:0;"></div>
+  `;
+  els.contactsPane.insertBefore(host, els.contactList);
+  const openBtn = host.querySelector('#contactsLorebookOpenBtn');
+  if (openBtn) {
+    openBtn.addEventListener('click', () => {
+      openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => {});
+    });
+  }
+  return host;
+}
+
+function refreshContactsLorebookShortcut() {
+  const host = ensureContactsLorebookShortcut();
+  if (!host) return;
+  const hint = host.querySelector('#contactsLorebookHint');
+  if (!hint) return;
+  const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+  if (!avatarId) {
+    hint.textContent = '管理全局/联系人词条';
+    return;
+  }
+  const avatar = getAvatarById(avatarId);
+  hint.textContent = avatar ? `当前联系人：${avatar.name}` : '管理联系人词条';
+}
+
+function getLorebookSettingsSection() {
+  return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="lorebook"]') : null;
+}
+
+function ensureLorebookSettingsSection() {
+  if (!els.settingsPanel) return null;
+  const nav = els.settingsPanel.querySelector('.settings-nav');
+  const content = els.settingsPanel.querySelector('.settings-content');
+  if (!nav || !content) return null;
+
+  let navBtn = nav.querySelector('.settings-nav-item[data-section="lorebook"]');
+  if (!navBtn) {
+    navBtn = document.createElement('button');
+    navBtn.className = 'settings-nav-item';
+    navBtn.type = 'button';
+    navBtn.dataset.section = 'lorebook';
+    navBtn.textContent = '世界观书';
+    const teamBtn = nav.querySelector('.settings-nav-item[data-section="team-sharing"]');
+    const spacer = nav.querySelector('.settings-nav-spacer');
+    if (teamBtn) nav.insertBefore(navBtn, teamBtn);
+    else if (spacer) nav.insertBefore(navBtn, spacer);
+    else nav.appendChild(navBtn);
+  }
+
+  let section = getLorebookSettingsSection();
+  if (!section) {
+    section = document.createElement('div');
+    section.className = 'settings-section hidden';
+    section.dataset.section = 'lorebook';
+    section.innerHTML = `
+      <h3>世界观书（Lorebook）</h3>
+      <div class="muted" style="margin-bottom:10px;">RP 词条触发系统：命中关键词/常驻词条后会真实注入到聊天上下文（非装饰）。</div>
+
+      <div class="settings-group" style="margin-top:0;">
+        <h4>词条管理</h4>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 14px;border:1px solid rgba(148,163,184,.28);border-radius:12px;background:rgba(248,250,252,.75);">
+          <div style="min-width:0;flex:1;">
+            <div style="font-weight:700;">Lorebook 管理面板</div>
+            <div id="lorebookListSummary" class="muted" style="font-size:12px;line-height:1.45;margin-top:4px;">未加载</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="lorebookAddEntryBtn" class="btn primary" type="button">+ 添加词条</button>
+            <button id="lorebookAddForAvatarBtn" class="btn ghost" type="button">为当前联系人添加</button>
+            <button id="lorebookRefreshBtn" class="btn ghost" type="button">刷新</button>
+          </div>
+        </div>
+
+        <div class="setting-row" style="margin-top:10px;">
+          <label>筛选</label>
+          <div class="setting-control" style="display:flex;gap:8px;flex-wrap:wrap;">
+            <select id="lorebookScopeFilterSelect" style="min-width:160px;">
+              <option value="all">全部词条</option>
+              <option value="global">仅全局词条</option>
+              <option value="avatar">仅联系人词条</option>
+            </select>
+            <select id="lorebookAvatarFilterSelect" style="min-width:220px;">
+              <option value="">全部联系人</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="lorebookListStatus" class="muted" style="font-size:12px;margin-top:6px;min-height:18px;"></div>
+        <div id="lorebookListWrap" style="display:grid;gap:10px;margin-top:10px;"></div>
+      </div>
+    `;
+    content.appendChild(section);
+  }
+
+  if (!lorebookRuntime.sectionReady) {
+    const ui = {
+      section,
+      summary: section.querySelector('#lorebookListSummary'),
+      status: section.querySelector('#lorebookListStatus'),
+      listWrap: section.querySelector('#lorebookListWrap'),
+      addBtn: section.querySelector('#lorebookAddEntryBtn'),
+      addForAvatarBtn: section.querySelector('#lorebookAddForAvatarBtn'),
+      refreshBtn: section.querySelector('#lorebookRefreshBtn'),
+      scopeFilter: section.querySelector('#lorebookScopeFilterSelect'),
+      avatarFilter: section.querySelector('#lorebookAvatarFilterSelect')
+    };
+    lorebookRuntime.ui = ui;
+
+    if (ui.addBtn) {
+      ui.addBtn.addEventListener('click', () => {
+        openLorebookEditorModal({ mode: 'create' }).catch((error) => {
+          setLorebookSectionStatus(`打开词条编辑器失败：${error.message || error}`, 'error');
+        });
+      });
+    }
+    if (ui.addForAvatarBtn) {
+      ui.addForAvatarBtn.addEventListener('click', () => {
+        const avatarId = String(lorebookRuntime.filterAvatarId || state.ui.activeContactAvatarId || '').trim();
+        if (!avatarId) {
+          setLorebookSectionStatus('请先在联系人列表选择一个联系人，再添加联系人词条。', 'error');
+          return;
+        }
+        openLorebookEditorModal({ mode: 'create', presetScopeType: 'avatar', presetScopeId: avatarId }).catch((error) => {
+          setLorebookSectionStatus(`打开词条编辑器失败：${error.message || error}`, 'error');
+        });
+      });
+    }
+    if (ui.refreshBtn) ui.refreshBtn.addEventListener('click', () => loadLorebookList({ force: true }));
+    if (ui.scopeFilter) {
+      ui.scopeFilter.addEventListener('change', () => {
+        lorebookRuntime.filterScope = ui.scopeFilter.value || 'all';
+        if (lorebookRuntime.filterScope !== 'avatar') lorebookRuntime.filterAvatarId = '';
+        syncLorebookFilterControls();
+        renderLorebookList();
+      });
+    }
+    if (ui.avatarFilter) {
+      ui.avatarFilter.addEventListener('change', () => {
+        lorebookRuntime.filterAvatarId = ui.avatarFilter.value || '';
+        if (lorebookRuntime.filterAvatarId) lorebookRuntime.filterScope = 'avatar';
+        syncLorebookFilterControls();
+        renderLorebookList();
+      });
+    }
+    if (ui.listWrap) {
+      ui.listWrap.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-action][data-entry-id]');
+        if (!btn) return;
+        const entryId = btn.dataset.entryId || '';
+        const action = btn.dataset.action || '';
+        if (!entryId || !action) return;
+        if (action === 'edit') {
+          const entry = (lorebookRuntime.list || []).find((it) => it.id === entryId);
+          if (!entry) return;
+          await openLorebookEditorModal({ mode: 'edit', entry });
+          return;
+        }
+        if (action === 'toggle') {
+          await toggleLorebookEntry(entryId);
+          return;
+        }
+        if (action === 'delete') {
+          if (!window.confirm('确认删除这个世界观书词条？')) return;
+          await deleteLorebookEntry(entryId);
+        }
+      });
+    }
+
+    lorebookRuntime.sectionReady = true;
+    syncLorebookFilterControls();
+  }
+
+  syncLorebookAvatarFilterOptions();
+  return section;
+}
+
+function setLorebookSectionStatus(text, type = '') {
+  const ui = lorebookRuntime.ui;
+  if (!ui || !ui.status) return;
+  ui.status.textContent = String(text || '');
+  ui.status.style.color = type === 'error' ? '#b91c1c' : (type === 'success' ? '#047857' : '');
+}
+
+function syncLorebookAvatarFilterOptions() {
+  const ui = lorebookRuntime.ui;
+  if (!ui || !ui.avatarFilter) return;
+  const avatars = (state.avatars || []).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'));
+  const current = String(lorebookRuntime.filterAvatarId || ui.avatarFilter.value || '').trim();
+  ui.avatarFilter.innerHTML = ['<option value="">全部联系人</option>']
+    .concat(avatars.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}${a.type === 'group' ? '（群组）' : ''}</option>`))
+    .join('');
+  if (current && avatars.some((a) => a.id === current)) ui.avatarFilter.value = current;
+  else if (ui.avatarFilter.value && !avatars.some((a) => a.id === ui.avatarFilter.value)) ui.avatarFilter.value = '';
+}
+
+function syncLorebookFilterControls() {
+  const ui = lorebookRuntime.ui;
+  if (!ui) return;
+  if (ui.scopeFilter) ui.scopeFilter.value = lorebookRuntime.filterScope || 'all';
+  if (ui.avatarFilter) {
+    ui.avatarFilter.disabled = (lorebookRuntime.filterScope !== 'avatar');
+    if (lorebookRuntime.filterAvatarId) ui.avatarFilter.value = lorebookRuntime.filterAvatarId;
+    else if (lorebookRuntime.filterScope !== 'avatar') ui.avatarFilter.value = '';
+  }
+  const activeAvatarId = String(lorebookRuntime.filterAvatarId || state.ui.activeContactAvatarId || '').trim();
+  if (ui.addForAvatarBtn) {
+    const avatar = activeAvatarId ? getAvatarById(activeAvatarId) : null;
+    ui.addForAvatarBtn.textContent = avatar ? `为 ${avatar.name} 添加` : '为当前联系人添加';
+  }
+}
+
+function buildLorebookFilteredList() {
+  const list = Array.isArray(lorebookRuntime.list) ? lorebookRuntime.list : [];
+  const scope = String(lorebookRuntime.filterScope || 'all');
+  const avatarId = String(lorebookRuntime.filterAvatarId || '').trim();
+  return list.filter((entry) => {
+    if (!entry) return false;
+    if (scope === 'global' && entry.scopeType !== 'global') return false;
+    if (scope === 'avatar' && entry.scopeType !== 'avatar') return false;
+    if (avatarId && String(entry.scopeId || '').trim() !== avatarId) return false;
+    return true;
+  });
+}
+
+function renderLorebookList() {
+  ensureLorebookSettingsSection();
+  const ui = lorebookRuntime.ui;
+  if (!ui || !ui.listWrap) return;
+  syncLorebookFilterControls();
+
+  const stats = lorebookRuntime.stats || {};
+  const all = Array.isArray(lorebookRuntime.list) ? lorebookRuntime.list : [];
+  if (ui.summary) {
+    const summaryParts = [
+      `词条 ${Number(stats.total || all.length || 0)} 个`,
+      `启用 ${Number(stats.enabled || all.filter((e) => e && e.enabled !== false).length)} 个`,
+      `全局 ${Number(stats.global || all.filter((e) => e && e.scopeType === 'global').length)} 个`,
+      `联系人 ${Number(stats.avatar || all.filter((e) => e && e.scopeType === 'avatar').length)} 个`
+    ];
+    if (lorebookRuntime.filterScope === 'avatar' && lorebookRuntime.filterAvatarId) {
+      summaryParts.push(`当前筛选：${resolveLorebookScopeName('avatar', lorebookRuntime.filterAvatarId)}`);
+    } else if (lorebookRuntime.filterScope === 'global') {
+      summaryParts.push('当前筛选：仅全局');
+    } else if (lorebookRuntime.filterScope === 'avatar') {
+      summaryParts.push('当前筛选：仅联系人');
+    }
+    ui.summary.textContent = summaryParts.join(' · ');
+  }
+
+  if (lorebookRuntime.loading) {
+    ui.listWrap.innerHTML = '<div class="muted" style="padding:10px 2px;">正在加载世界观书词条...</div>';
+    return;
+  }
+
+  const list = buildLorebookFilteredList();
+  if (!list.length) {
+    ui.listWrap.innerHTML = '<div class="muted" style="padding:10px 2px;">暂无符合条件的词条。可点击上方“添加词条”。</div>';
+    return;
+  }
+
+  ui.listWrap.innerHTML = list.map((entry) => {
+    const keywords = Array.isArray(entry.keywords) ? entry.keywords : [];
+    const keywordText = keywords.length ? keywords.join(' / ') : (entry.alwaysOn ? '常驻（always-on）' : '无关键词');
+    const preview = String(entry.content || '').trim().replace(/\s+/g, ' ');
+    const scopeText = entry.scopeType === 'avatar'
+      ? `联系人：${escapeHtml(resolveLorebookScopeName(entry.scopeType, entry.scopeId))}`
+      : '全局词条';
+    return `
+      <div class="toolui-switch-block" data-lorebook-card="${escapeHtml(entry.id)}" style="background:#fff;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong style="color:#0f172a;">${escapeHtml(entry.title || '词条')}</strong>
+              <span style="font-size:12px;color:${entry.enabled === false ? '#b45309' : '#047857'};">${entry.enabled === false ? '已禁用' : '已启用'}</span>
+              ${entry.alwaysOn ? '<span style="font-size:12px;color:#4338ca;background:rgba(99,102,241,.08);padding:2px 6px;border-radius:999px;">常驻</span>' : ''}
+            </div>
+            <div class="hint" style="margin-top:4px;">${scopeText} · 优先级 ${Number(entry.priority || 0)} · 更新于 ${escapeHtml(formatLorebookTime(entry.updatedAt))}</div>
+            <div class="hint" style="margin-top:2px;">触发词：${escapeHtml(keywordText)}</div>
+            <div style="margin-top:8px;font-size:13px;line-height:1.45;color:#334155;white-space:pre-wrap;word-break:break-word;">${escapeHtml(preview.slice(0, 260))}${preview.length > 260 ? '…' : ''}</div>
+          </div>
+        </div>
+        <div class="toolui-actions-row" style="margin-top:10px;">
+          <button type="button" class="btn ghost" data-action="edit" data-entry-id="${escapeHtml(entry.id)}">编辑</button>
+          <button type="button" class="btn ghost" data-action="toggle" data-entry-id="${escapeHtml(entry.id)}">${entry.enabled === false ? '启用' : '禁用'}</button>
+          <button type="button" class="btn ghost" data-action="delete" data-entry-id="${escapeHtml(entry.id)}">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadLorebookList(options = {}) {
+  ensureLorebookSettingsSection();
+  if (state.info && state.info.authRequired && !state.token) {
+    lorebookRuntime.loading = false;
+    lorebookRuntime.list = [];
+    lorebookRuntime.stats = null;
+    renderLorebookList();
+    setLorebookSectionStatus('需要管理员 ACCESS_TOKEN 才能管理世界观书（请先在设置-通用输入口令）。', 'error');
+    return;
+  }
+  if (lorebookRuntime.loading && !options.force) return;
+  lorebookRuntime.loading = true;
+  renderLorebookList();
+  try {
+    const data = await apiRequest('/api/lorebooks', { method: 'GET' });
+    lorebookRuntime.list = Array.isArray(data.lorebooks) ? data.lorebooks : [];
+    lorebookRuntime.stats = (data.stats && typeof data.stats === 'object') ? data.stats : null;
+    syncLorebookAvatarFilterOptions();
+    renderLorebookList();
+    if (options.silent !== true) setLorebookSectionStatus('', '');
+  } catch (error) {
+    setLorebookSectionStatus(`加载世界观书失败：${error.message || error}`, 'error');
+    lorebookRuntime.list = [];
+    lorebookRuntime.stats = null;
+    renderLorebookList();
+  } finally {
+    lorebookRuntime.loading = false;
+    renderLorebookList();
+  }
+}
+
+async function openLorebookSettingsForAvatar(avatarId, opts = {}) {
+  const id = String(avatarId || '').trim();
+  ensureLorebookSettingsSection();
+  if (id) {
+    lorebookRuntime.filterScope = 'avatar';
+    lorebookRuntime.filterAvatarId = id;
+    lorebookRuntime.createScopeAvatarId = id;
+  } else {
+    lorebookRuntime.filterScope = 'all';
+    lorebookRuntime.filterAvatarId = '';
+  }
+  syncLorebookFilterControls();
+  await openSettingsSection('lorebook');
+  await loadLorebookList({ force: true, silent: true });
+  if (opts && opts.create && id) {
+    await openLorebookEditorModal({ mode: 'create', presetScopeType: 'avatar', presetScopeId: id });
+  }
+}
+
+function ensureLorebookEditorModal() {
+  if (lorebookRuntime.modalReady && lorebookRuntime.modalUi) return lorebookRuntime.modalUi;
+  ensureToolUiInjectedStyle();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'toolui-backdrop';
+  backdrop.innerHTML = `
+    <div class="toolui-modal" role="dialog" aria-modal="true" aria-labelledby="lorebookEditorTitle">
+      <div class="toolui-head">
+        <div class="toolui-title" id="lorebookEditorTitle">世界观书词条</div>
+        <button class="toolui-close" type="button" data-close>ESC</button>
+      </div>
+      <div class="toolui-body">
+        <div class="toolui-grid">
+          <input id="lorebookEditorId" type="hidden">
+          <div class="toolui-row">
+            <label for="lorebookTitleInput">标题 *</label>
+            <input id="lorebookTitleInput" class="toolui-input" type="text" placeholder="例如：学院校规 / 角色禁忌 / 世界背景">
+          </div>
+          <div class="toolui-grid two-col">
+            <div class="toolui-row">
+              <label for="lorebookScopeTypeInput">作用范围</label>
+              <select id="lorebookScopeTypeInput" class="toolui-input">
+                <option value="global">全局（所有聊天可触发）</option>
+                <option value="avatar">联系人（仅指定联系人触发）</option>
+              </select>
+            </div>
+            <div class="toolui-row">
+              <label for="lorebookAvatarScopeInput">联系人</label>
+              <select id="lorebookAvatarScopeInput" class="toolui-input">
+                <option value="">请选择联系人</option>
+              </select>
+              <div class="hint">仅在“联系人”范围下生效。</div>
+            </div>
+          </div>
+          <div class="toolui-grid two-col">
+            <div class="toolui-row">
+              <label for="lorebookPriorityInput">优先级</label>
+              <input id="lorebookPriorityInput" class="toolui-input" type="number" min="0" max="1000" step="1" value="50">
+              <div class="hint">数字越大越优先注入。</div>
+            </div>
+            <div class="toolui-row">
+              <label>选项</label>
+              <div class="toolui-switch-block">
+                <label class="toolui-inline" style="margin-bottom:6px;">
+                  <input id="lorebookEnabledInput" type="checkbox" checked>
+                  <span>启用词条（真实生效）</span>
+                </label>
+                <label class="toolui-inline">
+                  <input id="lorebookAlwaysOnInput" type="checkbox">
+                  <span>常驻词条（无需关键词）</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="toolui-row">
+            <label for="lorebookKeywordsInput">触发关键词</label>
+            <textarea id="lorebookKeywordsInput" class="toolui-textarea" rows="3" placeholder="多个关键词用换行、逗号或分号分隔"></textarea>
+            <div class="hint">非“常驻词条”时至少填写一个关键词；对最近几轮用户消息做包含匹配。</div>
+          </div>
+          <div class="toolui-row">
+            <label for="lorebookContentInput">词条内容 *</label>
+            <textarea id="lorebookContentInput" class="toolui-textarea" rows="9" placeholder="写入世界观设定、关系约束、禁忌规则、地点背景等。命中后会注入到聊天上下文。"></textarea>
+          </div>
+          <div id="lorebookEditorStatus" class="toolui-status"></div>
+        </div>
+      </div>
+      <div class="toolui-foot">
+        <button type="button" class="btn primary" id="lorebookSaveBtn">保存词条</button>
+        <button type="button" class="btn ghost" data-close>取消</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  const ui = {
+    backdrop,
+    editId: backdrop.querySelector('#lorebookEditorId'),
+    title: backdrop.querySelector('#lorebookTitleInput'),
+    scopeType: backdrop.querySelector('#lorebookScopeTypeInput'),
+    avatarScope: backdrop.querySelector('#lorebookAvatarScopeInput'),
+    priority: backdrop.querySelector('#lorebookPriorityInput'),
+    enabled: backdrop.querySelector('#lorebookEnabledInput'),
+    alwaysOn: backdrop.querySelector('#lorebookAlwaysOnInput'),
+    keywords: backdrop.querySelector('#lorebookKeywordsInput'),
+    content: backdrop.querySelector('#lorebookContentInput'),
+    status: backdrop.querySelector('#lorebookEditorStatus'),
+    saveBtn: backdrop.querySelector('#lorebookSaveBtn')
+  };
+
+  const syncScopeUi = () => {
+    const isAvatar = String(ui.scopeType.value || 'global') === 'avatar';
+    ui.avatarScope.disabled = !isAvatar;
+    if (!isAvatar) ui.avatarScope.value = '';
+  };
+  const syncKeywordUi = () => {
+    const alwaysOn = Boolean(ui.alwaysOn.checked);
+    ui.keywords.disabled = alwaysOn;
+    if (alwaysOn) ui.keywords.placeholder = '已启用常驻词条，无需关键词';
+    else ui.keywords.placeholder = '多个关键词用换行、逗号或分号分隔';
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeLorebookEditorModal();
+  });
+  backdrop.querySelectorAll('[data-close]').forEach((btn) => btn.addEventListener('click', () => closeLorebookEditorModal()));
+  ui.scopeType.addEventListener('change', syncScopeUi);
+  ui.alwaysOn.addEventListener('change', syncKeywordUi);
+  ui.saveBtn.addEventListener('click', () => saveLorebookEditorModal());
+
+  lorebookRuntime.modalReady = true;
+  lorebookRuntime.modalUi = ui;
+  syncScopeUi();
+  syncKeywordUi();
+  return ui;
+}
+
+function closeLorebookEditorModal() {
+  const ui = ensureLorebookEditorModal();
+  ui.backdrop.classList.remove('open');
+}
+
+function syncLorebookModalAvatarOptions(ui, selectedId = '') {
+  if (!ui || !ui.avatarScope) return;
+  const avatars = (state.avatars || []).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'));
+  ui.avatarScope.innerHTML = ['<option value="">请选择联系人</option>']
+    .concat(avatars.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}${a.type === 'group' ? '（群组）' : ''}</option>`))
+    .join('');
+  if (selectedId && avatars.some((a) => a.id === selectedId)) ui.avatarScope.value = selectedId;
+}
+
+function fillLorebookEditorModal(entry, opts = {}) {
+  const ui = ensureLorebookEditorModal();
+  const mode = opts.mode || 'create';
+  const presetScopeType = opts.presetScopeType || '';
+  const presetScopeId = opts.presetScopeId || '';
+  const target = entry && typeof entry === 'object' ? entry : null;
+  ui.editId.value = target ? String(target.id || '') : '';
+  ui.title.value = target ? String(target.title || '') : '';
+  ui.scopeType.value = target ? String(target.scopeType || 'global') : (presetScopeType || 'global');
+  syncLorebookModalAvatarOptions(ui, target ? String(target.scopeId || '') : String(presetScopeId || ''));
+  ui.priority.value = String(target ? Number(target.priority || 50) : 50);
+  ui.enabled.checked = target ? target.enabled !== false : true;
+  ui.alwaysOn.checked = target ? Boolean(target.alwaysOn) : false;
+  ui.keywords.value = target && Array.isArray(target.keywords) ? target.keywords.join('\n') : '';
+  ui.content.value = target ? String(target.content || '') : '';
+  ui.backdrop.querySelector('#lorebookEditorTitle').textContent = mode === 'edit' ? '编辑世界观书词条' : '新增世界观书词条';
+  setToolUiStatus(ui.status, '', '');
+  ui.scopeType.dispatchEvent(new Event('change'));
+  ui.alwaysOn.dispatchEvent(new Event('change'));
+}
+
+async function openLorebookEditorModal(options = {}) {
+  ensureLorebookSettingsSection();
+  const ui = ensureLorebookEditorModal();
+  syncLorebookModalAvatarOptions(ui, options.presetScopeId || '');
+  fillLorebookEditorModal(options.entry || null, options);
+  ui.backdrop.classList.add('open');
+  if (ui.title) ui.title.focus();
+}
+
+function splitLorebookKeywordsInput(text) {
+  return String(text || '')
+    .split(/[\r\n,，;；]+/g)
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+}
+
+async function saveLorebookEditorModal() {
+  const ui = ensureLorebookEditorModal();
+  if (lorebookRuntime.saving) return;
+  const body = {
+    id: String(ui.editId.value || '').trim() || undefined,
+    title: String(ui.title.value || '').trim(),
+    scopeType: String(ui.scopeType.value || 'global'),
+    scopeId: String(ui.avatarScope.value || '').trim(),
+    priority: Math.max(0, Math.min(1000, Number(ui.priority.value || 50) || 50)),
+    enabled: Boolean(ui.enabled.checked),
+    alwaysOn: Boolean(ui.alwaysOn.checked),
+    keywords: splitLorebookKeywordsInput(ui.keywords.value),
+    content: String(ui.content.value || '').trim()
+  };
+
+  if (!body.title) {
+    setToolUiStatus(ui.status, '请填写词条标题。', 'error');
+    return;
+  }
+  if (!body.content) {
+    setToolUiStatus(ui.status, '请填写词条内容。', 'error');
+    return;
+  }
+  if (body.scopeType === 'avatar' && !body.scopeId) {
+    setToolUiStatus(ui.status, '请选择联系人范围。', 'error');
+    return;
+  }
+  if (!body.alwaysOn && !body.keywords.length) {
+    setToolUiStatus(ui.status, '请填写关键词，或开启“常驻词条”。', 'error');
+    return;
+  }
+
+  lorebookRuntime.saving = true;
+  setToolUiStatus(ui.status, '保存中...', '');
+  try {
+    await apiRequest('/api/lorebooks', { method: 'POST', body: JSON.stringify(body) });
+    setToolUiStatus(ui.status, '已保存', 'success');
+    closeLorebookEditorModal();
+    await loadLorebookList({ force: true, silent: true });
+    setLorebookSectionStatus('世界观书词条已保存。', 'success');
+  } catch (error) {
+    setToolUiStatus(ui.status, `保存失败：${error.message || error}`, 'error');
+  } finally {
+    lorebookRuntime.saving = false;
+  }
+}
+
+async function toggleLorebookEntry(entryId) {
+  setLorebookSectionStatus('更新词条状态中...', '');
+  try {
+    await apiRequest(`/api/lorebooks/${encodeURIComponent(entryId)}/toggle`, { method: 'POST', body: '{}' });
+    await loadLorebookList({ force: true, silent: true });
+    setLorebookSectionStatus('词条状态已更新。', 'success');
+  } catch (error) {
+    setLorebookSectionStatus(`更新失败：${error.message || error}`, 'error');
+  }
+}
+
+async function deleteLorebookEntry(entryId) {
+  setLorebookSectionStatus('删除词条中...', '');
+  try {
+    await apiRequest(`/api/lorebooks/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
+    await loadLorebookList({ force: true, silent: true });
+    setLorebookSectionStatus('词条已删除。', 'success');
+  } catch (error) {
+    setLorebookSectionStatus(`删除失败：${error.message || error}`, 'error');
+  }
+}
+
 function getMcpSettingsSection() {
   return els.settingsPanel ? els.settingsPanel.querySelector('.settings-section[data-section="mcp"]') : null;
 }
@@ -5672,14 +6403,21 @@ async function openSettingsSection(section) {
     await openSettingsPanel();
   }
   if (!els.settingsPanel) return;
+  if (section === 'personas') ensurePersonasSettingsSectionNav();
   if (section === 'team-sharing') ensureTeamSharingSettingsSection();
+  if (section === 'lorebook') ensureLorebookSettingsSection();
   els.settingsPanel.querySelectorAll('.settings-nav-item').forEach((b) => b.classList.remove('active'));
   const nav = els.settingsPanel.querySelector(`.settings-nav-item[data-section="${CSS.escape(section)}"]`);
   if (nav) nav.classList.add('active');
   els.settingsPanel.querySelectorAll('.settings-section').forEach((s) => {
     s.classList.toggle('hidden', s.dataset.section !== section);
   });
+  if (section === 'personas') {
+    renderAvatarList();
+    renderAvatarSelectPanel();
+  }
   if (section === 'general' || section === 'team-sharing') loadTeamSharingStatus();
+  if (section === 'lorebook') loadLorebookList();
 }
 
 function ensureMcpCatalogLauncher() {

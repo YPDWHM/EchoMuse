@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const QRCode = require('qrcode');
 const mcpManager = require('./mcp-manager');
@@ -2937,6 +2938,41 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+app.post('/api/voice/stt', upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+      return res.status(400).json({ error: 'BadRequest', message: 'audio file is required' });
+    }
+    const engine = String(req.body?.engine || 'whisper_cpp').trim();
+    if (engine !== 'whisper_cpp') {
+      return res.status(400).json({ error: 'BadRequest', message: 'only whisper_cpp engine is supported currently' });
+    }
+    const whisperExePath = String(req.body?.whisperExePath || '').trim();
+    const whisperModelPath = String(req.body?.whisperModelPath || '').trim();
+    const language = String(req.body?.language || 'auto').trim() || 'auto';
+    const threads = Math.max(1, Math.min(32, Number(req.body?.threads || 4) || 4));
+    const translate = String(req.body?.translate || '1') !== '0';
+    if (!whisperExePath || !whisperModelPath) {
+      return res.status(400).json({ error: 'BadRequest', message: 'whisperExePath and whisperModelPath are required' });
+    }
+
+    const result = await transcribeAudioWithWhisperCli({
+      audioBuffer: req.file.buffer,
+      whisperExePath,
+      whisperModelPath,
+      language,
+      threads,
+      translate
+    });
+    return res.json({ ok: true, text: result.text, engine: 'whisper_cpp' });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'SttFailed',
+      message: String(error && error.message ? error.message : error || 'STT failed')
+    });
+  }
+});
+
 app.post('/api/translate', async (req, res) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
@@ -4767,6 +4803,85 @@ function isCasualChat(text) {
     return true;
   }
   return s.length <= 12;
+}
+
+async function transcribeAudioWithWhisperCli(options) {
+  const audioBuffer = Buffer.isBuffer(options && options.audioBuffer) ? options.audioBuffer : null;
+  const whisperExePath = path.resolve(String(options && options.whisperExePath || ''));
+  const whisperModelPath = path.resolve(String(options && options.whisperModelPath || ''));
+  const languageRaw = String(options && options.language || 'auto').trim() || 'auto';
+  const language = languageRaw.toLowerCase();
+  const threads = Math.max(1, Math.min(32, Number(options && options.threads || 4) || 4));
+  const translate = Boolean(options && options.translate);
+  if (!audioBuffer || !audioBuffer.length) throw new Error('No audio data');
+  if (!fs.existsSync(whisperExePath)) throw new Error(`Whisper executable not found: ${whisperExePath}`);
+  if (!fs.existsSync(whisperModelPath)) throw new Error(`Whisper model not found: ${whisperModelPath}`);
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'echomuse-stt-'));
+  const inputPath = path.join(tempDir, 'input.wav');
+  const outBase = path.join(tempDir, 'result');
+  const outTextPath = `${outBase}.txt`;
+  fs.writeFileSync(inputPath, audioBuffer);
+
+  try {
+    const args = [
+      '-m', whisperModelPath,
+      '-f', inputPath,
+      '-of', outBase,
+      '-otxt',
+      '-t', String(threads)
+    ];
+    if (language && language !== 'auto') {
+      args.push('-l', language);
+    } else {
+      args.push('-l', 'auto');
+    }
+    if (translate) args.push('-tr');
+
+    await runLocalProcess(whisperExePath, args, 15 * 60 * 1000);
+
+    if (!fs.existsSync(outTextPath)) {
+      throw new Error('Whisper output text file not produced');
+    }
+    const text = String(fs.readFileSync(outTextPath, 'utf8') || '').trim();
+    if (!text) throw new Error('Whisper returned empty transcript');
+    return { text };
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
+function runLocalProcess(command, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, Array.isArray(args) ? args : [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill(); } catch (_) {}
+      reject(new Error('STT timeout'));
+    }, Math.max(5000, Number(timeoutMs) || 120000));
+    child.stdout.on('data', (d) => { stdout += String(d || ''); });
+    child.stderr.on('data', (d) => { stderr += String(d || ''); });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout, stderr });
+      reject(new Error(`Whisper process failed (code=${code}): ${safeSnippet(stderr || stdout)}`));
+    });
+  });
 }
 
 function generateErrorMessage(error) {

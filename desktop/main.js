@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, screen } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, screen, ipcMain, dialog } = require('electron');
 
 let mainWindow = null;
 let tray = null;
@@ -20,6 +20,48 @@ const DEFAULT_WINDOW_BOUNDS = Object.freeze({
   height: 920,
   minWidth: 1024,
   minHeight: 700
+});
+
+function sanitizeDialogFilters(filters) {
+  if (!Array.isArray(filters)) return undefined;
+  const out = [];
+  for (const item of filters) {
+    if (!item || typeof item !== 'object') continue;
+    const name = String(item.name || '').trim() || 'Files';
+    const exts = Array.isArray(item.extensions)
+      ? item.extensions.map((x) => String(x || '').replace(/^\./, '').trim()).filter(Boolean)
+      : [];
+    if (!exts.length) continue;
+    out.push({ name, extensions: exts });
+  }
+  return out.length ? out : undefined;
+}
+
+ipcMain.handle('echomuse:open-file-dialog', async (event, options) => {
+  try {
+    const senderWin = BrowserWindow.fromWebContents(event.sender);
+    const opts = options && typeof options === 'object' ? options : {};
+    const title = String(opts.title || 'Select File');
+    const buttonLabel = String(opts.buttonLabel || 'Select');
+    const defaultPath = String(opts.defaultPath || path.join(__dirname, '..'));
+    const filters = sanitizeDialogFilters(opts.filters);
+    const res = await dialog.showOpenDialog(senderWin || mainWindow || undefined, {
+      title,
+      buttonLabel,
+      defaultPath,
+      properties: ['openFile'],
+      filters
+    });
+    return {
+      canceled: Boolean(res.canceled),
+      filePath: !res.canceled && Array.isArray(res.filePaths) && res.filePaths[0] ? String(res.filePaths[0]) : ''
+    };
+  } catch (error) {
+    return {
+      canceled: true,
+      error: String(error && error.message ? error.message : error)
+    };
+  }
 });
 
 function ensureDesktopServerEnv() {
@@ -246,6 +288,58 @@ function createWindow() {
     shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
+
+  try {
+    const ses = mainWindow.webContents.session;
+    const isTrustedLocalOrigin = (origin) => {
+      try {
+        const u = new URL(String(origin || ''));
+        return (u.hostname === '127.0.0.1' || u.hostname === 'localhost');
+      } catch (_) {
+        return false;
+      }
+    };
+    const resolvePermissionOrigin = (webContents, requestingOrigin, details) => {
+      const candidates = [
+        requestingOrigin,
+        details && details.requestingOrigin,
+        details && details.embeddingOrigin
+      ];
+      try {
+        if (webContents && typeof webContents.getURL === 'function') {
+          candidates.push(webContents.getURL());
+        }
+      } catch (_) {}
+      for (const candidate of candidates) {
+        if (isTrustedLocalOrigin(candidate)) return String(candidate);
+      }
+      return '';
+    };
+    const isAllowedMediaPermission = (permission, details) => {
+      const p = String(permission || '');
+      if (p === 'microphone' || p === 'audioCapture') return true;
+      if (p === 'media') {
+        const mediaTypes = Array.isArray(details && details.mediaTypes) ? details.mediaTypes : [];
+        return mediaTypes.length === 0 || mediaTypes.includes('audio');
+      }
+      return false;
+    };
+    if (typeof ses.setPermissionCheckHandler === 'function') {
+      ses.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+        const origin = resolvePermissionOrigin(webContents, requestingOrigin, details);
+        if (!origin) return false;
+        return isAllowedMediaPermission(permission, details);
+      });
+    }
+    if (typeof ses.setPermissionRequestHandler === 'function') {
+      ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        const origin = resolvePermissionOrigin(webContents, '', details);
+        callback(Boolean(isTrustedLocalOrigin(origin) && isAllowedMediaPermission(permission, details)));
+      });
+    }
+  } catch (_) {
+    // Ignore permission handler failures on unsupported Electron builds.
+  }
 
   mainWindow.on('ready-to-show', () => {
     if (saved.isMaximized) mainWindow.maximize();

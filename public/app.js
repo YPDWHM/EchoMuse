@@ -965,6 +965,9 @@ const sharedChatRenderCore = window.EchoMuseChatRenderCore;
 if (!sharedChatRenderCore) {
   throw new Error('EchoMuseChatRenderCore not loaded. Check script order in public/index.html.');
 }
+const sharedVoiceTts = window.EchoMuseVoiceTts || null;
+
+let voiceTtsController = null;
 const {
   countQuestionTotal,
   toolName,
@@ -1201,6 +1204,7 @@ function boot() {
   renderAvatarScenarioDraftList();
   applySettings();
   syncSettingsUI();
+  initVoiceTtsModule();
   registerServiceWorker();
   syncMaterialsFromSession();
   applyToolModeUI();
@@ -1210,6 +1214,30 @@ function boot() {
   renderAvatarSelectPanel();
   switchSidebarTab(state.ui.sidebarTab);
   refreshServiceStatus();
+}
+
+function initVoiceTtsModule() {
+  if (!sharedVoiceTts || typeof sharedVoiceTts.createController !== 'function') return;
+  if (voiceTtsController) return;
+  try {
+    voiceTtsController = sharedVoiceTts.createController({
+      setStatus,
+      getActiveSession,
+      getAvatarById,
+      persistAvatars,
+      onAvatarVoiceProfileChanged: () => {
+        renderAvatarSelectPanel();
+        renderMessages();
+      },
+      getChatInputElement: () => els.chatInput,
+      getMessageListElement: () => els.messageList,
+      getAppState: () => state,
+      getSpeakTextForMessage: (session, message) => getOverlayDisplayContent(session, message)
+    });
+    voiceTtsController.init();
+  } catch (error) {
+    console.warn('[voice-tts] init failed:', error);
+  }
 }
 
 let systemThemeMedia = null;
@@ -1559,6 +1587,7 @@ function applyLanguage() {
   updateConnectionUI();
   updateTranslateSettingsUI();
   refreshDynamicUiLanguageLabels();
+  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) {}
 }
 
 function isZhUiLanguage() {
@@ -1755,6 +1784,15 @@ function bindEvents() {
       const sid = favBtn.dataset.sid || '';
       toggleFavorite(sid);
       renderSessionList();
+      return;
+    }
+
+    const delBtn = event.target.closest('[data-action="delete-session"]');
+    if (delBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      const sid = delBtn.dataset.sid || '';
+      deleteSession(sid);
       return;
     }
 
@@ -2543,6 +2581,39 @@ function createSession(title) {
   state.sessions.unshift(session);
   state.activeSessionId = session.id;
   persistSessionsState();
+}
+
+function deleteSession(sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!sid) return false;
+  const idx = state.sessions.findIndex((s) => s && s.id === sid);
+  if (idx < 0) return false;
+  const session = state.sessions[idx];
+  const title = String(session && session.title || '该会话');
+  if (!window.confirm(`确认删除会话「${title}」？`)) return false;
+
+  const wasActive = state.activeSessionId === sid;
+  state.sessions.splice(idx, 1);
+
+  if (!state.sessions.length) {
+    const replacement = createSessionObject('会话 1');
+    state.sessions = [replacement];
+    state.activeSessionId = replacement.id;
+  } else if (wasActive || !state.sessions.some((s) => s.id === state.activeSessionId)) {
+    const regular = getRegularSessions();
+    const next = regular[0] || state.sessions[0];
+    state.activeSessionId = next.id;
+  }
+
+  state.ui.activeTool = '';
+  persistSessionsState();
+  syncMaterialsFromSession();
+  applyToolModeUI();
+  renderSessionList();
+  renderMessages();
+  renderDrawer();
+  renderAvatarSelectPanel();
+  return true;
 }
 
 function getActiveSession() {
@@ -4652,6 +4723,7 @@ function renderMessages() {
   const session = getActiveSession();
   if (!session || !session.messages.length) {
     els.messageList.innerHTML = '<div class="muted">开始提问吧。你可以先上传资料，再点击工具生成结构化产物。</div>';
+    try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
     return;
   }
 
@@ -4745,6 +4817,7 @@ function renderMessages() {
   }
 
   els.messageList.scrollTop = els.messageList.scrollHeight;
+  try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
 }
 
 function renderAssistantMessageContent(text) {
@@ -5597,6 +5670,7 @@ async function openSettingsPanel() {
   ensureTeamSharingSettingsSection();
   ensureLorebookSettingsSection();
   ensureAvatarScenarioManagerUi();
+  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) {}
   refreshAvatarPreviews();
   els.tokenInput.value = state.token || '';
   els.userAvatarInput.value = state.ui.userAvatar || '';

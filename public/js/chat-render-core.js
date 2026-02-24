@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   'use strict';
 
   function buildSessionListHtml(params) {
@@ -22,19 +22,22 @@
     });
 
     if (!filtered.length) {
-      return '<div class="muted">没有匹配会话</div>';
+      return '<div class="muted">娌℃湁鍖归厤浼氳瘽</div>';
     }
 
     return filtered.map((session) => {
       const active = session.id === activeId ? 'active' : '';
       const favorite = session.favorite ? 'on' : '';
       const boundAvatar = session.avatarId ? getAvatarById(session.avatarId) : null;
-      const avatarTag = boundAvatar ? `<span class="session-avatar-tag">🎭 ${escapeHtml(boundAvatar.name)}</span>` : '';
+      const avatarTag = boundAvatar ? `<span class="session-avatar-tag">馃幁 ${escapeHtml(boundAvatar.name)}</span>` : '';
       return `
       <button class="session-item ${active}" data-action="switch-session" data-sid="${session.id}" type="button">
         <div class="session-top">
           <span class="session-title">${escapeHtml(session.title)}${avatarTag}</span>
-          <button class="session-fav ${favorite}" data-action="toggle-fav" data-sid="${session.id}" type="button">${session.favorite ? '★' : '☆'}</button>
+          <span class="session-actions" style="display:inline-flex;gap:6px;align-items:center;">
+            <button class="session-fav ${favorite}" data-action="toggle-fav" data-sid="${session.id}" type="button">${session.favorite ? '★' : '☆'}</button>
+            <button class="session-fav" data-action="delete-session" data-sid="${session.id}" type="button" title="Delete session" aria-label="Delete session">Del</button>
+          </span>
         </div>
         <div class="session-preview">${escapeHtml(getSessionPreview(session))}</div>
         <div class="session-time">${formatTime(session.updatedAt)}</div>
@@ -71,7 +74,7 @@
       parts.push(`TTFT ${Math.max(0, Math.round(message.firstTokenLatencyMs))}ms`);
     }
     if (!parts.length) return '';
-    return `<div class="msg-meta">${escapeHtml(parts.join(' · '))}</div>`;
+    return `<div class="msg-meta">${escapeHtml(parts.join(' 路 '))}</div>`;
   }
 
   function renderToolCardHtml(params) {
@@ -89,16 +92,16 @@
 
     const statusClass = message.status || 'running';
     const statusText = statusClass === 'done'
-      ? '已完成'
+      ? 'Done'
       : statusClass === 'error'
-        ? '失败'
-        : '进行中';
+        ? 'Error'
+        : 'Running';
 
     let action = '';
     let inlineArtifact = '';
     if (statusClass === 'done' && message.artifactId) {
       const expanded = stateUi.expandedArtifacts && stateUi.expandedArtifacts[message.artifactId];
-      action = `<button class="btn" data-action="toggle-inline-artifact" data-artifact-id="${message.artifactId}" type="button">${expanded ? '收起产物' : '查看产物'}</button>`;
+      action = `<button class="btn" data-action="toggle-inline-artifact" data-artifact-id="${message.artifactId}" type="button">${expanded ? '鏀惰捣浜х墿' : '鏌ョ湅浜х墿'}</button>`;
       if (expanded) {
         const session = getActiveSession();
         const artifact = session && session.artifacts.find((a) => a.id === message.artifactId);
@@ -118,14 +121,14 @@
         }
       }
     } else if (statusClass === 'error') {
-      action = `<button class="btn" data-action="retry-tool" data-tool="${message.tool}" type="button">重试</button>`;
+      action = `<button class="btn" data-action="retry-tool" data-tool="${message.tool}" type="button">閲嶈瘯</button>`;
     }
 
     return `
     <div class="tool-card ${statusClass}" data-mid="${message.id}">
       <div class="tool-card-head">
         <span class="tool-card-title">${escapeHtml(message.title || toolName(message.tool))}</span>
-        <span class="tool-card-meta">${statusText} · ${formatTime(message.createdAt)}</span>
+        <span class="tool-card-meta">${statusText} 路 ${formatTime(message.createdAt)}</span>
       </div>
       <div class="tool-card-meta">${escapeHtml(message.detail || '')}</div>
       ${action}

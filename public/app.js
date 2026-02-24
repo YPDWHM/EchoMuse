@@ -979,6 +979,7 @@ const {
   timestamp,
   downloadBlob
 } = sharedUtils;
+const escapeAttr = (s) => escapeHtml(String(s || ''));
 const {
   isValidSession,
   createSessionObject,
@@ -2420,6 +2421,7 @@ function bindEvents() {
     const ok = window.confirm('确认清空当前会话的聊天和产物吗？');
     if (!ok) return;
     session.messages = [];
+    session.messageTree = { version: MESSAGE_TREE_VERSION, selections: {}, activeLeafId: '' };
     session.artifacts = [];
     state.ui.activeArtifactId = '';
     delete session.scenePresetApplied;
@@ -2434,6 +2436,34 @@ function bindEvents() {
   });
 
   els.messageList.addEventListener('click', (event) => {
+    const branchPrevBtn = event.target.closest('[data-action="branch-prev"]');
+    if (branchPrevBtn) {
+      const session = getActiveSession();
+      if (session) switchMessageBranchSibling(session, branchPrevBtn.dataset.mid || '', -1);
+      return;
+    }
+
+    const branchNextBtn = event.target.closest('[data-action="branch-next"]');
+    if (branchNextBtn) {
+      const session = getActiveSession();
+      if (session) switchMessageBranchSibling(session, branchNextBtn.dataset.mid || '', +1);
+      return;
+    }
+
+    const regenBranchBtn = event.target.closest('[data-action="regen-branch"]');
+    if (regenBranchBtn) {
+      const session = getActiveSession();
+      if (session) regenerateAssistantBranch(session, regenBranchBtn.dataset.mid || '').catch((e) => setStatus(`分支重生成失败：${e.message || e}`));
+      return;
+    }
+
+    const editResendBtn = event.target.closest('[data-action="edit-resend-branch"]');
+    if (editResendBtn) {
+      const session = getActiveSession();
+      if (session) editAndResendFromUserMessage(session, editResendBtn.dataset.mid || '').catch((e) => setStatus(`编辑重发失败：${e.message || e}`));
+      return;
+    }
+
     const toggleBtn = event.target.closest('[data-action="toggle-inline-artifact"]');
     if (toggleBtn) {
       const artifactId = toggleBtn.dataset.artifactId || '';
@@ -2561,6 +2591,9 @@ function loadSessionsState() {
   if (!state.sessions.length) {
     state.sessions = [createSessionObject('会话 1')];
   }
+  state.sessions.forEach((s) => {
+    try { ensureSessionMessageTreeState(s); } catch (_) {}
+  });
 
   const activeId = localStorage.getItem(STORAGE_ACTIVE_KEY);
   if (activeId && state.sessions.some((s) => s.id === activeId)) {
@@ -2571,6 +2604,9 @@ function loadSessionsState() {
 }
 
 function persistSessionsState() {
+  state.sessions.forEach((s) => {
+    try { ensureSessionMessageTreeState(s); } catch (_) {}
+  });
   state.sessions = sortSessions(state.sessions).slice(0, MAX_SESSIONS);
   localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(state.sessions));
   localStorage.setItem(STORAGE_ACTIVE_KEY, state.activeSessionId);
@@ -2578,6 +2614,7 @@ function persistSessionsState() {
 
 function createSession(title) {
   const session = createSessionObject(title);
+  ensureSessionMessageTreeState(session);
   state.sessions.unshift(session);
   state.activeSessionId = session.id;
   persistSessionsState();
@@ -2597,6 +2634,7 @@ function deleteSession(sessionId) {
 
   if (!state.sessions.length) {
     const replacement = createSessionObject('会话 1');
+    ensureSessionMessageTreeState(replacement);
     state.sessions = [replacement];
     state.activeSessionId = replacement.id;
   } else if (wasActive || !state.sessions.some((s) => s.id === state.activeSessionId)) {
@@ -2617,7 +2655,9 @@ function deleteSession(sessionId) {
 }
 
 function getActiveSession() {
-  return state.sessions.find((s) => s.id === state.activeSessionId) || null;
+  const session = state.sessions.find((s) => s.id === state.activeSessionId) || null;
+  if (session) ensureSessionMessageTreeState(session);
+  return session;
 }
 
 function switchSession(sessionId) {
@@ -2644,6 +2684,215 @@ function toggleFavorite(sessionId) {
 function touchSession(session) {
   session.updatedAt = Date.now();
 }
+
+const MESSAGE_TREE_ROOT_KEY = '__root__';
+const MESSAGE_TREE_VERSION = 1;
+
+function isChatMessageNode(msg) {
+  return Boolean(msg && (!msg.kind || msg.kind === 'chat') && (msg.role === 'user' || msg.role === 'assistant'));
+}
+
+function normalizeMessageTreeParentId(value) {
+  const id = String(value || '').trim();
+  return id || null;
+}
+
+function getMessageTreeParentKey(parentId) {
+  return normalizeMessageTreeParentId(parentId) || MESSAGE_TREE_ROOT_KEY;
+}
+
+function getSessionMessageById(session, messageId) {
+  if (!session || !Array.isArray(session.messages)) return null;
+  const id = String(messageId || '').trim();
+  if (!id) return null;
+  return session.messages.find((m) => m && m.id === id) || null;
+}
+
+function getSessionChatMessages(session) {
+  if (!session || !Array.isArray(session.messages)) return [];
+  return session.messages.filter(isChatMessageNode);
+}
+
+function buildSessionMessageTreeIndex(session) {
+  const chatMessages = getSessionChatMessages(session);
+  const byId = new Map();
+  const childrenByParent = new Map();
+  for (const msg of chatMessages) {
+    byId.set(msg.id, msg);
+  }
+  for (const msg of chatMessages) {
+    const parentId = normalizeMessageTreeParentId(msg.treeParentId);
+    const key = getMessageTreeParentKey(parentId && byId.has(parentId) ? parentId : null);
+    if (!childrenByParent.has(key)) childrenByParent.set(key, []);
+    childrenByParent.get(key).push(msg);
+  }
+  for (const list of childrenByParent.values()) {
+    list.sort((a, b) => {
+      const at = Number(a && a.createdAt || 0);
+      const bt = Number(b && b.createdAt || 0);
+      if (at !== bt) return at - bt;
+      return String(a && a.id || '').localeCompare(String(b && b.id || ''));
+    });
+  }
+  return { byId, childrenByParent };
+}
+
+function ensureSessionMessageTreeState(session) {
+  if (!session || !Array.isArray(session.messages)) return session;
+  if (!session.messageTree || typeof session.messageTree !== 'object') {
+    session.messageTree = {};
+  }
+  if (!session.messageTree.selections || typeof session.messageTree.selections !== 'object') {
+    session.messageTree.selections = {};
+  }
+  session.messageTree.version = MESSAGE_TREE_VERSION;
+
+  let changed = false;
+  let prevChatId = null;
+  for (const msg of session.messages) {
+    if (!isChatMessageNode(msg)) continue;
+    if (!msg.treeNodeId || typeof msg.treeNodeId !== 'string') {
+      msg.treeNodeId = msg.id;
+      changed = true;
+    }
+    if (typeof msg.treeParentId === 'undefined') {
+      msg.treeParentId = prevChatId;
+      changed = true;
+    }
+    msg.treeParentId = normalizeMessageTreeParentId(msg.treeParentId);
+    prevChatId = msg.id;
+  }
+
+  const idx = buildSessionMessageTreeIndex(session);
+  const selections = session.messageTree.selections;
+  for (const [parentKey, children] of idx.childrenByParent.entries()) {
+    if (!children.length) continue;
+    const current = String(selections[parentKey] || '');
+    if (!current || !children.some((m) => m.id === current)) {
+      selections[parentKey] = children[children.length - 1].id;
+      changed = true;
+    }
+  }
+
+  const visibleChatPath = getVisibleChatPathForSession(session, idx);
+  const currentLeaf = visibleChatPath.length ? visibleChatPath[visibleChatPath.length - 1].id : '';
+  if (String(session.messageTree.activeLeafId || '') !== String(currentLeaf || '')) {
+    session.messageTree.activeLeafId = currentLeaf || '';
+    changed = true;
+  }
+  if (changed) touchSession(session);
+  return session;
+}
+
+function getVisibleChatPathForSession(session, prebuiltIndex = null) {
+  if (!session || !Array.isArray(session.messages)) return [];
+  const idx = prebuiltIndex || buildSessionMessageTreeIndex(session);
+  const selections = (session.messageTree && session.messageTree.selections && typeof session.messageTree.selections === 'object')
+    ? session.messageTree.selections
+    : {};
+  const path = [];
+  let parentId = null;
+  let guard = 0;
+  while (guard < 4096) {
+    guard += 1;
+    const key = getMessageTreeParentKey(parentId);
+    const children = idx.childrenByParent.get(key) || [];
+    if (!children.length) break;
+    let selected = children.find((m) => m.id === selections[key]) || null;
+    if (!selected) selected = children[children.length - 1];
+    if (!selected) break;
+    path.push(selected);
+    parentId = selected.id;
+  }
+  return path;
+}
+
+function getVisibleChatMessageIds(session) {
+  return new Set(getVisibleChatPathForSession(session).map((m) => m.id));
+}
+
+function getVisibleSessionMessages(session) {
+  if (!session || !Array.isArray(session.messages)) return [];
+  ensureSessionMessageTreeState(session);
+  const visibleChatIds = getVisibleChatMessageIds(session);
+  return session.messages.filter((m) => {
+    if (!isChatMessageNode(m)) return true;
+    return visibleChatIds.has(m.id);
+  });
+}
+
+function getVisibleChatLeafMessage(session) {
+  const path = getVisibleChatPathForSession(session);
+  return path.length ? path[path.length - 1] : null;
+}
+
+function setSessionBranchSelection(session, parentId, selectedMessageId) {
+  if (!session) return false;
+  ensureSessionMessageTreeState(session);
+  const key = getMessageTreeParentKey(parentId);
+  const msgId = String(selectedMessageId || '').trim();
+  if (!msgId) return false;
+  if (!session.messageTree || !session.messageTree.selections) return false;
+  if (session.messageTree.selections[key] === msgId) return false;
+  session.messageTree.selections[key] = msgId;
+  const visiblePath = getVisibleChatPathForSession(session);
+  session.messageTree.activeLeafId = visiblePath.length ? visiblePath[visiblePath.length - 1].id : '';
+  touchSession(session);
+  return true;
+}
+
+function getMessageSiblingBranchInfo(session, message, prebuiltIndex = null) {
+  if (!session || !message || !isChatMessageNode(message)) return null;
+  ensureSessionMessageTreeState(session);
+  const idx = prebuiltIndex || buildSessionMessageTreeIndex(session);
+  const parentId = normalizeMessageTreeParentId(message.treeParentId);
+  const key = getMessageTreeParentKey(parentId);
+  const siblings = (idx.childrenByParent.get(key) || []).filter(Boolean);
+  if (!siblings.length) return null;
+  const currentIndex = siblings.findIndex((m) => m.id === message.id);
+  if (currentIndex < 0) return null;
+  return {
+    parentId,
+    parentKey: key,
+    siblings,
+    index: currentIndex,
+    count: siblings.length,
+    hasPrev: currentIndex > 0,
+    hasNext: currentIndex < siblings.length - 1
+  };
+}
+
+function buildMessageBranchControlsHtml(session, message, prebuiltIndex = null) {
+  if (!session || !message || !isChatMessageNode(message)) return '';
+  const branch = getMessageSiblingBranchInfo(session, message, prebuiltIndex);
+  const isGroupSession = Boolean(session.avatarId && (() => {
+    const av = getAvatarById(session.avatarId);
+    return av && av.type === 'group';
+  })());
+  const actions = [];
+  if (message.role === 'assistant') {
+    const disabled = state.ui.chatStreaming || isGroupSession;
+    const title = isGroupSession ? '群聊分支重生成功能后续支持' : '重新生成此回复（形成分支）';
+    actions.push(`<button class="msg-branch-btn" style="border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 8px;font-size:12px;color:#334155;cursor:pointer;" data-action="regen-branch" data-mid="${message.id}" type="button" ${disabled ? 'disabled' : ''} title="${escapeHtml(title)}">↻ 重新生成</button>`);
+  } else if (message.role === 'user') {
+    const disabled = state.ui.chatStreaming || isGroupSession;
+    const title = isGroupSession ? '群聊编辑重发分支后续支持' : '编辑后重发（形成分支）';
+    actions.push(`<button class="msg-branch-btn" style="border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 8px;font-size:12px;color:#334155;cursor:pointer;" data-action="edit-resend-branch" data-mid="${message.id}" type="button" ${disabled ? 'disabled' : ''} title="${escapeHtml(title)}">✎ 编辑重发</button>`);
+  }
+  let nav = '';
+  if (branch && branch.count > 1) {
+    nav = `
+      <span class="msg-branch-nav" data-parent-key="${escapeAttr(branch.parentKey)}" style="display:inline-flex;align-items:center;gap:4px;">
+        <button class="msg-branch-btn" style="border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 6px;font-size:12px;color:#334155;cursor:pointer;" data-action="branch-prev" data-mid="${message.id}" type="button" ${branch.hasPrev ? '' : 'disabled'} aria-label="Previous branch">◀</button>
+        <span class="msg-branch-index" style="font-size:12px;color:#64748b;min-width:34px;text-align:center;">${branch.index + 1}/${branch.count}</span>
+        <button class="msg-branch-btn" style="border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 6px;font-size:12px;color:#334155;cursor:pointer;" data-action="branch-next" data-mid="${message.id}" type="button" ${branch.hasNext ? '' : 'disabled'} aria-label="Next branch">▶</button>
+      </span>
+    `;
+  }
+  if (!actions.length && !nav) return '';
+  return `<div class="msg-branch-controls" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;">${nav}${actions.join('')}</div>`;
+}
+
 
 /* ── Avatar (角色) CRUD ── */
 
@@ -3081,13 +3330,18 @@ async function handleTavernImport(file) {
     session.contactOwnerAvatarId = avatar.id;
     avatar.contactSessionId = session.id;
     if (card.firstMessage) {
+      const msgId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       session.messages.push({
-        id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        id: msgId,
         kind: 'chat',
         role: 'assistant',
         content: card.firstMessage,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        treeNodeId: msgId,
+        treeParentId: null
       });
+      ensureSessionMessageTreeState(session);
+      setSessionBranchSelection(session, null, msgId);
     }
     touchSession(session);
     persistAvatars();
@@ -3678,13 +3932,18 @@ function applyAvatarOpeningScenarioToSession(session, avatar, scene) {
   if (!session || !avatar || !scene) return;
   if (!Array.isArray(session.messages)) session.messages = [];
   if (!hasChatMessages(session)) {
+    const msgId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     session.messages.push({
-      id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      id: msgId,
       kind: 'chat',
       role: 'assistant',
       content: String(scene.openingMessage || '').trim(),
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      treeNodeId: msgId,
+      treeParentId: null
     });
+    ensureSessionMessageTreeState(session);
+    setSessionBranchSelection(session, null, msgId);
   }
   session.scenePresetApplied = true;
   session.scenePickerDismissed = false;
@@ -4289,7 +4548,7 @@ function renderSessionList() {
     getAvatarById,
     escapeHtml,
     formatTime,
-    getSessionPreview
+    getSessionPreview: getSessionPreviewForUi
   });
 }
 
@@ -4307,6 +4566,14 @@ function isAvatarTranslationOverlayEnabled(session) {
   );
 }
 
+function getSessionPreviewForUi(session) {
+  const visibleMessages = getVisibleSessionMessages(session);
+  if (!session) return getSessionPreview(session);
+  if (!visibleMessages.length) return getSessionPreview(session);
+  const pseudoSession = { ...session, messages: visibleMessages };
+  return getSessionPreview(pseudoSession);
+}
+
 function getOverlayTranslationTaskKey(sessionId, messageId, lang, sourceText) {
   return `${sessionId}:${messageId}:${lang}:${String(sourceText || '').length}`;
 }
@@ -4318,7 +4585,9 @@ function isTranslatableAssistantMessage(session, message) {
   if (message.role !== 'assistant') return false;
   if (message.isThinking) return false;
   if (!String(message.content || '').trim()) return false;
-  const lastMsg = session.messages && session.messages.length ? session.messages[session.messages.length - 1] : null;
+  const visibleMessages = getVisibleSessionMessages(session);
+  if (!visibleMessages.some((m) => m && m.id === message.id)) return false;
+  const lastMsg = visibleMessages.length ? visibleMessages[visibleMessages.length - 1] : null;
   if (state.ui.chatStreaming && lastMsg && lastMsg.id === message.id) return false;
   return true;
 }
@@ -4396,10 +4665,11 @@ function getOverlayDisplayContent(session, message) {
 }
 
 function getOverlaySessionPreview(session) {
-  const base = getSessionPreview(session);
-  if (!session || !Array.isArray(session.messages) || !session.messages.length) return base;
+  const base = getSessionPreviewForUi(session);
+  const visibleMessages = getVisibleSessionMessages(session);
+  if (!session || !visibleMessages.length) return base;
   if (!isAvatarTranslationOverlayEnabled(session)) return base;
-  const last = session.messages[session.messages.length - 1];
+  const last = visibleMessages[visibleMessages.length - 1];
   if (!last || (last.kind && last.kind !== 'chat') || last.role !== 'assistant') return base;
   const display = getOverlayDisplayContent(session, last);
   return String(display || '').replace(/\s+/g, ' ').slice(0, 44) || base;
@@ -4445,13 +4715,14 @@ function enqueueOverlayTranslation(session, message, options = {}) {
 }
 
 function queueRecentAssistantMessagesForOverlayTranslation(session, options = {}) {
-  if (!session || !Array.isArray(session.messages) || !session.messages.length) return 0;
+  const visibleMessages = getVisibleSessionMessages(session);
+  if (!session || !visibleMessages.length) return 0;
   if (!isAvatarTranslationOverlayEnabled(session)) return 0;
   const force = Boolean(options && options.force);
   const maxCount = Math.max(1, Number(options.maxCount || 2) || 2);
   let queued = 0;
-  for (let i = session.messages.length - 1; i >= 0; i -= 1) {
-    const msg = session.messages[i];
+  for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+    const msg = visibleMessages[i];
     if (!msg || msg.role !== 'assistant') continue;
     if (msg.kind && msg.kind !== 'chat') continue;
     enqueueOverlayTranslation(session, msg, { force });
@@ -4721,15 +4992,17 @@ async function runOverlayTranslationTask(task) {
 
 function renderMessages() {
   const session = getActiveSession();
-  if (!session || !session.messages.length) {
+  const visibleMessages = getVisibleSessionMessages(session);
+  if (!session || !visibleMessages.length) {
     els.messageList.innerHTML = '<div class="muted">开始提问吧。你可以先上传资料，再点击工具生成结构化产物。</div>';
     try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
     return;
   }
+  const messageTreeIndex = buildSessionMessageTreeIndex(session);
 
   const boundAvatar = session.avatarId ? getAvatarById(session.avatarId) : null;
 
-  els.messageList.innerHTML = session.messages.map((message) => {
+  els.messageList.innerHTML = visibleMessages.map((message) => {
     if (message.kind === 'tool') return renderToolCard(message);
     const role = message.role === 'user' ? 'user' : 'assistant';
     let avatarVal;
@@ -4796,21 +5069,22 @@ function renderMessages() {
       `;
     }
     const speakerHtml = speakerName ? `<div class="msg-speaker-name">${escapeHtml(speakerName)}</div>` : '';
+    const branchControlsHtml = buildMessageBranchControlsHtml(session, message, messageTreeIndex);
     const metaHtml = renderMessageMeta(message, role);
-    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${lorebookHitsHtml}${content}${metaHtml}</div></div>`;
+    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${lorebookHitsHtml}${content}${branchControlsHtml}${metaHtml}</div></div>`;
   }).join('');
 
   if (isAvatarTranslationOverlayEnabled(session)) {
     let queuedAssistantCount = 0;
-    for (let i = session.messages.length - 1; i >= 0; i -= 1) {
-      const msg = session.messages[i];
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      const msg = visibleMessages[i];
       if (!isTranslatableAssistantMessage(session, msg)) continue;
       enqueueOverlayTranslation(session, msg);
       queuedAssistantCount += 1;
       if (queuedAssistantCount >= translationOverlayRuntime.renderLookback) break;
     }
     // Also translate the first assistant message (character greeting) if not already queued
-    const firstAssistant = session.messages.find((m) => m.role === 'assistant' && (!m.kind || m.kind === 'chat'));
+    const firstAssistant = visibleMessages.find((m) => m.role === 'assistant' && (!m.kind || m.kind === 'chat'));
     if (firstAssistant && isTranslatableAssistantMessage(session, firstAssistant)) {
       enqueueOverlayTranslation(session, firstAssistant);
     }
@@ -4869,15 +5143,29 @@ function renderToolCard(message) {
 function appendChatMessage(role, content, extra) {
   const session = getActiveSession();
   if (!session) return null;
+  ensureSessionMessageTreeState(session);
+  const extraObj = (extra && typeof extra === 'object') ? extra : {};
+  const explicitParentId = Object.prototype.hasOwnProperty.call(extraObj, '_treeParentId')
+    ? normalizeMessageTreeParentId(extraObj._treeParentId)
+    : null;
+  const inferredParent = getVisibleChatLeafMessage(session);
+  const treeParentId = Object.prototype.hasOwnProperty.call(extraObj, '_treeParentId')
+    ? explicitParentId
+    : (inferredParent ? inferredParent.id : null);
   const message = {
     id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     role,
     content: String(content || ''),
     createdAt: Date.now(),
-    ...(extra && typeof extra === 'object' ? extra : {})
+    ...extraObj,
+    treeNodeId: extraObj.treeNodeId || undefined,
+    treeParentId
   };
+  delete message._treeParentId;
+  if (!message.treeNodeId) message.treeNodeId = message.id;
   session.messages.push(message);
+  setSessionBranchSelection(session, treeParentId, message.id);
   if (role === 'user') {
     const trimmed = message.content.trim();
     if (state.settings.chatAutoTitle && trimmed && (!session.title || /^会话/.test(session.title) || session.title === '新会话')) {
@@ -4916,8 +5204,84 @@ function updateMessage(messageId, updater) {
   touchSession(session);
 }
 
-function buildChatPayloadMessages(session) {
-  const filtered = session.messages
+function switchMessageBranchSibling(session, messageId, direction) {
+  if (!session) return false;
+  const message = getSessionMessageById(session, messageId);
+  if (!message || !isChatMessageNode(message)) return false;
+  const info = getMessageSiblingBranchInfo(session, message);
+  if (!info || info.count <= 1) return false;
+  const nextIndex = info.index + Number(direction || 0);
+  if (nextIndex < 0 || nextIndex >= info.count) return false;
+  const nextMsg = info.siblings[nextIndex];
+  if (!nextMsg) return false;
+  if (!setSessionBranchSelection(session, info.parentId, nextMsg.id)) return false;
+  persistSessionsState();
+  renderSessionList();
+  renderMessages();
+  return true;
+}
+
+async function editAndResendFromUserMessage(session, messageId) {
+  if (!session || state.ui.chatStreaming) return;
+  const target = getSessionMessageById(session, messageId);
+  if (!target || !isChatMessageNode(target) || target.role !== 'user') return;
+  const isGroup = Boolean(session.avatarId && (() => {
+    const av = getAvatarById(session.avatarId);
+    return av && av.type === 'group';
+  })());
+  if (isGroup) {
+    setStatus('群聊分支编辑重发后续支持。');
+    return;
+  }
+  const edited = window.prompt('编辑后重发（将形成新分支）', String(target.content || ''));
+  if (edited == null) return;
+  const text = String(edited || '').trim();
+  if (!text) return;
+  appendChatMessage('user', text, { _treeParentId: normalizeMessageTreeParentId(target.treeParentId) });
+  persistSessionsState();
+  renderSessionList();
+  renderMessages();
+  await sendSingleChatMessage(session);
+}
+
+async function regenerateAssistantBranch(session, messageId) {
+  if (!session || state.ui.chatStreaming) return;
+  const target = getSessionMessageById(session, messageId);
+  if (!target || !isChatMessageNode(target) || target.role !== 'assistant') return;
+  const isGroup = Boolean(target.speakerAvatarId) || Boolean(session.avatarId && (() => {
+    const av = getAvatarById(session.avatarId);
+    return av && av.type === 'group';
+  })());
+  if (isGroup) {
+    setStatus('群聊回复分支重生成后续支持。');
+    return;
+  }
+  const parentId = normalizeMessageTreeParentId(target.treeParentId);
+  const payloadMessages = parentId
+    ? buildChatPayloadMessages(session, { untilChatMessageId: parentId })
+    : [];
+  const assistant = appendChatMessage('assistant', '', {
+    modelName: getChatModelName(),
+    _treeParentId: parentId
+  });
+  persistSessionsState();
+  renderSessionList();
+  renderMessages();
+  await sendSingleChatMessage(session, {
+    payloadMessagesOverride: payloadMessages,
+    assistantMessage: assistant
+  });
+}
+
+function buildChatPayloadMessages(session, options = {}) {
+  const visibleMessages = getVisibleSessionMessages(session);
+  const untilChatMessageId = String(options && options.untilChatMessageId || '').trim();
+  let sourceMessagesVisible = visibleMessages;
+  if (untilChatMessageId) {
+    const idx = visibleMessages.findIndex((m) => isChatMessageNode(m) && m.id === untilChatMessageId);
+    if (idx >= 0) sourceMessagesVisible = visibleMessages.slice(0, idx + 1);
+  }
+  const filtered = sourceMessagesVisible
     .filter((m) => m.kind === 'chat' && (m.role === 'user' || m.role === 'assistant'));
   const limit = Math.max(1, Number(state.settings.chatContextLimit || 14));
   const sourceMessages = state.settings.chatContextUnlimited ? filtered : filtered.slice(-limit);
@@ -5049,9 +5413,13 @@ async function sendChatMessage() {
   }
 }
 
-async function sendSingleChatMessage(session) {
-  const payloadMessages = buildChatPayloadMessages(session);
-  const assistant = appendChatMessage('assistant', '', { modelName: getChatModelName() });
+async function sendSingleChatMessage(session, options = {}) {
+  const payloadMessages = Array.isArray(options && options.payloadMessagesOverride)
+    ? options.payloadMessagesOverride
+    : buildChatPayloadMessages(session);
+  const assistant = (options && options.assistantMessage)
+    ? options.assistantMessage
+    : appendChatMessage('assistant', '', { modelName: getChatModelName() });
   const samplingOptions = getChatSamplingOptions();
 
   state.ui.chatStreaming = true;

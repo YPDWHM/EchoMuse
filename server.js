@@ -2635,6 +2635,33 @@ app.post('/api/chat', async (req, res) => {
       if (groupContext && groupContext.groupName && groupContext.currentSpeaker) {
         const otherMembers = (groupContext.memberNames || []).filter(n => n !== groupContext.currentSpeaker).join('、');
         systemContent += `\n你正在一个名为「${groupContext.groupName}」的群聊中。其他成员有：${otherMembers}。你是${groupContext.currentSpeaker}，请以你的身份回复。注意参考其他成员之前的发言来保持对话连贯。`;
+        if (Array.isArray(groupContext.relationshipHints) && groupContext.relationshipHints.length) {
+          const relationLines = groupContext.relationshipHints
+            .map((item) => {
+              const name = String(item && item.name || '').trim().slice(0, 40);
+              const label = String(item && (item.label || item.type) || '').trim().slice(0, 20) || '陌生人';
+              if (!name) return '';
+              return `- 你与 ${name} 的关系：${label}`;
+            })
+            .filter(Boolean)
+            .join('\n');
+          if (relationLines) {
+            systemContent += `\n你与群内成员的关系设定如下，请据此调整语气、亲密度、敌意或竞争感：\n${relationLines}`;
+          }
+        }
+        if (groupContext.lastSpeaker) {
+          const lastSpeaker = String(groupContext.lastSpeaker).trim().slice(0, 40);
+          if (lastSpeaker) {
+            systemContent += `\n上一位发言者是：${lastSpeaker}。如果合适，可以直接回应 ta 的观点或情绪。`;
+          }
+        }
+        if (groupContext.spectatorMode) {
+          systemContent += '\n当前是旁观模式：用户正在观看你们互动。优先与其他角色对话并推进话题，不要等待用户再次发言。';
+        }
+        if (typeof groupContext.turnInstruction === 'string' && groupContext.turnInstruction.trim()) {
+          systemContent += `\n${groupContext.turnInstruction.trim().slice(0, 220)}`;
+        }
+        systemContent += '\n群聊回合规则（必须遵守）：你这次只能输出“你自己（当前角色）的一次发言”，不要代替其他角色连续发言，不要写多轮对话脚本，不要输出 [角色A]/[角色B] 的往返台词列表。保持 1 次回复、1 位说话者、简洁连贯。';
       }
       llmMessages.push({ role: 'system', content: systemContent });
     } else if (useContext) {

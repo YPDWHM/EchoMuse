@@ -922,7 +922,8 @@ const state = {
     editAvailableModels: [],
     editSelectedModels: [],
     sidebarTab: localStorage.getItem('chatbox_sidebar_tab_v1') || 'sessions',
-    activeContactAvatarId: ''
+    activeContactAvatarId: '',
+    selectedMessageId: ''
   },
   pdfjsLib: null
 };
@@ -2436,6 +2437,11 @@ function bindEvents() {
   });
 
   els.messageList.addEventListener('click', (event) => {
+    const clickedMessageBubble = event.target.closest('.msg[data-mid]');
+    if (clickedMessageBubble) {
+      setSelectedMessageBubble(clickedMessageBubble.dataset.mid || '');
+    }
+
     const branchPrevBtn = event.target.closest('[data-action="branch-prev"]');
     if (branchPrevBtn) {
       const session = getActiveSession();
@@ -2692,6 +2698,10 @@ function isChatMessageNode(msg) {
   return Boolean(msg && (!msg.kind || msg.kind === 'chat') && (msg.role === 'user' || msg.role === 'assistant'));
 }
 
+function isToolMessageNode(msg) {
+  return Boolean(msg && msg.kind === 'tool');
+}
+
 function normalizeMessageTreeParentId(value) {
   const id = String(value || '').trim();
   return id || null;
@@ -2750,17 +2760,26 @@ function ensureSessionMessageTreeState(session) {
   let changed = false;
   let prevChatId = null;
   for (const msg of session.messages) {
-    if (!isChatMessageNode(msg)) continue;
-    if (!msg.treeNodeId || typeof msg.treeNodeId !== 'string') {
-      msg.treeNodeId = msg.id;
-      changed = true;
+    if (isChatMessageNode(msg)) {
+      if (!msg.treeNodeId || typeof msg.treeNodeId !== 'string') {
+        msg.treeNodeId = msg.id;
+        changed = true;
+      }
+      if (typeof msg.treeParentId === 'undefined') {
+        msg.treeParentId = prevChatId;
+        changed = true;
+      }
+      msg.treeParentId = normalizeMessageTreeParentId(msg.treeParentId);
+      prevChatId = msg.id;
+      continue;
     }
-    if (typeof msg.treeParentId === 'undefined') {
-      msg.treeParentId = prevChatId;
-      changed = true;
+    if (isToolMessageNode(msg)) {
+      if (typeof msg.treeParentId === 'undefined') {
+        msg.treeParentId = prevChatId;
+        changed = true;
+      }
+      msg.treeParentId = normalizeMessageTreeParentId(msg.treeParentId);
     }
-    msg.treeParentId = normalizeMessageTreeParentId(msg.treeParentId);
-    prevChatId = msg.id;
   }
 
   const idx = buildSessionMessageTreeIndex(session);
@@ -2815,9 +2834,16 @@ function getVisibleSessionMessages(session) {
   if (!session || !Array.isArray(session.messages)) return [];
   ensureSessionMessageTreeState(session);
   const visibleChatIds = getVisibleChatMessageIds(session);
+  const allChatIds = new Set(getSessionChatMessages(session).map((m) => m.id));
   return session.messages.filter((m) => {
-    if (!isChatMessageNode(m)) return true;
-    return visibleChatIds.has(m.id);
+    if (isChatMessageNode(m)) return visibleChatIds.has(m.id);
+    if (isToolMessageNode(m)) {
+      const anchorId = normalizeMessageTreeParentId(m.treeParentId);
+      if (!anchorId) return true;
+      if (!allChatIds.has(anchorId)) return true;
+      return visibleChatIds.has(anchorId);
+    }
+    return true;
   });
 }
 
@@ -2978,6 +3004,360 @@ function getAvatarTags(avatar) {
   return avatar.tags;
 }
 
+const GROUP_RELATION_TYPES = ['stranger', 'friend', 'rival'];
+
+function groupRelationLabel(type) {
+  const t = String(type || 'stranger');
+  if (t === 'friend') return isZhUiLanguage() ? '朋友' : 'Friend';
+  if (t === 'rival') return isZhUiLanguage() ? '对手' : 'Rival';
+  return isZhUiLanguage() ? '陌生人' : 'Stranger';
+}
+
+function getGroupRelationPairKey(aId, bId) {
+  const a = String(aId || '').trim();
+  const b = String(bId || '').trim();
+  if (!a || !b) return '';
+  return [a, b].sort().join('::');
+}
+
+function clampGroupSpectatorRounds(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(5, Math.round(n)));
+}
+
+function normalizeGroupRelationMap(raw, memberIds) {
+  const out = {};
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const ids = Array.isArray(memberIds) ? memberIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+  for (let i = 0; i < ids.length; i += 1) {
+    for (let j = i + 1; j < ids.length; j += 1) {
+      const key = getGroupRelationPairKey(ids[i], ids[j]);
+      if (!key) continue;
+      const val = String(src[key] || 'stranger').trim().toLowerCase();
+      out[key] = GROUP_RELATION_TYPES.includes(val) ? val : 'stranger';
+    }
+  }
+  return out;
+}
+
+function normalizeGroupChatSettings(raw, memberIds) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  return {
+    allowAiCrossTalk: src.allowAiCrossTalk !== false,
+    spectatorRoundsPerTrigger: clampGroupSpectatorRounds(src.spectatorRoundsPerTrigger),
+    lastSpeakerId: String(src.lastSpeakerId || '').trim(),
+    relationMap: normalizeGroupRelationMap(src.relationMap, memberIds)
+  };
+}
+
+function ensureGroupChatSettings(group) {
+  if (!group || group.type !== 'group') return null;
+  group.groupChatSettings = normalizeGroupChatSettings(group.groupChatSettings, group.memberIds || []);
+  return group.groupChatSettings;
+}
+
+function getGroupPairRelationType(group, aId, bId) {
+  const settings = ensureGroupChatSettings(group);
+  if (!settings) return 'stranger';
+  const key = getGroupRelationPairKey(aId, bId);
+  if (!key) return 'stranger';
+  const v = String(settings.relationMap && settings.relationMap[key] || 'stranger').trim().toLowerCase();
+  return GROUP_RELATION_TYPES.includes(v) ? v : 'stranger';
+}
+
+function getGroupRelationHintsForSpeaker(group, speaker, members) {
+  if (!group || !speaker || !Array.isArray(members)) return [];
+  return members
+    .filter((m) => m && m.id !== speaker.id)
+    .map((m) => ({
+      memberId: m.id,
+      name: m.name,
+      type: getGroupPairRelationType(group, speaker.id, m.id)
+    }));
+}
+
+function getGroupOrderedMembersForTurn(group, members) {
+  if (!group || !Array.isArray(members) || members.length <= 1) return [...(members || [])];
+  const settings = ensureGroupChatSettings(group);
+  if (!settings) return [...members];
+  const lastId = String(settings.lastSpeakerId || '').trim();
+  const startIdxBase = lastId ? members.findIndex((m) => m && m.id === lastId) : -1;
+  const startIdx = startIdxBase >= 0 ? ((startIdxBase + 1) % members.length) : 0;
+  const ordered = [];
+  for (let i = 0; i < members.length; i += 1) {
+    ordered.push(members[(startIdx + i) % members.length]);
+  }
+  return ordered.filter(Boolean);
+}
+
+function normalizeSpeakerTagKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s\[\]【】()（）:：'"`~!@#$%^&*+=,，.。!?！？/\\|<>《》_-]+/g, '');
+}
+
+function isGroupReplyTaggedLine(line) {
+  return /^\s*[\[【(（]?\s*[^:\]】)）]{1,80}\s*[\]】)）]?\s*[:：]\s+/.test(String(line || ''));
+}
+
+function parseGroupReplyTaggedLine(line) {
+  const s = String(line || '');
+  const m = s.match(/^\s*[\[【(（]?\s*([^:\]】)）]{1,80})\s*[\]】)）]?\s*[:：]\s*(.*)$/);
+  if (!m) return null;
+  return {
+    speakerLabel: String(m[1] || '').trim(),
+    text: String(m[2] || '').trim()
+  };
+}
+
+function isCurrentGroupSpeakerLabel(label, member) {
+  const tagKey = normalizeSpeakerTagKey(label);
+  const nameKey = normalizeSpeakerTagKey(member && member.name);
+  if (!tagKey || !nameKey) return false;
+  return tagKey === nameKey || tagKey.includes(nameKey) || nameKey.includes(tagKey);
+}
+
+function dedupeRepeatedLines(lines, maxRepeat = 1) {
+  const out = [];
+  let prevKey = '';
+  let repeat = 0;
+  for (const rawLine of (Array.isArray(lines) ? lines : [])) {
+    const line = String(rawLine || '').trimEnd();
+    const key = line.replace(/\s+/g, ' ').trim();
+    if (!key) {
+      if (out.length && out[out.length - 1] !== '') out.push('');
+      prevKey = '';
+      repeat = 0;
+      continue;
+    }
+    if (key === prevKey) {
+      repeat += 1;
+      if (repeat > maxRepeat) continue;
+    } else {
+      prevKey = key;
+      repeat = 1;
+    }
+    out.push(line);
+  }
+  while (out.length && !String(out[out.length - 1] || '').trim()) out.pop();
+  return out;
+}
+
+function sanitizeGroupSpeakerReplyContent(content, member, members) {
+  const raw = String(content || '').replace(/\r/g, '').trim();
+  if (!raw) return '';
+  const lines = raw.split('\n');
+  const hasTaggedLines = lines.some(isGroupReplyTaggedLine);
+  let collected = [];
+  let startedFromTaggedCurrent = false;
+  let seenTaggedBoundary = false;
+
+  if (hasTaggedLines) {
+    for (const line of lines) {
+      const parsed = parseGroupReplyTaggedLine(line);
+      if (!parsed) {
+        if (!seenTaggedBoundary) {
+          // Keep natural untagged opener text before model starts scripting multiple speakers.
+          collected.push(String(line || ''));
+          continue;
+        }
+        if (startedFromTaggedCurrent && collected.length) {
+          collected.push(String(line || ''));
+        }
+        continue;
+      }
+      seenTaggedBoundary = true;
+      const isCurrent = isCurrentGroupSpeakerLabel(parsed.speakerLabel, member);
+      if (isCurrent) {
+        startedFromTaggedCurrent = true;
+        if (parsed.text) collected.push(parsed.text);
+        continue;
+      }
+      // Another speaker/user tag appeared.
+      if (collected.some((l) => String(l || '').trim())) break;
+      // If we haven't collected anything meaningful yet, keep scanning for current speaker.
+    }
+  } else {
+    collected = [...lines];
+  }
+
+  if (!collected.some((l) => String(l || '').trim())) {
+    // If the model scripted multiple speakers and we could not match the current
+    // speaker label (e.g. translated/aliased names), keep only the first tagged
+    // speaker's first segment to avoid preserving a whole dialogue script.
+    if (hasTaggedLines) {
+      let firstSpeakerKey = '';
+      let fallbackCollected = [];
+      for (const line of lines) {
+        const parsed = parseGroupReplyTaggedLine(line);
+        if (!parsed) {
+          if (fallbackCollected.some((l) => String(l || '').trim())) {
+            fallbackCollected.push(String(line || ''));
+          }
+          continue;
+        }
+        const speakerKey = normalizeSpeakerTagKey(parsed.speakerLabel);
+        if (!firstSpeakerKey) firstSpeakerKey = speakerKey;
+        if (speakerKey && firstSpeakerKey && speakerKey !== firstSpeakerKey) {
+          if (fallbackCollected.some((l) => String(l || '').trim())) break;
+          continue;
+        }
+        if (parsed.text) fallbackCollected.push(parsed.text);
+      }
+      if (fallbackCollected.some((l) => String(l || '').trim())) {
+        collected = fallbackCollected;
+      }
+    }
+  }
+
+  if (!collected.some((l) => String(l || '').trim())) {
+    collected = [...lines];
+  }
+
+  collected = dedupeRepeatedLines(collected, 1);
+  let text = collected.join('\n').trim();
+
+  // Strip self-tag prefix that may still remain on first line.
+  const firstParsed = parseGroupReplyTaggedLine(text.split('\n')[0] || '');
+  if (firstParsed && isCurrentGroupSpeakerLabel(firstParsed.speakerLabel, member)) {
+    const rest = text.split('\n');
+    rest[0] = firstParsed.text;
+    text = rest.join('\n').trim();
+  }
+
+  // Hard cap group single-turn reply length to reduce runaway output and translation stalls.
+  const hardLimit = 900;
+  if (text.length > hardLimit) {
+    const slice = text.slice(0, hardLimit);
+    const cutIdx = Math.max(
+      slice.lastIndexOf('\n'),
+      slice.lastIndexOf('。'),
+      slice.lastIndexOf('！'),
+      slice.lastIndexOf('!'),
+      slice.lastIndexOf('？'),
+      slice.lastIndexOf('?')
+    );
+    text = (cutIdx > 120 ? slice.slice(0, cutIdx) : slice).trim();
+    if (!/[。！？!?…]$/.test(text)) text += '…';
+  }
+  return text || raw;
+}
+
+function detectGroupReplyRunawayDuringStream(content, member, members) {
+  const raw = String(content || '').replace(/\r/g, '');
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+  const taggedLines = [];
+  const taggedSpeakerKeys = new Set();
+  let foreignTaggedCount = 0;
+  for (const line of lines) {
+    const parsed = parseGroupReplyTaggedLine(line);
+    if (!parsed) continue;
+    taggedLines.push(parsed);
+    const tagKey = normalizeSpeakerTagKey(parsed.speakerLabel);
+    if (tagKey) taggedSpeakerKeys.add(tagKey);
+    if (!isCurrentGroupSpeakerLabel(parsed.speakerLabel, member)) foreignTaggedCount += 1;
+  }
+
+  const deduped = dedupeRepeatedLines(lines, 1);
+  const removedRepeats = Math.max(0, lines.length - deduped.filter((l) => String(l || '').trim()).length);
+  const hasLoopPattern = removedRepeats >= 2;
+  const hasMultiSpeakerScript = (foreignTaggedCount >= 1 && taggedLines.length >= 2)
+    || (taggedSpeakerKeys.size >= 2 && taggedLines.length >= 2);
+  const tooManyTaggedTurns = taggedLines.length >= 3;
+  const tooLong = trimmed.length > 1400;
+
+  if (!(hasLoopPattern || hasMultiSpeakerScript || tooManyTaggedTurns || tooLong)) return null;
+
+  let sanitized = sanitizeGroupSpeakerReplyContent(trimmed, member, members);
+
+  const aggressiveCut = hasLoopPattern || hasMultiSpeakerScript || tooManyTaggedTurns;
+  if (aggressiveCut) {
+    // Stronger single-turn cutoff only when we detect scripting/looping.
+    const firstBlock = String(sanitized || '')
+      .split(/\n{2,}/g)
+      .map((s) => s.trim())
+      .filter(Boolean)[0] || '';
+    if (firstBlock) sanitized = firstBlock;
+
+    const firstLines = String(sanitized || '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (firstLines.length) sanitized = dedupeRepeatedLines(firstLines, 1).join('\n').trim();
+
+    if (!sanitized) sanitized = trimmed.slice(0, 240).trim();
+    if (sanitized.length > 260) {
+      const cut = sanitized.slice(0, 260);
+      const p = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('!'), cut.lastIndexOf('？'), cut.lastIndexOf('?'), cut.lastIndexOf('\n'));
+      sanitized = (p > 60 ? cut.slice(0, p) : cut).trim();
+    }
+  } else if (tooLong) {
+    // Legit long single-speaker reply: keep more content, just prevent UI/translation runaway.
+    if (!sanitized) sanitized = trimmed.slice(0, 900).trim();
+    if (sanitized.length > 900) {
+      const cut = sanitized.slice(0, 900);
+      const p = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('!'), cut.lastIndexOf('？'), cut.lastIndexOf('?'), cut.lastIndexOf('\n'));
+      sanitized = (p > 140 ? cut.slice(0, p) : cut).trim();
+    }
+  }
+  if (sanitized && !/[。！？!?…]$/.test(sanitized)) sanitized += '…';
+
+  return {
+    reason: hasLoopPattern ? 'repeat-loop' : (hasMultiSpeakerScript ? 'multi-speaker-script' : (tooLong ? 'too-long' : 'tagged-turns')),
+    content: sanitized
+  };
+}
+
+function normalizeGroupLoopComparableText(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .replace(/\[[^\]]{1,80}\]\s*[:：]\s*/g, '')
+    .replace(/[【】[\]()（）"'`]/g, '')
+    .replace(/\s+/g, '')
+    .replace(/[。！？!?…~～,.，、]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function buildGroupLoopBreakHint(session) {
+  if (!session || !Array.isArray(session.messages)) return '';
+  const visible = getVisibleSessionMessages(session)
+    .filter((m) => {
+      if (!(m && m.kind === 'chat' && m.role === 'assistant' && m.speakerAvatarId)) return false;
+      const text = String(m.content || '').trim();
+      if (!text) return false;
+      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(text)) return false;
+      return true;
+    })
+    .slice(-8);
+  if (visible.length < 4) return '';
+  const keys = visible.map((m) => ({
+    id: m.id,
+    speakerAvatarId: m.speakerAvatarId,
+    text: String(m.content || '').trim(),
+    key: normalizeGroupLoopComparableText(m.content || '')
+  })).filter((x) => x.key);
+  if (keys.length < 4) return '';
+
+  const last4 = keys.slice(-4);
+  const shortRepeatLoop = last4.every((x) => x.key.length > 0 && x.key.length <= 12) && new Set(last4.map((x) => x.key)).size <= 2;
+  const sameCount = new Map();
+  for (const item of keys) sameCount.set(item.key, (sameCount.get(item.key) || 0) + 1);
+  const maxRepeat = Math.max(...Array.from(sameCount.values()));
+  const obviousFarewellLoop = last4.some((x) => /(再见|またね|bye|goodbye)/i.test(x.text));
+
+  if (shortRepeatLoop || maxRepeat >= 3 || obviousFarewellLoop) {
+    return '注意：最近群聊出现重复寒暄/重复句循环。请换一个新话题或推进情节，不要继续重复“再见/好的/嗯嗯”等短句。';
+  }
+  return '';
+}
+
 function getAvatarScenarioDraftItems() {
   return cloneAvatarScenarios(avatarScenarioRuntime.draftItems || []);
 }
@@ -3039,7 +3419,10 @@ function loadAvatars() {
           usageCount: Math.max(0, Number(avatar.usageCount || 0) || 0),
           tags: normalizeAvatarTags(avatar.tags || []),
           openingScenarios: normalizeAvatarScenarios(avatar.openingScenarios || [])
-        }))
+        })).map((avatar) => {
+          if (avatar && avatar.type === 'group') ensureGroupChatSettings(avatar);
+          return avatar;
+        })
       : [];
   } catch (_) { state.avatars = []; }
 }
@@ -3415,7 +3798,22 @@ function renderContactList() {
     refreshContactsLorebookShortcut();
     return;
   }
-  els.contactList.innerHTML = avatars.map((a) => {
+  const avatarsOrdered = avatars.slice().sort((a, b) => {
+    const sa = resolveContactSession(a.id, { createIfMissing: false, focus: false });
+    const sb = resolveContactSession(b.id, { createIfMissing: false, focus: false });
+    const aLastMsg = sa && Array.isArray(sa.messages) && sa.messages.length
+      ? Math.max(...sa.messages.map((m) => Number(m && m.createdAt || 0)))
+      : 0;
+    const bLastMsg = sb && Array.isArray(sb.messages) && sb.messages.length
+      ? Math.max(...sb.messages.map((m) => Number(m && m.createdAt || 0)))
+      : 0;
+    const aTs = Math.max(Number(sa && sa.updatedAt || 0), aLastMsg, Number(a && a.updatedAt || 0), Number(a && a.createdAt || 0));
+    const bTs = Math.max(Number(sb && sb.updatedAt || 0), bLastMsg, Number(b && b.updatedAt || 0), Number(b && b.createdAt || 0));
+    if (aTs !== bTs) return bTs - aTs;
+    return String(a && a.name || '').localeCompare(String(b && b.name || ''));
+  });
+
+  els.contactList.innerHTML = avatarsOrdered.map((a) => {
     const isGroup = a.type === 'group';
     const iconVal = a.icon || (isGroup ? '👥' : '😀');
     const iconHtml = iconVal.startsWith('data:image')
@@ -3425,9 +3823,15 @@ function renderContactList() {
     const preview = boundSession ? getOverlaySessionPreview(boundSession) : '暂无消息';
     const badge = isGroup ? '<span class="contact-badge">群组</span>' : '';
     const isActive = activeAvatarId && a.id === activeAvatarId;
+    const activeItemStyle = isActive
+      ? 'background:linear-gradient(180deg, rgba(239,246,255,.95), rgba(238,242,255,.92)); border-color:rgba(59,130,246,.35); box-shadow:0 0 0 1px rgba(59,130,246,.22), 0 8px 18px rgba(59,130,246,.12);'
+      : '';
+    const activeShortcutStyle = isActive
+      ? 'background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.28);box-shadow:0 0 0 1px rgba(59,130,246,.12) inset;'
+      : '';
     return `
       <div class="contact-item-row" style="display:flex;align-items:stretch;gap:8px;">
-        <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}" style="flex:1;min-width:0;">
+        <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}" style="flex:1;min-width:0;${activeItemStyle}">
           <span class="contact-icon">${iconHtml}</span>
           <div class="contact-info">
             <div class="contact-name">${escapeHtml(a.name)} ${badge}</div>
@@ -3441,7 +3845,7 @@ function renderContactList() {
           type="button"
           title="打开 ${escapeHtml(a.name)} 的世界观书（Lorebook）"
           aria-label="打开 ${escapeHtml(a.name)} 的世界观书"
-          style="padding:0 10px;min-width:44px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-size:18px;"
+          style="padding:0 10px;min-width:44px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-size:18px;${activeShortcutStyle}"
         >📚</button>
       </div>
     `;
@@ -3514,6 +3918,7 @@ function saveGroup() {
     memberIds,
     createdAt: now
   };
+  ensureGroupChatSettings(group);
   state.avatars.unshift(group);
   persistAvatars();
   els.groupDialog.close();
@@ -5071,7 +5476,11 @@ function renderMessages() {
     const speakerHtml = speakerName ? `<div class="msg-speaker-name">${escapeHtml(speakerName)}</div>` : '';
     const branchControlsHtml = buildMessageBranchControlsHtml(session, message, messageTreeIndex);
     const metaHtml = renderMessageMeta(message, role);
-    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}" data-mid="${message.id}">${speakerHtml}${thinkHtml}${toolCallsHtml}${lorebookHitsHtml}${content}${branchControlsHtml}${metaHtml}</div></div>`;
+    const isSelectedMsg = String(state.ui.selectedMessageId || '') === String(message.id || '');
+    const selectedStyle = isSelectedMsg
+      ? 'box-shadow:0 0 0 2px rgba(59,130,246,.45),0 6px 22px rgba(30,41,59,.08);border-color:rgba(59,130,246,.45);background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(248,250,252,.98));'
+      : '';
+    return `<div class="msg-row ${role}"><span class="avatar">${avatarHtml}</span><div class="msg ${role}${isSelectedMsg ? ' msg-selected' : ''}" data-mid="${message.id}" style="${selectedStyle}">${speakerHtml}${thinkHtml}${toolCallsHtml}${lorebookHitsHtml}${content}${branchControlsHtml}${metaHtml}</div></div>`;
   }).join('');
 
   if (isAvatarTranslationOverlayEnabled(session)) {
@@ -5090,6 +5499,7 @@ function renderMessages() {
     }
   }
 
+  setSelectedMessageBubble(state.ui.selectedMessageId || '');
   els.messageList.scrollTop = els.messageList.scrollHeight;
   try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
 }
@@ -5179,6 +5589,8 @@ function appendChatMessage(role, content, extra) {
 function appendToolMessage(tool, detail) {
   const session = getActiveSession();
   if (!session) return null;
+  ensureSessionMessageTreeState(session);
+  const visibleLeaf = getVisibleChatLeafMessage(session);
   const message = {
     id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     kind: 'tool',
@@ -5187,7 +5599,8 @@ function appendToolMessage(tool, detail) {
     status: 'running',
     detail: detail || '姝ｅ湪澶勭悊...',
     artifactId: '',
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    treeParentId: visibleLeaf ? visibleLeaf.id : null
   };
   session.messages.push(message);
   touchSession(session);
@@ -5202,6 +5615,25 @@ function updateMessage(messageId, updater) {
   const updated = updater(session.messages[idx]);
   if (updated) session.messages[idx] = updated;
   touchSession(session);
+}
+
+function setSelectedMessageBubble(messageId) {
+  const id = String(messageId || '').trim();
+  state.ui.selectedMessageId = id;
+  if (!els.messageList) return;
+  els.messageList.querySelectorAll('.msg[data-mid]').forEach((node) => {
+    const isActive = id && String(node.getAttribute('data-mid') || '') === id;
+    node.classList.toggle('msg-selected', Boolean(isActive));
+    if (isActive) {
+      node.style.boxShadow = '0 0 0 2px rgba(59,130,246,.45), 0 6px 22px rgba(30,41,59,.08)';
+      node.style.borderColor = 'rgba(59,130,246,.45)';
+      node.style.background = 'linear-gradient(180deg, rgba(255,255,255,.98), rgba(248,250,252,.98))';
+    } else {
+      node.style.boxShadow = '';
+      node.style.borderColor = '';
+      node.style.background = '';
+    }
+  });
 }
 
 function switchMessageBranchSibling(session, messageId, direction) {
@@ -5282,7 +5714,16 @@ function buildChatPayloadMessages(session, options = {}) {
     if (idx >= 0) sourceMessagesVisible = visibleMessages.slice(0, idx + 1);
   }
   const filtered = sourceMessagesVisible
-    .filter((m) => m.kind === 'chat' && (m.role === 'user' || m.role === 'assistant'));
+    .filter((m) => {
+      if (!(m && m.kind === 'chat' && (m.role === 'user' || m.role === 'assistant'))) return false;
+      if (m.excludeFromContext) return false;
+      if (m.role === 'assistant' && m.speakerAvatarId) {
+        const text = String(m.content || '').trim();
+        if (!text) return false;
+        if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(text)) return false;
+      }
+      return true;
+    });
   const limit = Math.max(1, Number(state.settings.chatContextLimit || 14));
   const sourceMessages = state.settings.chatContextUnlimited ? filtered : filtered.slice(-limit);
   return sourceMessages
@@ -5297,7 +5738,7 @@ function buildChatPayloadMessages(session, options = {}) {
     .filter((m) => m.content.length > 0);
 }
 
-async function streamSSEResponse(response, messageId, requestStartedAt) {
+async function streamSSEResponse(response, messageId, requestStartedAt, options = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -5308,6 +5749,9 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
   let lorebookHits;
   let firstTokenLatencyMs = null;
   const incrementalRender = Boolean(state.settings.chatStreamOutput);
+  const contentGuard = (options && typeof options.contentGuard === 'function') ? options.contentGuard : null;
+  let stoppedByGuard = false;
+  let guardReason = '';
 
   while (true) {
     const { done, value } = await reader.read();
@@ -5342,6 +5786,17 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
             firstTokenLatencyMs = Date.now() - requestStartedAt;
           }
           full += payload.content;
+          if (contentGuard) {
+            const decision = contentGuard(full);
+            if (decision && typeof decision === 'object' && decision.content) {
+              full = String(decision.content);
+            }
+            if (decision && decision.stop !== false && (decision.reason || decision.content)) {
+              stoppedByGuard = true;
+              guardReason = String(decision.reason || '');
+              isThinking = false;
+            }
+          }
         }
         updateMessage(messageId, (m) => ({
           ...m,
@@ -5355,8 +5810,13 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
         if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || Array.isArray(payload.lorebook_hits) || typeof payload.thinking === 'boolean') {
           renderMessages();
         }
+        if (stoppedByGuard) {
+          try { await reader.cancel(); } catch (_) {}
+          break;
+        }
       } catch (_) {}
     }
+    if (stoppedByGuard) break;
   }
 
   if (!full) {
@@ -5365,6 +5825,9 @@ async function streamSSEResponse(response, messageId, requestStartedAt) {
   } else {
     updateMessage(messageId, (m) => ({ ...m, isThinking: false }));
     renderMessages();
+  }
+  if (stoppedByGuard && guardReason) {
+    try { setStatus(`已截断群聊异常长回复（${guardReason}）。`); } catch (_) {}
   }
   try {
     window.setTimeout(() => {
@@ -5508,7 +5971,13 @@ async function sendSingleChatMessage(session, options = {}) {
   }
 }
 
-async function sendGroupChatMessage(session, group) {
+async function sendGroupChatMessage(session, group, options = {}) {
+  const groupSettings = ensureGroupChatSettings(group);
+  const spectatorMode = Boolean(options && options.spectatorMode);
+  const spectatorRounds = spectatorMode
+    ? clampGroupSpectatorRounds((options && options.spectatorRounds) || (groupSettings && groupSettings.spectatorRoundsPerTrigger) || 1)
+    : 1;
+  let groupSettingsChanged = false;
   state.ui.chatStreaming = true;
   els.sendBtn.disabled = true;
   renderMessages();
@@ -5526,69 +5995,162 @@ async function sendGroupChatMessage(session, group) {
       return;
     }
 
-    const payloadMessages = buildChatPayloadMessages(session);
+    let payloadMessages = buildChatPayloadMessages(session);
+    if (spectatorMode && !payloadMessages.length) {
+      payloadMessages = [{
+        role: 'user',
+        content: '（旁观模式）请角色们在群聊中自然开始互动、互相回应并推进对话，不需要先向用户提问。'
+      }];
+    }
 
-    for (const member of members) {
-      const assistant = appendChatMessage('assistant', '', { modelName: getChatModelName() });
-      const samplingOptions = getChatSamplingOptions();
-      /* tag this message with the speaker */
-      const msgInSession = session.messages.find((m) => m.id === assistant.id);
-      if (msgInSession) msgInSession.speakerAvatarId = member.id;
-      renderMessages();
-
-      const requestStartedAt = Date.now();
-      const proxyHeader = getClientProxyHeaderValue();
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(state.token ? { 'x-access-token': state.token } : {}),
-          ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
-          ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
-        },
-        body: JSON.stringify({
-          messages: payloadMessages,
-          context: session.materialsText || '',
-          mode: state.ui.chatMode,
-          providerId: state.ui.selectedProviderId || undefined,
-          model: state.ui.selectedModel || undefined,
-          preferences: getChatClientPreferences(),
-          ...samplingOptions,
-          knowledgeBaseIds: getEnabledKbIds(),
-          avatar: {
-            id: member.id,
-            type: member.type || 'single',
-            name: member.name,
-            relationship: member.relationship || '',
-            customPrompt: member.customPrompt || '',
-            memoryText: member.memoryText || ''
-          },
-          groupContext: {
-            groupName: group.name,
-            memberNames: members.map((m) => m.name),
-            currentSpeaker: member.name
-          }
-        })
-      });
-
-      if (response.status === 401) {
-        askForToken();
-        throw new Error('口令已更新，请重试。');
-      }
-
-      if (!response.ok) {
-        const raw = await response.text();
-        let msg = `请求失败：${response.status}`;
-        try { msg = JSON.parse(raw).message || msg; } catch (_) {}
-        updateMessage(assistant.id, (m) => ({ ...m, content: msg }));
+    let lastSpeakerName = '';
+    let stopRemainingSpectatorRounds = false;
+    for (let roundIdx = 0; roundIdx < spectatorRounds; roundIdx += 1) {
+      if (stopRemainingSpectatorRounds) break;
+      let successfulRepliesInRound = 0;
+      const orderedMembers = getGroupOrderedMembersForTurn(group, members);
+      for (const member of orderedMembers) {
+        const assistant = appendChatMessage('assistant', '', { modelName: getChatModelName() });
+        const samplingOptions = getChatSamplingOptions();
+        /* tag this message with the speaker */
+        const msgInSession = session.messages.find((m) => m.id === assistant.id);
+        if (msgInSession) msgInSession.speakerAvatarId = member.id;
         renderMessages();
-        continue;
-      }
 
-      recordAvatarUsage(member.id, 1);
-      const finalContent = await streamSSEResponse(response, assistant.id, requestStartedAt);
-      /* append this member's response to context for next member */
-      payloadMessages.push({ role: 'assistant', content: `[${member.name}]: ${finalContent}` });
+        const relationHints = getGroupRelationHintsForSpeaker(group, member, members).map((item) => ({
+          name: item.name,
+          type: item.type,
+          label: groupRelationLabel(item.type)
+        }));
+        const proxyHeader = getClientProxyHeaderValue();
+        let finalContent = '';
+        let memberSucceeded = false;
+        const maxAttempts = 2;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          const loopBreakHint = buildGroupLoopBreakHint(session);
+          const retryHint = attempt > 1
+            ? '上一次回复为空或无效。请直接输出你这一轮的一次发言（1-3句），不要代替他人发言，不要重复寒暄/再见。'
+            : '';
+          const baseTurnInstruction = spectatorMode
+            ? '当前为旁观模式。优先回应其他角色并自然推进话题，不要等待用户再次发言。'
+            : '这是群聊回合。可以回应其他角色，也可以回应用户，但请保持群聊互动感。';
+          const composedTurnInstruction = [baseTurnInstruction, loopBreakHint, retryHint]
+            .map((s) => String(s || '').trim())
+            .filter(Boolean)
+            .join('\n');
+
+          if (attempt > 1) {
+            updateMessage(assistant.id, (m) => ({ ...m, content: '', isThinking: false }));
+            renderMessages();
+          }
+
+          const requestStartedAt = Date.now();
+          const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(state.token ? { 'x-access-token': state.token } : {}),
+              ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
+              ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
+            },
+            body: JSON.stringify({
+              messages: payloadMessages,
+              context: session.materialsText || '',
+              mode: state.ui.chatMode,
+              providerId: state.ui.selectedProviderId || undefined,
+              model: state.ui.selectedModel || undefined,
+              preferences: getChatClientPreferences(),
+              ...samplingOptions,
+              knowledgeBaseIds: getEnabledKbIds(),
+              avatar: {
+                id: member.id,
+                type: member.type || 'single',
+                name: member.name,
+                relationship: member.relationship || '',
+                customPrompt: member.customPrompt || '',
+                memoryText: member.memoryText || ''
+              },
+              groupContext: {
+                groupName: group.name,
+                memberNames: members.map((m) => m.name),
+                currentSpeaker: member.name,
+                lastSpeaker: lastSpeakerName || '',
+                allowAiCrossTalk: Boolean(groupSettings ? groupSettings.allowAiCrossTalk !== false : true),
+                spectatorMode,
+                spectatorRound: roundIdx + 1,
+                spectatorRounds,
+                relationshipHints: relationHints,
+                turnInstruction: composedTurnInstruction
+              }
+            })
+          });
+
+          if (response.status === 401) {
+            askForToken();
+            throw new Error('口令已更新，请重试。');
+          }
+
+          if (!response.ok) {
+            const raw = await response.text();
+            let msg = `请求失败：${response.status}`;
+            try { msg = JSON.parse(raw).message || msg; } catch (_) {}
+            updateMessage(assistant.id, (m) => ({ ...m, content: msg, excludeFromContext: true }));
+            renderMessages();
+            finalContent = '';
+            break;
+          }
+
+          finalContent = await streamSSEResponse(response, assistant.id, requestStartedAt, {
+            contentGuard: (partialText) => {
+              const detected = detectGroupReplyRunawayDuringStream(partialText, member, members);
+              if (!detected) return null;
+              return {
+                stop: true,
+                reason: detected.reason,
+                content: detected.content
+              };
+            }
+          });
+
+          const normalizedAttemptContent = String(finalContent || '').trim();
+          if (normalizedAttemptContent && normalizedAttemptContent !== '未收到有效回复，请重试。') {
+            memberSucceeded = true;
+            break;
+          }
+          if (attempt < maxAttempts) {
+            try { setStatus(`${member.name} 本轮未正常回复，正在重试...`); } catch (_) {}
+          }
+        }
+
+        const sanitizedContent = sanitizeGroupSpeakerReplyContent(finalContent, member, members);
+        if (sanitizedContent && sanitizedContent !== finalContent) {
+          finalContent = sanitizedContent;
+          updateMessage(assistant.id, (m) => ({ ...m, content: finalContent }));
+          renderMessages();
+        }
+        const finalText = String(finalContent || '').trim();
+        if (!memberSucceeded || !finalText || finalText === '未收到有效回复，请重试。') {
+          session.messages = (session.messages || []).filter((m) => m && m.id !== assistant.id);
+          try { ensureSessionMessageTreeState(session); } catch (_) {}
+          renderMessages();
+          // Do not advance turn anchor or payload history for empty/invalid replies.
+          try { setStatus(`${member.name} 本轮未生成有效回复，已跳过。`); } catch (_) {}
+          continue;
+        }
+        recordAvatarUsage(member.id, 1);
+        successfulRepliesInRound += 1;
+        payloadMessages.push({ role: 'assistant', content: `[${member.name}]: ${finalContent}` });
+        lastSpeakerName = member.name;
+        if (groupSettings && String(groupSettings.lastSpeakerId || '') !== String(member.id || '')) {
+          groupSettings.lastSpeakerId = String(member.id || '');
+          groupSettingsChanged = true;
+        }
+      }
+      if (spectatorMode && successfulRepliesInRound <= 0) {
+        stopRemainingSpectatorRounds = true;
+        try { setStatus('本轮旁观未生成有效回复，已停止继续连发。'); } catch (_) {}
+      }
     }
   } catch (error) {
     appendChatMessage('assistant', `群组聊天失败：${error.message}`);
@@ -5596,6 +6158,7 @@ async function sendGroupChatMessage(session, group) {
   } finally {
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
+    if (groupSettingsChanged) persistAvatars();
     persistSessionsState();
     renderMessages();
     renderSessionList();
@@ -7827,6 +8390,174 @@ function formatLorebookTime(ts) {
   }
 }
 
+const groupChatEnhanceRuntime = {
+  modalReady: false,
+  activeGroupId: '',
+  ui: null
+};
+
+function ensureGroupChatEnhanceModal() {
+  if (groupChatEnhanceRuntime.modalReady && groupChatEnhanceRuntime.ui) return groupChatEnhanceRuntime.ui;
+  const dialog = document.createElement('dialog');
+  dialog.id = 'groupChatEnhanceDialog';
+  dialog.style.cssText = 'width:min(860px,92vw);border:none;padding:0;border-radius:16px;box-shadow:0 20px 60px rgba(15,23,42,.2);';
+  dialog.innerHTML = `
+    <form method="dialog" style="padding:0;margin:0;">
+      <div style="padding:16px 18px;border-bottom:1px solid rgba(148,163,184,.2);display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div>
+          <div id="groupChatEnhanceTitle" style="font-size:18px;font-weight:800;color:#0f172a;">群聊增强设置</div>
+          <div id="groupChatEnhanceSub" class="muted" style="font-size:12px;margin-top:4px;">配置角色关系与旁观模式。</div>
+        </div>
+        <button type="button" id="groupChatEnhanceCloseBtn" class="btn ghost">关闭</button>
+      </div>
+      <div style="padding:14px 18px;max-height:min(68vh,680px);overflow:auto;display:grid;gap:14px;">
+        <div style="border:1px solid rgba(148,163,184,.22);border-radius:12px;padding:12px;background:#f8fafc;">
+          <div style="font-weight:700;color:#0f172a;margin-bottom:8px;">旁观模式</div>
+          <div style="display:grid;gap:10px;">
+            <label style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input id="groupChatSpectatorRoundsInput" type="number" min="1" max="5" step="1" style="width:72px;">
+              <span>每次旁观触发轮次（1-5）</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input id="groupChatAllowCrosstalkCheckbox" type="checkbox">
+              <span>允许角色主动回应其他角色（增强互动感）</span>
+            </label>
+            <div class="muted" style="font-size:12px;line-height:1.4;">在联系人页点击“旁观一轮”后，AI 角色会按回合互动。轮次越大越像角色们在自己聊天。</div>
+          </div>
+        </div>
+        <div style="border:1px solid rgba(148,163,184,.22);border-radius:12px;padding:12px;background:#fff;">
+          <div style="font-weight:700;color:#0f172a;margin-bottom:4px;">角色关系</div>
+          <div class="muted" style="font-size:12px;margin-bottom:10px;">朋友 / 对手 / 陌生人 会真实进入群聊提示词，影响语气和互动风格。</div>
+          <div id="groupChatRelationRows" style="display:grid;gap:8px;"></div>
+        </div>
+        <div id="groupChatEnhanceStatus" class="muted" style="font-size:12px;min-height:18px;"></div>
+      </div>
+      <div style="padding:12px 18px;border-top:1px solid rgba(148,163,184,.2);display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" id="groupChatEnhanceCancelBtn" class="btn ghost">取消</button>
+        <button type="button" id="groupChatEnhanceSaveBtn" class="btn primary">保存</button>
+      </div>
+    </form>
+  `;
+  document.body.appendChild(dialog);
+
+  const ui = {
+    dialog,
+    title: dialog.querySelector('#groupChatEnhanceTitle'),
+    sub: dialog.querySelector('#groupChatEnhanceSub'),
+    relationRows: dialog.querySelector('#groupChatRelationRows'),
+    spectatorRounds: dialog.querySelector('#groupChatSpectatorRoundsInput'),
+    allowCrosstalk: dialog.querySelector('#groupChatAllowCrosstalkCheckbox'),
+    status: dialog.querySelector('#groupChatEnhanceStatus'),
+    saveBtn: dialog.querySelector('#groupChatEnhanceSaveBtn'),
+    cancelBtn: dialog.querySelector('#groupChatEnhanceCancelBtn'),
+    closeBtn: dialog.querySelector('#groupChatEnhanceCloseBtn')
+  };
+
+  const close = () => { try { dialog.close(); } catch (_) {} };
+  if (ui.cancelBtn) ui.cancelBtn.addEventListener('click', close);
+  if (ui.closeBtn) ui.closeBtn.addEventListener('click', close);
+  if (ui.saveBtn) ui.saveBtn.addEventListener('click', () => saveGroupChatEnhanceModal());
+
+  groupChatEnhanceRuntime.modalReady = true;
+  groupChatEnhanceRuntime.ui = ui;
+  return ui;
+}
+
+function renderGroupChatEnhanceRelationRows(group) {
+  const ui = ensureGroupChatEnhanceModal();
+  if (!ui || !ui.relationRows) return;
+  const members = (group && Array.isArray(group.memberIds) ? group.memberIds : [])
+    .map((id) => getAvatarById(id))
+    .filter(Boolean);
+  if (members.length < 2) {
+    ui.relationRows.innerHTML = '<div class="muted">当前群组成员不足 2 人。</div>';
+    return;
+  }
+  const rows = [];
+  for (let i = 0; i < members.length; i += 1) {
+    for (let j = i + 1; j < members.length; j += 1) {
+      const a = members[i];
+      const b = members[j];
+      const key = getGroupRelationPairKey(a.id, b.id);
+      const current = getGroupPairRelationType(group, a.id, b.id);
+      const options = GROUP_RELATION_TYPES.map((type) => (
+        `<option value="${type}" ${type === current ? 'selected' : ''}>${escapeHtml(groupRelationLabel(type))}</option>`
+      )).join('');
+      rows.push(`
+        <label style="display:grid;grid-template-columns:minmax(180px,1fr) 160px;gap:8px;align-items:center;">
+          <span style="font-size:13px;color:#334155;">${escapeHtml(a.name)} ↔ ${escapeHtml(b.name)}</span>
+          <select data-relation-key="${escapeAttr(key)}">${options}</select>
+        </label>
+      `);
+    }
+  }
+  ui.relationRows.innerHTML = rows.join('') || '<div class="muted">暂无可配置关系。</div>';
+}
+
+function openGroupChatEnhanceModal(groupId) {
+  const id = String(groupId || '').trim();
+  const group = id ? getAvatarById(id) : null;
+  if (!group || group.type !== 'group') {
+    alert('请先选择一个群组联系人。');
+    return;
+  }
+  const settings = ensureGroupChatSettings(group);
+  const ui = ensureGroupChatEnhanceModal();
+  if (!ui) return;
+  groupChatEnhanceRuntime.activeGroupId = group.id;
+  if (ui.title) ui.title.textContent = `群聊增强设置 · ${group.name}`;
+  if (ui.sub) ui.sub.textContent = `成员 ${Math.max(0, (group.memberIds || []).length)} 人 · 可配置关系、旁观轮次与互动风格`;
+  if (ui.spectatorRounds) ui.spectatorRounds.value = String(clampGroupSpectatorRounds(settings && settings.spectatorRoundsPerTrigger));
+  if (ui.allowCrosstalk) ui.allowCrosstalk.checked = Boolean(settings && settings.allowAiCrossTalk !== false);
+  if (ui.status) ui.status.textContent = '';
+  renderGroupChatEnhanceRelationRows(group);
+  try { ui.dialog.showModal(); } catch (_) { ui.dialog.open = true; }
+}
+
+function saveGroupChatEnhanceModal() {
+  const ui = ensureGroupChatEnhanceModal();
+  const groupId = String(groupChatEnhanceRuntime.activeGroupId || '').trim();
+  const group = groupId ? getAvatarById(groupId) : null;
+  if (!ui || !group || group.type !== 'group') return;
+  const settings = ensureGroupChatSettings(group);
+  settings.spectatorRoundsPerTrigger = clampGroupSpectatorRounds(ui.spectatorRounds && ui.spectatorRounds.value);
+  settings.allowAiCrossTalk = Boolean(ui.allowCrosstalk && ui.allowCrosstalk.checked);
+  const nextMap = {};
+  if (ui.relationRows) {
+    ui.relationRows.querySelectorAll('select[data-relation-key]').forEach((sel) => {
+      const key = String(sel.getAttribute('data-relation-key') || '').trim();
+      if (!key) return;
+      const val = String(sel.value || 'stranger').trim().toLowerCase();
+      nextMap[key] = GROUP_RELATION_TYPES.includes(val) ? val : 'stranger';
+    });
+  }
+  settings.relationMap = normalizeGroupRelationMap(nextMap, group.memberIds || []);
+  persistAvatars();
+  refreshContactsLorebookShortcut();
+  renderContactList();
+  if (ui.status) ui.status.textContent = '已保存群聊增强设置。';
+}
+
+async function runGroupSpectatorRound() {
+  const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+  const group = avatarId ? getAvatarById(avatarId) : null;
+  if (!group || group.type !== 'group') {
+    alert('请先选择一个群组联系人。');
+    return;
+  }
+  const session = resolveContactSession(group.id, { createIfMissing: true, focus: true });
+  if (!session) return;
+  if (state.ui.chatStreaming) {
+    setStatus('当前正在生成回复，请稍后再试旁观模式。');
+    return;
+  }
+  const settings = ensureGroupChatSettings(group);
+  await sendGroupChatMessage(session, group, {
+    spectatorMode: true,
+    spectatorRounds: clampGroupSpectatorRounds(settings && settings.spectatorRoundsPerTrigger)
+  });
+}
+
 function ensureContactsLorebookShortcut() {
   if (!els.contactsPane || !els.contactList) return null;
   let host = els.contactsPane.querySelector('#contactsLorebookShortcutRow');
@@ -7834,28 +8565,49 @@ function ensureContactsLorebookShortcut() {
 
   host = document.createElement('div');
   host.id = 'contactsLorebookShortcutRow';
-  host.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 2px 10px 2px;';
+  host.style.cssText = 'display:grid;gap:8px;padding:8px 2px 10px 2px;border-bottom:1px solid rgba(148,163,184,.16);margin-bottom:8px;';
   host.innerHTML = `
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button id="contactsAvatarGalleryBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+    <div id="contactsPrimaryActionRow" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <button id="contactsAvatarGalleryBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
         <span aria-hidden="true">🖼️</span>
         <span>角色画廊</span>
       </button>
-      <button id="contactsScenePickerBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+      <button id="contactsScenePickerBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
         <span aria-hidden="true">🎬</span>
         <span>开场</span>
       </button>
-      <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+      <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
         <span aria-hidden="true">📚</span>
         <span>世界观书</span>
       </button>
     </div>
-    <div id="contactsLorebookHint" class="muted" style="font-size:12px;line-height:1.3;text-align:right;min-width:0;"></div>
+    <div id="contactsGroupEnhanceRow" style="display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid rgba(99,102,241,.18);background:rgba(99,102,241,.04);border-radius:12px;">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        <span aria-hidden="true" style="font-size:15px;">👥</span>
+        <div style="min-width:0;">
+          <div id="contactsGroupEnhanceLabel" style="font-size:12px;font-weight:700;color:#334155;">群聊增强</div>
+          <div id="contactsGroupEnhanceMiniHint" class="muted" style="font-size:11px;line-height:1.25;">角色关系与旁观模式</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="contactsGroupSpectatorBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:#fff;">
+          <span aria-hidden="true">👀</span>
+          <span>旁观一轮</span>
+        </button>
+        <button id="contactsGroupEnhanceBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:#fff;">
+          <span aria-hidden="true">🤝</span>
+          <span>群聊关系</span>
+        </button>
+      </div>
+    </div>
+    <div id="contactsLorebookHint" class="muted" style="font-size:12px;line-height:1.35;min-width:0;padding:0 2px;"></div>
   `;
   els.contactsPane.insertBefore(host, els.contactList);
   const galleryBtn = host.querySelector('#contactsAvatarGalleryBtn');
   const sceneBtn = host.querySelector('#contactsScenePickerBtn');
   const openBtn = host.querySelector('#contactsLorebookOpenBtn');
+  const spectatorBtn = host.querySelector('#contactsGroupSpectatorBtn');
+  const enhanceBtn = host.querySelector('#contactsGroupEnhanceBtn');
   if (galleryBtn) {
     galleryBtn.addEventListener('click', () => {
       openAvatarGalleryModal({
@@ -7888,6 +8640,16 @@ function ensureContactsLorebookShortcut() {
       openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => {});
     });
   }
+  if (spectatorBtn) {
+    spectatorBtn.addEventListener('click', () => {
+      runGroupSpectatorRound().catch((error) => setStatus(`旁观模式失败：${error.message || error}`));
+    });
+  }
+  if (enhanceBtn) {
+    enhanceBtn.addEventListener('click', () => {
+      openGroupChatEnhanceModal(state.ui.activeContactAvatarId || '');
+    });
+  }
   return host;
 }
 
@@ -7896,6 +8658,10 @@ function localizeContactsShortcutRow(host) {
   const galleryBtn = host.querySelector('#contactsAvatarGalleryBtn');
   const sceneBtn = host.querySelector('#contactsScenePickerBtn');
   const lorebookBtn = host.querySelector('#contactsLorebookOpenBtn');
+  const spectatorBtn = host.querySelector('#contactsGroupSpectatorBtn');
+  const enhanceBtn = host.querySelector('#contactsGroupEnhanceBtn');
+  const groupLabel = host.querySelector('#contactsGroupEnhanceLabel');
+  const groupMiniHint = host.querySelector('#contactsGroupEnhanceMiniHint');
   if (galleryBtn) {
     const textEl = galleryBtn.querySelector('span:last-child');
     if (textEl) textEl.textContent = uiText('角色画廊', 'Gallery');
@@ -7908,6 +8674,16 @@ function localizeContactsShortcutRow(host) {
     const textEl = lorebookBtn.querySelector('span:last-child');
     if (textEl) textEl.textContent = uiText('世界观书', 'Lorebook');
   }
+  if (spectatorBtn) {
+    const textEl = spectatorBtn.querySelector('span:last-child');
+    if (textEl) textEl.textContent = uiText('旁观一轮', 'Watch 1 round');
+  }
+  if (enhanceBtn) {
+    const textEl = enhanceBtn.querySelector('span:last-child');
+    if (textEl) textEl.textContent = uiText('群聊关系', 'Group Relations');
+  }
+  if (groupLabel) groupLabel.textContent = uiText('群聊增强', 'Group Chat Boost');
+  if (groupMiniHint) groupMiniHint.textContent = uiText('角色关系与旁观模式', 'Relations and spectator mode');
 }
 
 function refreshContactsLorebookShortcut() {
@@ -7915,18 +8691,39 @@ function refreshContactsLorebookShortcut() {
   if (!host) return;
   localizeContactsShortcutRow(host);
   const hint = host.querySelector('#contactsLorebookHint');
+  const spectatorBtn = host.querySelector('#contactsGroupSpectatorBtn');
+  const enhanceBtn = host.querySelector('#contactsGroupEnhanceBtn');
+  const groupRow = host.querySelector('#contactsGroupEnhanceRow');
   if (!hint) return;
   const avatarId = String(state.ui.activeContactAvatarId || '').trim();
   if (!avatarId) {
+    if (spectatorBtn) spectatorBtn.style.display = 'none';
+    if (enhanceBtn) enhanceBtn.style.display = 'none';
+    if (groupRow) groupRow.style.display = 'none';
     hint.textContent = uiText('角色画廊 / 开场场景 / 联系人世界观词条', 'Gallery / opening scene / contact lorebook');
     return;
   }
   const avatar = getAvatarById(avatarId);
   if (!avatar) {
+    if (spectatorBtn) spectatorBtn.style.display = 'none';
+    if (enhanceBtn) enhanceBtn.style.display = 'none';
+    if (groupRow) groupRow.style.display = 'none';
     hint.textContent = uiText('管理角色画廊与联系人词条', 'Manage gallery and contact lorebook entries');
     return;
   }
+  const isGroup = avatar.type === 'group';
+  if (spectatorBtn) spectatorBtn.style.display = isGroup ? 'inline-flex' : 'none';
+  if (enhanceBtn) enhanceBtn.style.display = isGroup ? 'inline-flex' : 'none';
+  if (groupRow) groupRow.style.display = isGroup ? 'flex' : 'none';
   const sceneCount = getAvatarOpeningScenarios(avatar).length;
+  if (isGroup) {
+    const settings = ensureGroupChatSettings(avatar);
+    const rounds = clampGroupSpectatorRounds(settings && settings.spectatorRoundsPerTrigger);
+    hint.textContent = isZhUiLanguage()
+      ? `当前群组：${avatar.name} · 成员${(avatar.memberIds || []).length}人 · 旁观每次${rounds}轮（可在“群聊关系”里设置朋友/对手/陌生人）`
+      : `Group: ${avatar.name} · Members ${(avatar.memberIds || []).length} · Watch ${rounds} round(s) (set relations in Group Relations)`;
+    return;
+  }
   hint.textContent = isZhUiLanguage()
     ? `当前联系人：${avatar.name} · 开场${sceneCount}个 · 可打开角色画廊`
     : `Contact: ${avatar.name} · Scenes ${sceneCount} · Open gallery`;

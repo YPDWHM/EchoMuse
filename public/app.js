@@ -29,7 +29,7 @@ function createClientInstanceId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
       return `web-${window.crypto.randomUUID()}`;
     }
-  } catch (_) {}
+  } catch (_) { }
   return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -1253,7 +1253,7 @@ function loadSettings() {
     if (parsed && typeof parsed === 'object') {
       state.settings = { ...DEFAULT_SETTINGS, ...parsed };
     }
-  } catch {}
+  } catch { }
 }
 
 function saveSettings() {
@@ -1589,7 +1589,7 @@ function applyLanguage() {
   updateConnectionUI();
   updateTranslateSettingsUI();
   refreshDynamicUiLanguageLabels();
-  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) {}
+  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) { }
 }
 
 function isZhUiLanguage() {
@@ -1611,9 +1611,9 @@ function refreshDynamicUiLanguageLabels() {
     els.kbGoSettingsBtn.textContent = uiText('⚙ 管理知识库', '⚙ Manage Knowledge Base');
   }
   applyToolModeUI();
-  try { refreshMcpQuickPanel(); } catch (_) {}
-  try { refreshKbQuickPanel(); } catch (_) {}
-  try { refreshContactsLorebookShortcut(); } catch (_) {}
+  try { refreshMcpQuickPanel(); } catch (_) { }
+  try { refreshKbQuickPanel(); } catch (_) { }
+  try { refreshContactsLorebookShortcut(); } catch (_) { }
 }
 
 function updateTranslateSettingsUI() {
@@ -1736,7 +1736,7 @@ function bindEvents() {
       if (lorebookBtn) {
         e.preventDefault();
         e.stopPropagation();
-        openLorebookSettingsForAvatar(lorebookBtn.dataset.avatarId || '', { create: true }).catch(() => {});
+        openLorebookSettingsForAvatar(lorebookBtn.dataset.avatarId || '', { create: true }).catch(() => { });
         return;
       }
       const item = e.target.closest('[data-action="open-contact"]');
@@ -2567,17 +2567,17 @@ function registerServiceWorker() {
     window.addEventListener('load', () => {
       navigator.serviceWorker.getRegistrations()
         .then((regs) => Promise.all((regs || []).map((reg) => reg.unregister().catch(() => false))))
-        .catch(() => {});
+        .catch(() => { });
       if (window.caches && typeof window.caches.keys === 'function') {
         caches.keys()
           .then((keys) => Promise.all((keys || []).map((key) => caches.delete(key))))
-          .catch(() => {});
+          .catch(() => { });
       }
     });
     return;
   }
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('/sw.js').catch(() => { });
   });
 }
 
@@ -2598,7 +2598,7 @@ function loadSessionsState() {
     state.sessions = [createSessionObject('会话 1')];
   }
   state.sessions.forEach((s) => {
-    try { ensureSessionMessageTreeState(s); } catch (_) {}
+    try { ensureSessionMessageTreeState(s); } catch (_) { }
   });
 
   const activeId = localStorage.getItem(STORAGE_ACTIVE_KEY);
@@ -2611,7 +2611,7 @@ function loadSessionsState() {
 
 function persistSessionsState() {
   state.sessions.forEach((s) => {
-    try { ensureSessionMessageTreeState(s); } catch (_) {}
+    try { ensureSessionMessageTreeState(s); } catch (_) { }
   });
   state.sessions = sortSessions(state.sessions).slice(0, MAX_SESSIONS);
   localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(state.sessions));
@@ -3325,6 +3325,53 @@ function normalizeGroupLoopComparableText(text) {
     .toLowerCase();
 }
 
+function detectGroupShortLoopReplyCandidate(session, content, member, options = {}) {
+  const text = String(content || '').trim();
+  if (!text) return null;
+  const key = normalizeGroupLoopComparableText(text);
+  if (!key) return null;
+  // Only target short replies so normal long roleplay content is unaffected.
+  if (text.length > 120 || key.length > 18) return null;
+
+  const excludeMessageId = String(options && options.excludeMessageId || '').trim();
+  const visible = getVisibleSessionMessages(session)
+    .filter((m) => {
+      if (!(m && m.kind === 'chat' && m.role === 'assistant' && m.speakerAvatarId)) return false;
+      if (excludeMessageId && String(m.id || '') === excludeMessageId) return false;
+      const t = String(m.content || '').trim();
+      if (!t) return false;
+      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(t)) return false;
+      return true;
+    })
+    .slice(-8);
+  if (!visible.length) return null;
+
+  const recent = visible.map((m) => ({
+    speakerAvatarId: String(m.speakerAvatarId || ''),
+    text: String(m.content || '').trim(),
+    key: normalizeGroupLoopComparableText(m.content || '')
+  })).filter((x) => x.key);
+
+  const sameCount = recent.filter((x) => x.key === key).length;
+  const last4 = recent.slice(-4);
+  const last4SameCount = last4.filter((x) => x.key === key).length;
+  const farewellRe = /(再见|拜拜|回头见|下次见|またね|じゃあね|bye|goodbye|see you)/i;
+  const isFarewell = farewellRe.test(text);
+  const recentFarewellCount = last4.filter((x) => farewellRe.test(x.text)).length;
+  const alternatesTwoShortKeys = last4.length >= 4
+    && last4.every((x) => x.key.length <= 12)
+    && new Set(last4.map((x) => x.key)).size <= 2;
+
+  if (sameCount >= 2 || last4SameCount >= 1 || (isFarewell && recentFarewellCount >= 1) || alternatesTwoShortKeys) {
+    return {
+      reason: isFarewell ? 'farewell-loop' : (sameCount >= 2 ? 'repeat-short' : 'short-loop'),
+      key,
+      text
+    };
+  }
+  return null;
+}
+
 function buildGroupLoopBreakHint(session) {
   if (!session || !Array.isArray(session.messages)) return '';
   const visible = getVisibleSessionMessages(session)
@@ -3414,15 +3461,15 @@ function loadAvatars() {
     const parsed = JSON.parse(raw);
     state.avatars = Array.isArray(parsed)
       ? parsed.filter(isValidAvatar).map((avatar) => ({
-          ...avatar,
-          rating: clampAvatarRating(avatar.rating),
-          usageCount: Math.max(0, Number(avatar.usageCount || 0) || 0),
-          tags: normalizeAvatarTags(avatar.tags || []),
-          openingScenarios: normalizeAvatarScenarios(avatar.openingScenarios || [])
-        })).map((avatar) => {
-          if (avatar && avatar.type === 'group') ensureGroupChatSettings(avatar);
-          return avatar;
-        })
+        ...avatar,
+        rating: clampAvatarRating(avatar.rating),
+        usageCount: Math.max(0, Number(avatar.usageCount || 0) || 0),
+        tags: normalizeAvatarTags(avatar.tags || []),
+        openingScenarios: normalizeAvatarScenarios(avatar.openingScenarios || [])
+      })).map((avatar) => {
+        if (avatar && avatar.type === 'group') ensureGroupChatSettings(avatar);
+        return avatar;
+      })
       : [];
   } catch (_) { state.avatars = []; }
 }
@@ -3697,11 +3744,11 @@ async function handleTavernImport(file) {
     tags: importedCardTags,
     openingScenarios: card.firstMessage
       ? [{
-          title: '默认开场',
-          description: '导入酒馆卡时自动生成',
-          openingMessage: String(card.firstMessage || '').trim(),
-          tags: ['导入']
-        }]
+        title: '默认开场',
+        description: '导入酒馆卡时自动生成',
+        openingMessage: String(card.firstMessage || '').trim(),
+        tags: ['导入']
+      }]
       : []
   });
 
@@ -3739,7 +3786,7 @@ async function handleTavernImport(file) {
     } catch (_) {
       lorebookImport = { total: importedLorebookEntries.length, imported: 0, failed: importedLorebookEntries.length };
     }
-    try { if (lorebookRuntime && lorebookRuntime.sectionReady) loadLorebookList({ force: true, silent: true }); } catch (_) {}
+    try { if (lorebookRuntime && lorebookRuntime.sectionReady) loadLorebookList({ force: true, silent: true }); } catch (_) { }
   }
 
   renderAvatarList();
@@ -3866,7 +3913,7 @@ function openContact(avatarId) {
   refreshContactsLorebookShortcut();
   if (avatar) {
     setTimeout(() => {
-      try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) {}
+      try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) { }
     }, 0);
   }
   if (els.chatInput) els.chatInput.focus();
@@ -4687,7 +4734,7 @@ function ensureAvatarGalleryDetailModal() {
         fillAvatarForm(avatar);
         ensureAvatarScenarioManagerUi();
         renderAvatarScenarioDraftList();
-      }).catch(() => {});
+      }).catch(() => { });
       return;
     }
     if (action === 'gallery-open-contact') {
@@ -4931,7 +4978,7 @@ function applyAvatarSelection(avatarId) {
     const avatar = getAvatarById(avatarId);
     if (avatar) {
       setTimeout(() => {
-        try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) {}
+        try { maybeOfferAvatarOpeningScene(session, avatar); } catch (_) { }
       }, 0);
     }
   }
@@ -4957,9 +5004,9 @@ function renderSessionList() {
   });
 }
 
-function syncMaterialsFromSession() {}
+function syncMaterialsFromSession() { }
 
-function updateCharHint() {}
+function updateCharHint() { }
 
 function isAvatarTranslationOverlayEnabled(session) {
   return Boolean(
@@ -5343,7 +5390,7 @@ async function pumpOverlayTranslationQueue() {
             scheduleOverlayTranslationPersist();
             scheduleOverlayTranslationRefresh(task.sessionId);
           }
-        } catch (_) {}
+        } catch (_) { }
         const isRateLimited = Number(error && error.status) === 429 || /Too Many Requests|\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41/.test(msg);
         if (isRateLimited) {
           const now = Date.now();
@@ -5400,7 +5447,7 @@ function renderMessages() {
   const visibleMessages = getVisibleSessionMessages(session);
   if (!session || !visibleMessages.length) {
     els.messageList.innerHTML = '<div class="muted">开始提问吧。你可以先上传资料，再点击工具生成结构化产物。</div>';
-    try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
+    try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) { }
     return;
   }
   const messageTreeIndex = buildSessionMessageTreeIndex(session);
@@ -5501,7 +5548,7 @@ function renderMessages() {
 
   setSelectedMessageBubble(state.ui.selectedMessageId || '');
   els.messageList.scrollTop = els.messageList.scrollHeight;
-  try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) {}
+  try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) { }
 }
 
 function renderAssistantMessageContent(text) {
@@ -5811,10 +5858,10 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
           renderMessages();
         }
         if (stoppedByGuard) {
-          try { await reader.cancel(); } catch (_) {}
+          try { await reader.cancel(); } catch (_) { }
           break;
         }
-      } catch (_) {}
+      } catch (_) { }
     }
     if (stoppedByGuard) break;
   }
@@ -5827,7 +5874,7 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
     renderMessages();
   }
   if (stoppedByGuard && guardReason) {
-    try { setStatus(`已截断群聊异常长回复（${guardReason}）。`); } catch (_) {}
+    try { setStatus(`已截断群聊异常长回复（${guardReason}）。`); } catch (_) { }
   }
   try {
     window.setTimeout(() => {
@@ -5839,9 +5886,9 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
         if (session && message) {
           enqueueOverlayTranslation(session, message, { force: true });
         }
-      } catch (_) {}
+      } catch (_) { }
     }, 0);
-  } catch (_) {}
+  } catch (_) { }
   return full;
 }
 
@@ -5902,7 +5949,7 @@ async function sendSingleChatMessage(session, options = {}) {
           body: JSON.stringify({ query: String(session.messages.filter(m => m.role === 'user').pop()?.content || '') })
         });
         searchResults = Array.isArray(sr.results) ? sr.results : [];
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const requestStartedAt = Date.now();
@@ -5951,7 +5998,7 @@ async function sendSingleChatMessage(session, options = {}) {
       try {
         const parsed = JSON.parse(raw);
         msg = parsed.message || msg;
-      } catch (_) {}
+      } catch (_) { }
       updateMessage(assistant.id, (m) => ({ ...m, content: msg }));
       renderMessages();
       return;
@@ -6026,11 +6073,14 @@ async function sendGroupChatMessage(session, group, options = {}) {
         let finalContent = '';
         let memberSucceeded = false;
         const maxAttempts = 2;
+        let retryReason = '';
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const loopBreakHint = buildGroupLoopBreakHint(session);
           const retryHint = attempt > 1
-            ? '上一次回复为空或无效。请直接输出你这一轮的一次发言（1-3句），不要代替他人发言，不要重复寒暄/再见。'
+            ? (retryReason === 'short-loop'
+              ? '检测到群聊陷入短句重复/寒暄循环。请换一个新话题或推进情节，补充一个新信息、新动作或新问题；不要只说“再见/好的/嗯嗯”等短句，也不要复述上一句。'
+              : '上一次回复为空或无效。请直接输出你这一轮的一次发言（1-3句），不要代替他人发言，不要重复寒暄/再见。')
             : '';
           const baseTurnInstruction = spectatorMode
             ? '当前为旁观模式。优先回应其他角色并自然推进话题，不要等待用户再次发言。'
@@ -6094,7 +6144,7 @@ async function sendGroupChatMessage(session, group, options = {}) {
           if (!response.ok) {
             const raw = await response.text();
             let msg = `请求失败：${response.status}`;
-            try { msg = JSON.parse(raw).message || msg; } catch (_) {}
+            try { msg = JSON.parse(raw).message || msg; } catch (_) { }
             updateMessage(assistant.id, (m) => ({ ...m, content: msg, excludeFromContext: true }));
             renderMessages();
             finalContent = '';
@@ -6115,11 +6165,30 @@ async function sendGroupChatMessage(session, group, options = {}) {
 
           const normalizedAttemptContent = String(finalContent || '').trim();
           if (normalizedAttemptContent && normalizedAttemptContent !== '未收到有效回复，请重试。') {
+            const attemptSanitizedContent = sanitizeGroupSpeakerReplyContent(finalContent, member, members);
+            if (attemptSanitizedContent && attemptSanitizedContent !== finalContent) {
+              finalContent = attemptSanitizedContent;
+              updateMessage(assistant.id, (m) => ({ ...m, content: finalContent }));
+              renderMessages();
+            }
+            const shortLoopCandidate = detectGroupShortLoopReplyCandidate(session, finalContent, member, {
+              excludeMessageId: assistant.id
+            });
+            if (shortLoopCandidate) {
+              retryReason = 'short-loop';
+              if (attempt < maxAttempts) {
+                try { setStatus(`${member.name} 出现短句循环，正在重试并引导换话题...`); } catch (_) { }
+                continue;
+              }
+              finalContent = '';
+              memberSucceeded = false;
+              break;
+            }
             memberSucceeded = true;
             break;
           }
           if (attempt < maxAttempts) {
-            try { setStatus(`${member.name} 本轮未正常回复，正在重试...`); } catch (_) {}
+            try { setStatus(`${member.name} 本轮未正常回复，正在重试...`); } catch (_) { }
           }
         }
 
@@ -6132,10 +6201,10 @@ async function sendGroupChatMessage(session, group, options = {}) {
         const finalText = String(finalContent || '').trim();
         if (!memberSucceeded || !finalText || finalText === '未收到有效回复，请重试。') {
           session.messages = (session.messages || []).filter((m) => m && m.id !== assistant.id);
-          try { ensureSessionMessageTreeState(session); } catch (_) {}
+          try { ensureSessionMessageTreeState(session); } catch (_) { }
           renderMessages();
           // Do not advance turn anchor or payload history for empty/invalid replies.
-          try { setStatus(`${member.name} 本轮未生成有效回复，已跳过。`); } catch (_) {}
+          try { setStatus(`${member.name} 本轮未生成有效回复，已跳过。`); } catch (_) { }
           continue;
         }
         recordAvatarUsage(member.id, 1);
@@ -6149,7 +6218,7 @@ async function sendGroupChatMessage(session, group, options = {}) {
       }
       if (spectatorMode && successfulRepliesInRound <= 0) {
         stopRemainingSpectatorRounds = true;
-        try { setStatus('本轮旁观未生成有效回复，已停止继续连发。'); } catch (_) {}
+        try { setStatus('本轮旁观未生成有效回复，已停止继续连发。'); } catch (_) { }
       }
     }
   } catch (error) {
@@ -6601,7 +6670,7 @@ async function openSettingsPanel() {
   ensureTeamSharingSettingsSection();
   ensureLorebookSettingsSection();
   ensureAvatarScenarioManagerUi();
-  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) {}
+  try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) { }
   refreshAvatarPreviews();
   els.tokenInput.value = state.token || '';
   els.userAvatarInput.value = state.ui.userAvatar || '';
@@ -6804,7 +6873,7 @@ async function loadProviderList() {
         selectedId: kbCreatorRuntime.ui.embeddingProvider && kbCreatorRuntime.ui.embeddingProvider.value
       });
     }
-  } catch {}
+  } catch { }
 }
 
 function renderProviderList(providers) {
@@ -6846,7 +6915,7 @@ async function renderPresetProviders(existingProviders) {
     }).join('');
 
     state._presetCache = presets;
-  } catch {}
+  } catch { }
 }
 
 function fillFormFromPreset(key) {
@@ -6888,7 +6957,7 @@ async function editProviderById(id) {
     state.ui.editAvailableModels = p.availableModels || [];
     state.ui.editSelectedModels = [...(p.models || [])];
     renderModelCheckboxes();
-  } catch {}
+  } catch { }
 }
 window.editProviderById = editProviderById;
 
@@ -7188,7 +7257,7 @@ async function apiRequest(url, options) {
   if (timeoutMs > 0 && typeof AbortController !== 'undefined') {
     controller = new AbortController();
     timeoutId = window.setTimeout(() => {
-      try { controller.abort(); } catch (_) {}
+      try { controller.abort(); } catch (_) { }
     }, timeoutMs);
   }
   try {
@@ -7801,7 +7870,7 @@ async function copyTextPortable(text) {
       await navigator.clipboard.writeText(content);
       return true;
     }
-  } catch (_) {}
+  } catch (_) { }
   try {
     fallbackCopy(content);
     return true;
@@ -8453,7 +8522,7 @@ function ensureGroupChatEnhanceModal() {
     closeBtn: dialog.querySelector('#groupChatEnhanceCloseBtn')
   };
 
-  const close = () => { try { dialog.close(); } catch (_) {} };
+  const close = () => { try { dialog.close(); } catch (_) { } };
   if (ui.cancelBtn) ui.cancelBtn.addEventListener('click', close);
   if (ui.closeBtn) ui.closeBtn.addEventListener('click', close);
   if (ui.saveBtn) ui.saveBtn.addEventListener('click', () => saveGroupChatEnhanceModal());
@@ -8581,20 +8650,19 @@ function ensureContactsLorebookShortcut() {
         <span>世界观书</span>
       </button>
     </div>
-    <div id="contactsGroupEnhanceRow" style="display:none;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid rgba(99,102,241,.18);background:rgba(99,102,241,.04);border-radius:12px;">
-      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
-        <span aria-hidden="true" style="font-size:15px;">👥</span>
+    <div id="contactsGroupEnhanceRow" style="display:none;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding:6px 8px;margin-top:4px;border:1px solid rgba(99,102,241,.12);background:rgba(99,102,241,.03);border-radius:8px;">
+      <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+        <span aria-hidden="true" style="font-size:14px;">👥</span>
         <div style="min-width:0;">
-          <div id="contactsGroupEnhanceLabel" style="font-size:12px;font-weight:700;color:#334155;">群聊增强</div>
-          <div id="contactsGroupEnhanceMiniHint" class="muted" style="font-size:11px;line-height:1.25;">角色关系与旁观模式</div>
+          <div id="contactsGroupEnhanceLabel" style="font-size:11px;font-weight:700;color:#475569;">群聊增强</div>
         </div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="contactsGroupSpectatorBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:#fff;">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;">
+        <button id="contactsGroupSpectatorBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:4px 8px;font-size:11px;background:#fff;border:1px solid rgba(148,163,184,.15);">
           <span aria-hidden="true">👀</span>
           <span>旁观一轮</span>
         </button>
-        <button id="contactsGroupEnhanceBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:#fff;">
+        <button id="contactsGroupEnhanceBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:4px 8px;font-size:11px;background:#fff;border:1px solid rgba(148,163,184,.15);">
           <span aria-hidden="true">🤝</span>
           <span>群聊关系</span>
         </button>
@@ -8637,7 +8705,7 @@ function ensureContactsLorebookShortcut() {
   }
   if (openBtn) {
     openBtn.addEventListener('click', () => {
-      openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => {});
+      openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => { });
     });
   }
   if (spectatorBtn) {
@@ -10420,7 +10488,7 @@ async function importMcpServersFromText(rawTextInput) {
   try {
     const data = await apiRequest('/api/mcp-servers', { method: 'GET' });
     existingServers = Array.isArray(data.servers) ? data.servers : [];
-  } catch (_) {}
+  } catch (_) { }
   const seen = new Set(existingServers.map((s) => mcpImportSignature(s)));
 
   let imported = 0;
@@ -10781,7 +10849,7 @@ function closeKbCreatorModal() {
 
 async function openKbCreatorModal(options = {}) {
   await openSettingsSection('knowledge');
-  try { await loadProviderList(); } catch (_) {}
+  try { await loadProviderList(); } catch (_) { }
   const ui = ensureKbCreatorModal();
   kbCreatorRuntime.mode = options.mode === 'edit' ? 'edit' : 'create';
   kbCreatorRuntime.editId = options.editId ? String(options.editId) : '';

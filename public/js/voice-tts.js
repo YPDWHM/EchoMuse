@@ -24,7 +24,7 @@
       sttMode: String(src.sttMode || 'native'),
       sttLang: String(src.sttLang || ''),
       sttInterim: Boolean(src.sttInterim)
-        ,
+      ,
       localWhisperExePath: String(src.localWhisperExePath || ''),
       localWhisperModelPath: String(src.localWhisperModelPath || ''),
       localWhisperThreads: clampNumber(src.localWhisperThreads, 1, 32, 4),
@@ -86,11 +86,11 @@
         state.toolbarNoticeTs = Date.now();
         try {
           if (state.uiReady) renderToolbarState();
-        } catch (_) {}
+        } catch (_) { }
       }
       try {
         if (typeof opts.setStatus === 'function') opts.setStatus(text);
-      } catch (_) {}
+      } catch (_) { }
     }
 
     function getActiveSession() {
@@ -103,13 +103,13 @@
 
     function persistAvatars() {
       if (typeof opts.persistAvatars === 'function') {
-        try { opts.persistAvatars(); } catch (_) {}
+        try { opts.persistAvatars(); } catch (_) { }
       }
     }
 
     function rerenderAvatarUi() {
       if (typeof opts.onAvatarVoiceProfileChanged === 'function') {
-        try { opts.onAvatarVoiceProfileChanged(); } catch (_) {}
+        try { opts.onAvatarVoiceProfileChanged(); } catch (_) { }
       }
     }
 
@@ -168,7 +168,7 @@
     function savePrefs() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state.prefs));
-      } catch (_) {}
+      } catch (_) { }
     }
 
     function normalizeVoiceProfile(raw) {
@@ -237,6 +237,8 @@
         .voice-assist-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 2px;padding:6px 8px;border-radius:10px;border:1px solid rgba(148,163,184,.25);background:#fff}
         .voice-assist-toolbar.hidden{display:none}
         .voice-assist-chip.hidden{display:none}
+        .voice-assist-chip{display:inline-flex;align-items:center;justify-content:center;min-width:72px;white-space:nowrap}
+        .voice-assist-chip .voice-assist-chip-label{display:inline-flex;align-items:center;justify-content:center;line-height:1}
         .voice-assist-toolbar .va-btn{border:1px solid rgba(148,163,184,.35);background:#f8fafc;color:#0f172a;border-radius:8px;padding:4px 8px;font-size:12px;cursor:pointer}
         .voice-assist-toolbar .va-btn.active{background:#e0e7ff;border-color:#c7d2fe;color:#3730a3}
         .voice-assist-toolbar .va-label{font-size:12px;color:#64748b}
@@ -298,20 +300,20 @@
           const btn = document.getElementById('settingsBtn');
           if (btn && typeof btn.click === 'function') btn.click();
         }
-      } catch (_) {}
+      } catch (_) { }
 
-      try { ensureVoiceSettingsSection(); } catch (_) {}
+      try { ensureVoiceSettingsSection(); } catch (_) { }
 
       try {
         if (typeof window.openSettingsSection === 'function') {
           window.openSettingsSection('voice');
           return;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       const navBtn = state.settingsUi && state.settingsUi.navBtn;
       if (navBtn && typeof navBtn.click === 'function') {
-        try { navBtn.click(); } catch (_) {}
+        try { navBtn.click(); } catch (_) { }
       }
     }
 
@@ -319,8 +321,13 @@
       let chip = state.toggleChip;
       if (chip && chip.isConnected) {
         const kbBtn = document.getElementById('toggleKbBtn');
-        if (kbBtn && kbBtn.parentNode && chip.previousElementSibling !== kbBtn) {
-          kbBtn.insertAdjacentElement('afterend', chip);
+        const kbWrap = kbBtn ? kbBtn.closest('.bar-dropdown-wrap') : null;
+        const target = kbWrap || kbBtn;
+        if (target && target.parentNode && chip.previousElementSibling !== target) {
+          target.insertAdjacentElement('afterend', chip);
+        }
+        if (!String(chip.textContent || '').trim()) {
+          chip.innerHTML = '<span class="voice-assist-chip-label">' + escapeHtml(t('🎤 语音', '🎤 Voice')) + '</span>';
         }
         return chip;
       }
@@ -332,6 +339,8 @@
       chip.type = 'button';
       chip.className = 'bar-chip voice-assist-chip';
       chip.dataset.action = 'toggle-voice-toolbar';
+      chip.innerHTML = '<span class="voice-assist-chip-label">' + escapeHtml(t('🎤 语音', '🎤 Voice')) + '</span>';
+      chip.title = t('展开语音工具条', 'Expand voice toolbar');
       chip.addEventListener('click', () => {
         state.prefs.toolbarVisible = !Boolean(state.prefs.toolbarVisible);
         savePrefs();
@@ -339,8 +348,10 @@
       });
 
       const kbBtn = document.getElementById('toggleKbBtn');
-      if (kbBtn && kbBtn.parentNode === bottomBar) {
-        kbBtn.insertAdjacentElement('afterend', chip);
+      const kbWrap = kbBtn ? kbBtn.closest('.bar-dropdown-wrap') : null;
+      const target = kbWrap || kbBtn;
+      if (target && target.parentNode === bottomBar) {
+        target.insertAdjacentElement('afterend', chip);
       } else {
         bottomBar.appendChild(chip);
       }
@@ -781,8 +792,8 @@
 
       const providerNote = section.querySelector('[data-role="voice-provider-note"]');
       if (providerNote) providerNote.textContent = state.prefs.voiceProvider === 'online_reserved'
-          ? t('在线 TTS 提供方后续会接入；当前仍使用系统音色。', 'Online TTS providers will be added later; currently uses system voices.')
-          : t('系统音色来自浏览器/系统 speechSynthesis，可通过导入音色包快速切换参数。', 'System voices come from speechSynthesis; import preset packs to switch quickly.');
+        ? t('在线 TTS 提供方后续会接入；当前仍使用系统音色。', 'Online TTS providers will be added later; currently uses system voices.')
+        : t('系统音色来自浏览器/系统 speechSynthesis，可通过导入音色包快速切换参数。', 'System voices come from speechSynthesis; import preset packs to switch quickly.');
 
       const sttNote = section.querySelector('[data-role="stt-note"]');
       if (sttNote) {
@@ -983,9 +994,10 @@
 
       const chip = ensureToggleChip();
       if (chip) {
+        const chipLabel = String(t('🎤 语音', '🎤 Voice') || '').trim() || (isZh() ? '🎤 语音' : '🎤 Voice');
         chip.classList.toggle('hidden', !supported);
         chip.classList.toggle('active-tool', supported && Boolean(state.prefs.toolbarVisible));
-        chip.textContent = t('语音', 'Voice');
+        chip.innerHTML = '<span class="voice-assist-chip-label">' + escapeHtml(chipLabel) + '</span>';
         chip.title = state.prefs.toolbarVisible
           ? t('收起语音工具条', 'Collapse voice toolbar')
           : t('展开语音工具条', 'Expand voice toolbar');
@@ -998,8 +1010,8 @@
         ui.sttBtn.textContent = localSttTranscribing
           ? t('转写中…', 'Transcribing...')
           : (state.listening
-          ? (localMode ? t('停止并转写', 'Stop & Transcribe') : t('停止录音', 'Stop Dictation'))
-          : (localMode
+            ? (localMode ? t('停止并转写', 'Stop & Transcribe') : t('停止录音', 'Stop Dictation'))
+            : (localMode
               ? (localWhisperConfigured ? t('开始录音', 'Start Recording') : t('配置', 'Setup STT'))
               : t('语音输入', 'Dictation')));
         ui.sttBtn.classList.toggle('active', state.listening);
@@ -1107,7 +1119,7 @@
       if (!message) return '';
       let text = '';
       if (typeof opts.getSpeakTextForMessage === 'function') {
-        try { text = String(opts.getSpeakTextForMessage(session, message) || ''); } catch (_) {}
+        try { text = String(opts.getSpeakTextForMessage(session, message) || ''); } catch (_) { }
       }
       if (!text) text = String(message.content || '');
       return String(text || '')
@@ -1130,7 +1142,7 @@
       if (!supportsTts) return;
       try {
         window.speechSynthesis.cancel();
-      } catch (_) {}
+      } catch (_) { }
       state.speakingMessageKey = '';
       renderToolbarState();
     }
@@ -1259,8 +1271,8 @@
         if (!transcript) return;
         const prev = String(input.value || '');
         input.value = prev ? (prev + (/[\\s\\n]$/.test(prev) ? '' : ' ') + transcript) : transcript;
-        try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
-        try { input.focus(); } catch (_) {}
+        try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) { }
+        try { input.focus(); } catch (_) { }
       };
       return rec;
     }
@@ -1351,7 +1363,7 @@
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const audioCtx = new AudioCtx();
       if (typeof audioCtx.resume === 'function' && audioCtx.state === 'suspended') {
-        try { await audioCtx.resume(); } catch (_) {}
+        try { await audioCtx.resume(); } catch (_) { }
       }
       const source = audioCtx.createMediaStreamSource(stream);
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -1386,11 +1398,11 @@
       state.localSttTranscribing = true;
       renderToolbarState();
       try {
-        try { rec.processor.disconnect(); } catch (_) {}
-        try { rec.source.disconnect(); } catch (_) {}
-        try { rec.gain.disconnect(); } catch (_) {}
-        (rec.stream && rec.stream.getTracks ? rec.stream.getTracks() : []).forEach((t) => { try { t.stop(); } catch (_) {} });
-        if (rec.audioCtx && typeof rec.audioCtx.close === 'function') { try { await rec.audioCtx.close(); } catch (_) {} }
+        try { rec.processor.disconnect(); } catch (_) { }
+        try { rec.source.disconnect(); } catch (_) { }
+        try { rec.gain.disconnect(); } catch (_) { }
+        (rec.stream && rec.stream.getTracks ? rec.stream.getTracks() : []).forEach((t) => { try { t.stop(); } catch (_) { } });
+        if (rec.audioCtx && typeof rec.audioCtx.close === 'function') { try { await rec.audioCtx.close(); } catch (_) { } }
         const mergedLength = (rec.chunks || []).reduce((sum, c) => sum + (c ? c.length : 0), 0);
         if (!mergedLength) throw new Error(t('未捕获到音频', 'No audio captured'));
         const peak = Number(typeof rec.peakRef === 'function' ? rec.peakRef() : 0);
@@ -1418,8 +1430,8 @@
         if (input) {
           const prev = String(input.value || '');
           input.value = prev ? (prev + (/[\\s\\n]$/.test(prev) ? '' : ' ') + text) : text;
-          try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
-          try { input.focus(); } catch (_) {}
+          try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) { }
+          try { input.focus(); } catch (_) { }
         }
         onStatus(t('本地转写完成', 'Local transcription complete'));
       } catch (error) {
@@ -1557,7 +1569,7 @@
           } else {
             window.speechSynthesis.onvoiceschanged = refreshVoices;
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     }
 

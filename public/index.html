@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -11,13 +12,21 @@
   <link rel="apple-touch-icon" href="/icons/icon.svg">
   <title>EchoMuse</title>
   <link rel="stylesheet" href="/vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=3">
 </head>
+
 <body>
+  <div id="startupOverlay" class="startup-overlay">
+    <div class="startup-logo-container">
+      <div class="startup-ring"></div>
+      <div class="startup-text">EchoMuse<span class="logo-sparkle" style="font-size:20px; margin-left:8px;">✨</span>
+      </div>
+    </div>
+  </div>
   <div class="chatbox-app">
     <aside class="sidebar">
       <div class="brand">
-        <h1>EchoMuse</h1>
+        <h1 class="premium-logo">EchoMuse<span class="logo-sparkle">✨</span></h1>
       </div>
 
       <div class="sidebar-tabs">
@@ -44,7 +53,12 @@
 
       <div class="sidebar-bottom">
         <button id="settingsBtn" class="sidebar-settings-btn" type="button" title="设置">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path
+              d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
         </button>
       </div>
     </aside>
@@ -86,7 +100,7 @@
             </div>
           </div>
           <div class="bar-dropdown-wrap">
-          <button id="toggleAvatarBtn" class="bar-chip" type="button">🎭 角色</button>
+            <button id="toggleAvatarBtn" class="bar-chip" type="button">🎭 角色</button>
             <div id="avatarSelectPanel" class="popup-panel hidden"></div>
           </div>
           <button id="toggleSearchBtn" class="bar-chip" type="button">🔎 联网</button>
@@ -203,7 +217,7 @@
                 <span class="muted">用于降低提示注入与不安全输出</span>
               </div>
             </div>
-                        <div class="setting-row">
+            <div class="setting-row">
               <label id="translateEnableLabel">启用翻译</label>
               <div class="setting-control">
                 <label class="toggle">
@@ -213,7 +227,7 @@
                 <span id="translateEnableDesc" class="muted">仅在聊天内容中生效（含角色卡/记忆等上下文）</span>
               </div>
             </div>
-<div class="setting-row">
+            <div class="setting-row">
               <label>翻译方向</label>
               <div class="setting-control">
                 <select id="translateFromSelect" aria-label="translateFromSelect">
@@ -242,7 +256,8 @@
             <div class="setting-row">
               <label>字体大小</label>
               <div class="setting-control range-control">
-                <input id="fontSizeSelect" type="range" min="12" max="20" step="1" value="14" aria-label="fontSizeSelect">
+                <input id="fontSizeSelect" type="range" min="12" max="20" step="1" value="14"
+                  aria-label="fontSizeSelect">
                 <span id="fontSizeValueLabel" class="range-value">14px</span>
               </div>
             </div>
@@ -289,7 +304,8 @@
                 <label>代理地址</label>
                 <div class="setting-control">
                   <input id="proxyHostInput" type="text" placeholder="127.0.0.1" aria-label="proxyHostInput">
-                  <input id="proxyPortInput" type="number" min="1" max="65535" placeholder="7890" aria-label="proxyPortInput">
+                  <input id="proxyPortInput" type="number" min="1" max="65535" placeholder="7890"
+                    aria-label="proxyPortInput">
                 </div>
               </div>
               <div class="setting-row">
@@ -348,11 +364,13 @@
           </div>
           <div class="setting-row">
             <label>Temperature</label>
-            <input id="providerTemp" type="number" step="0.05" min="0" max="2" placeholder="留空用默认" aria-label="providerTemp">
+            <input id="providerTemp" type="number" step="0.05" min="0" max="2" placeholder="留空用默认"
+              aria-label="providerTemp">
           </div>
           <div class="setting-row">
             <label>Max Tokens</label>
-            <input id="providerMaxTokens" type="number" step="100" min="100" placeholder="留空用默认" aria-label="providerMaxTokens">
+            <input id="providerMaxTokens" type="number" step="100" min="100" placeholder="留空用默认"
+              aria-label="providerMaxTokens">
           </div>
           <div class="setting-row-actions">
             <button id="providerTestAllBtn" class="btn ghost" type="button">测试连接</button>
@@ -370,7 +388,8 @@
             <div class="setting-row">
               <label>上下文消息数量上限</label>
               <div class="setting-range-block">
-                <input id="chatContextLimitRange" type="range" min="4" max="40" step="2" value="14" aria-label="chatContextLimitRange">
+                <input id="chatContextLimitRange" type="range" min="4" max="40" step="2" value="14"
+                  aria-label="chatContextLimitRange">
                 <div class="setting-range-meta">
                   <span id="chatContextLimitLabel" class="range-value-pill">14 条</span>
                   <label class="inline-check">
@@ -388,11 +407,13 @@
             <div class="setting-row">
               <label>温度（Temperature）</label>
               <div class="setting-range-block">
-                <input id="chatTemperatureRange" type="range" min="0" max="2" step="0.05" value="0.7" aria-label="chatTemperatureRange">
+                <input id="chatTemperatureRange" type="range" min="0" max="2" step="0.05" value="0.7"
+                  aria-label="chatTemperatureRange">
                 <div class="setting-range-meta">
                   <span id="chatTemperatureLabel" class="range-value-pill">未设置</span>
                   <label class="inline-check">
-                    <input id="chatTemperatureUseDefault" type="checkbox" checked aria-label="chatTemperatureUseDefault">
+                    <input id="chatTemperatureUseDefault" type="checkbox" checked
+                      aria-label="chatTemperatureUseDefault">
                     使用默认
                   </label>
                 </div>
@@ -401,7 +422,8 @@
             <div class="setting-row">
               <label>Top P</label>
               <div class="setting-range-block">
-                <input id="chatTopPRange" type="range" min="0.1" max="1" step="0.05" value="0.9" aria-label="chatTopPRange">
+                <input id="chatTopPRange" type="range" min="0.1" max="1" step="0.05" value="0.9"
+                  aria-label="chatTopPRange">
                 <div class="setting-range-meta">
                   <span id="chatTopPLabel" class="range-value-pill">未设置</span>
                   <label class="inline-check">
@@ -429,41 +451,49 @@
             <div class="setting-switch-list">
               <div class="setting-switch-item">
                 <div class="setting-switch-title">???????</div>
-                <label class="toggle"><input id="chatShowTimestampToggle" type="checkbox" checked aria-label="chatShowTimestampToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatShowTimestampToggle" type="checkbox" checked
+                    aria-label="chatShowTimestampToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div class="setting-switch-title">??????</div>
-                <label class="toggle"><input id="chatShowModelToggle" type="checkbox" aria-label="chatShowModelToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatShowModelToggle" type="checkbox"
+                    aria-label="chatShowModelToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div class="setting-switch-title">??????</div>
-                <label class="toggle"><input id="chatShowCharCountToggle" type="checkbox" aria-label="chatShowCharCountToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatShowCharCountToggle" type="checkbox"
+                    aria-label="chatShowCharCountToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div class="setting-switch-title">显示消息的 token 消耗（估算）</div>
-                <label class="toggle"><input id="chatShowTokenUsageToggle" type="checkbox" aria-label="chatShowTokenUsageToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatShowTokenUsageToggle" type="checkbox"
+                    aria-label="chatShowTokenUsageToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div class="setting-switch-title">显示首字耗时（TTFT）</div>
-                <label class="toggle"><input id="chatShowFirstTokenLatencyToggle" type="checkbox" aria-label="chatShowFirstTokenLatencyToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatShowFirstTokenLatencyToggle" type="checkbox"
+                    aria-label="chatShowFirstTokenLatencyToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div>
                   <div class="setting-switch-title">Markdown ??</div>
                   <div class="setting-switch-desc">?????????????</div>
                 </div>
-                <label class="toggle"><input id="chatMarkdownToggle" type="checkbox" checked aria-label="chatMarkdownToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatMarkdownToggle" type="checkbox" checked
+                    aria-label="chatMarkdownToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div>
                   <div class="setting-switch-title">LaTeX ????</div>
                   <div class="setting-switch-desc">???? Markdown ??</div>
                 </div>
-                <label class="toggle"><input id="chatLatexToggle" type="checkbox" checked aria-label="chatLatexToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatLatexToggle" type="checkbox" checked
+                    aria-label="chatLatexToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div class="setting-switch-title">?????????</div>
-                <label class="toggle"><input id="chatSpellcheckToggle" type="checkbox" aria-label="chatSpellcheckToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatSpellcheckToggle" type="checkbox"
+                    aria-label="chatSpellcheckToggle"><span class="toggle-slider"></span></label>
               </div>
             </div>
           </div>
@@ -476,14 +506,16 @@
                   <div class="setting-switch-title">????????</div>
                   <div class="setting-switch-desc">???????????????</div>
                 </div>
-                <label class="toggle"><input id="chatAutoTitleToggle" type="checkbox" checked aria-label="chatAutoTitleToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatAutoTitleToggle" type="checkbox" checked
+                    aria-label="chatAutoTitleToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div>
                   <div class="setting-switch-title">????????Artifacts?</div>
                   <div class="setting-switch-desc">???????????????</div>
                 </div>
-                <label class="toggle"><input id="chatAutoPreviewArtifactToggle" type="checkbox" checked aria-label="chatAutoPreviewArtifactToggle"><span class="toggle-slider"></span></label>
+                <label class="toggle"><input id="chatAutoPreviewArtifactToggle" type="checkbox" checked
+                    aria-label="chatAutoPreviewArtifactToggle"><span class="toggle-slider"></span></label>
               </div>
             </div>
           </div>
@@ -503,7 +535,8 @@
             <div class="setting-row">
               <label>用户头像</label>
               <div class="setting-control">
-                <input id="userAvatarInput" type="text" placeholder="emoji 如 😀" maxlength="4" aria-label="userAvatarInput">
+                <input id="userAvatarInput" type="text" placeholder="emoji 如 😀" maxlength="4"
+                  aria-label="userAvatarInput">
                 <button id="userAvatarUploadBtn" class="btn ghost" type="button">上传图片</button>
                 <input id="userAvatarFile" type="file" hidden accept="image/*">
               </div>
@@ -545,18 +578,21 @@
             <label>角色头像</label>
             <div class="setting-control avatar-icon-row">
               <span id="avatarIconPreview" class="avatar-icon-preview">😺</span>
-              <input id="avatarEmojiInput" type="text" placeholder="输入 emoji" maxlength="4" class="avatar-emoji-input" aria-label="avatarEmojiInput">
+              <input id="avatarEmojiInput" type="text" placeholder="输入 emoji" maxlength="4" class="avatar-emoji-input"
+                aria-label="avatarEmojiInput">
               <button id="avatarIconUploadBtn" class="btn ghost" type="button">上传图片</button>
               <input id="avatarIconFile" type="file" hidden accept="image/*">
             </div>
           </div>
           <div class="setting-row">
             <label>自定义 Prompt</label>
-            <textarea id="avatarPromptInput" rows="4" placeholder="描述角色的性格、说话方式...（可选）" aria-label="avatarPromptInput"></textarea>
+            <textarea id="avatarPromptInput" rows="4" placeholder="描述角色的性格、说话方式...（可选）"
+              aria-label="avatarPromptInput"></textarea>
           </div>
           <div class="setting-row">
             <label>历史聊天记录</label>
-            <textarea id="avatarMemoryInput" rows="4" placeholder="粘贴聊天记录或导入文件...（可选）" aria-label="avatarMemoryInput"></textarea>
+            <textarea id="avatarMemoryInput" rows="4" placeholder="粘贴聊天记录或导入文件...（可选）"
+              aria-label="avatarMemoryInput"></textarea>
             <div class="setting-control">
               <button id="avatarMemoryImportBtn" class="btn ghost" type="button">导入文件（.txt / .md / .json）</button>
               <input id="avatarMemoryFile" type="file" hidden accept=".txt,.md,.json">
@@ -658,8 +694,9 @@
   <script src="/vendor/katex/katex.min.js"></script>
   <script src="/js/utils-core.js" defer></script>
   <script src="/js/domain-core.js" defer></script>
-  <script src="/js/chat-render-core.js" defer></script>
+  <script src="/js/chat-render-core.js?v=2" defer></script>
   <script src="/js/voice-tts.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
+
 </html>

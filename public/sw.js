@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = 'review-pack-static-v23';
+﻿const CACHE_NAME = 'review-pack-static-v24';
 
 const STATIC_ASSETS = [
   '/',

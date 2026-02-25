@@ -53,6 +53,7 @@ const ELECTRON_DESKTOP = process.env.ELECTRON_DESKTOP === '1';
 const CONFIG_DIR = path.join(os.homedir(), '.reviewpack');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 let appConfig = loadAppConfig();
+let desktopSetupOllamaServeProc = null;
 
 function defaultOllamaProvider() {
   return {
@@ -93,6 +94,36 @@ const TEAM_SHARING_DEFAULTS = Object.freeze({
   members: []
 });
 
+const DESKTOP_SETUP_DEFAULTS = Object.freeze({
+  firstRunCompleted: false,
+  runtimeMode: 'api',
+  localModels: [],
+  wizardVersion: 1,
+  completedAt: 0
+});
+
+function normalizeDesktopSetupConfig(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const mode = String(src.runtimeMode || 'api').trim().toLowerCase();
+  const runtimeMode = ['api', 'local', 'hybrid'].includes(mode) ? mode : 'api';
+  const localModels = Array.isArray(src.localModels) ? src.localModels : [];
+  return {
+    firstRunCompleted: Boolean(src.firstRunCompleted),
+    runtimeMode,
+    localModels: localModels
+      .filter((m) => m && typeof m === 'object')
+      .map((m) => ({
+        model: String(m.model || '').trim(),
+        flashEnabled: m.flashEnabled !== false,
+        thinkingEnabled: Boolean(m.thinkingEnabled)
+      }))
+      .filter((m) => m.model)
+      .slice(0, 24),
+    wizardVersion: Math.max(1, Number(src.wizardVersion || 1) || 1),
+    completedAt: Number(src.completedAt) || 0
+  };
+}
+
 function migrateProvider(p) {
   if (typeof p.model === 'string' && !Array.isArray(p.models)) {
     p.models = p.model ? [p.model] : [];
@@ -116,7 +147,8 @@ function loadAppConfig() {
         mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : [],
         knowledgeBases: Array.isArray(parsed.knowledgeBases) ? parsed.knowledgeBases : [],
         lorebooks: Array.isArray(parsed.lorebooks) ? parsed.lorebooks : [],
-        teamSharing: normalizeTeamSharingConfig(parsed.teamSharing || {})
+        teamSharing: normalizeTeamSharingConfig(parsed.teamSharing || {}),
+        desktopSetup: normalizeDesktopSetupConfig(parsed.desktopSetup || {})
       };
     }
     // migrate old single-provider config
@@ -130,10 +162,26 @@ function loadAppConfig() {
       });
       const providers = [defaultOllamaProvider()];
       if (old.type === 'openai_compatible') providers.push(migrated);
-      return { providers, activeProviderId: migrated.id, mcpServers: [], knowledgeBases: [], lorebooks: [], teamSharing: normalizeTeamSharingConfig({}) };
+      return {
+        providers,
+        activeProviderId: migrated.id,
+        mcpServers: [],
+        knowledgeBases: [],
+        lorebooks: [],
+        teamSharing: normalizeTeamSharingConfig({}),
+        desktopSetup: normalizeDesktopSetupConfig({})
+      };
     }
   } catch {}
-  return { providers: [defaultOllamaProvider()], activeProviderId: 'ollama-default', mcpServers: [], knowledgeBases: [], lorebooks: [], teamSharing: normalizeTeamSharingConfig({}) };
+  return {
+    providers: [defaultOllamaProvider()],
+    activeProviderId: 'ollama-default',
+    mcpServers: [],
+    knowledgeBases: [],
+    lorebooks: [],
+    teamSharing: normalizeTeamSharingConfig({}),
+    desktopSetup: normalizeDesktopSetupConfig({})
+  };
 }
 
 function saveAppConfig() {
@@ -480,7 +528,356 @@ app.get('/api/info', (req, res) => {
     rateLimitUsesClientId: RATE_LIMIT_TRUST_CLIENT_ID,
     teamSharingEnabled: Boolean(ensureTeamSharingConfig().enabled),
     teamSharingMemberCount: Array.isArray(ensureTeamSharingConfig().members) ? ensureTeamSharingConfig().members.length : 0,
-    minChineseChars: MIN_CN_CHARS
+    minChineseChars: MIN_CN_CHARS,
+    desktopSetup: normalizeDesktopSetupConfig(appConfig.desktopSetup || {})
+  });
+});
+
+function getDesktopSetupVendorOllamaExePath() {
+  return path.join(__dirname, 'vendor', 'ollama', 'ollama.exe');
+}
+
+function getDesktopSetupEnvironmentSnapshot() {
+  const apiProviders = Array.isArray(appConfig.providers)
+    ? appConfig.providers.filter((p) => p && p.enabled !== false && p.type !== 'ollama')
+    : [];
+  const active = getActiveProvider();
+  return {
+    isDesktop: ELECTRON_DESKTOP,
+    apiProvidersConfigured: apiProviders.length > 0,
+    activeProviderType: active.type,
+    activeProviderId: active.id,
+    activeModel: getActiveModel(),
+    vendorOllamaBundled: fs.existsSync(getDesktopSetupVendorOllamaExePath()),
+    localOllamaReachable: false,
+    localOllamaModels: []
+  };
+}
+
+function getDesktopSetupRecommendedMode(env) {
+  if (env.localOllamaReachable && env.apiProvidersConfigured) return 'hybrid';
+  if (env.apiProvidersConfigured) return 'api';
+  if (env.localOllamaReachable) return 'local';
+  return 'api';
+}
+
+function getDesktopSetupVendorOllamaModelsDir() {
+  return path.join(__dirname, 'vendor', 'ollama', 'models');
+}
+
+function normalizeDesktopSetupLocalModelSelectionList(rawList) {
+  return (Array.isArray(rawList) ? rawList : [])
+    .filter((m) => m && typeof m === 'object')
+    .map((m) => ({
+      model: String(m.model || '').trim(),
+      flashEnabled: m.flashEnabled !== false,
+      thinkingEnabled: Boolean(m.thinkingEnabled)
+    }))
+    .filter((m) => m.model)
+    .slice(0, 48);
+}
+
+function syncDesktopSetupLocalModelsToOllamaProvider(localModels, runtimeMode) {
+  const mode = String(runtimeMode || '').trim().toLowerCase();
+  const selectedModels = normalizeDesktopSetupLocalModelSelectionList(localModels).map((m) => m.model);
+  if (!selectedModels.length) return;
+  let ollamaProvider = getProvider('ollama-default');
+  if (!ollamaProvider) {
+    ollamaProvider = appConfig.providers.find((p) => p && p.type === 'ollama');
+  }
+  if (!ollamaProvider) return;
+  ollamaProvider.enabled = true;
+  ollamaProvider.models = Array.from(new Set(selectedModels));
+  const mergedAvailable = new Map();
+  (Array.isArray(ollamaProvider.availableModels) ? ollamaProvider.availableModels : []).forEach((m) => {
+    const id = String(m && (m.id || m.name) || '').trim();
+    if (!id) return;
+    mergedAvailable.set(id, { id, name: String(m && (m.name || m.id) || id) });
+  });
+  selectedModels.forEach((m) => mergedAvailable.set(m, { id: m, name: m }));
+  ollamaProvider.availableModels = Array.from(mergedAvailable.values()).slice(0, 200);
+
+  if (mode === 'local') {
+    appConfig.activeProviderId = ollamaProvider.id || 'ollama-default';
+  }
+}
+
+function estimateOllamaPullTimeoutMs(modelName) {
+  const text = String(modelName || '').toLowerCase();
+  if (text.includes('70b') || text.includes('72b') || text.includes('8x22b')) return 3 * 60 * 60 * 1000;
+  if (text.includes('34b') || text.includes('32b') || text.includes('27b') || text.includes('24b') || text.includes('14b') || text.includes('13b') || text.includes('12b') || text.includes('8x7b')) {
+    return 2 * 60 * 60 * 1000;
+  }
+  return 90 * 60 * 1000;
+}
+
+async function waitForOllamaReady(timeoutMs = 25000) {
+  const deadline = Date.now() + Math.max(5000, Number(timeoutMs) || 25000);
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await ollamaTags();
+      return true;
+    } catch (error) {
+      lastError = error;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  throw lastError || new Error('Ollama not ready');
+}
+
+function startBundledOllamaForDesktopSetup() {
+  const exePath = getDesktopSetupVendorOllamaExePath();
+  if (!fs.existsSync(exePath)) {
+    throw new Error('Bundled Ollama runtime not found. Please install/start Ollama first.');
+  }
+  if (desktopSetupOllamaServeProc && desktopSetupOllamaServeProc.exitCode == null) {
+    return { started: false, pid: desktopSetupOllamaServeProc.pid || 0, reused: true };
+  }
+
+  const modelsDir = getDesktopSetupVendorOllamaModelsDir();
+  try { fs.mkdirSync(modelsDir, { recursive: true }); } catch (_) {}
+
+  const env = {
+    ...process.env,
+    OLLAMA_MODELS: process.env.OLLAMA_MODELS || modelsDir,
+    OLLAMA_HOST: process.env.OLLAMA_HOST || '127.0.0.1:11434'
+  };
+  const child = spawn(exePath, ['serve'], {
+    cwd: path.dirname(exePath),
+    stdio: 'ignore',
+    windowsHide: true,
+    detached: false,
+    env
+  });
+  child.on('error', () => {});
+  child.on('exit', () => {
+    if (desktopSetupOllamaServeProc === child) desktopSetupOllamaServeProc = null;
+  });
+  desktopSetupOllamaServeProc = child;
+  return { started: true, pid: child.pid || 0, reused: false };
+}
+
+async function ensureDesktopSetupLocalOllamaReady() {
+  try {
+    await waitForOllamaReady(2500);
+    return { ok: true, startedBundledRuntime: false, source: 'existing' };
+  } catch (_) {}
+
+  let launchInfo = null;
+  try {
+    launchInfo = startBundledOllamaForDesktopSetup();
+  } catch (error) {
+    return {
+      ok: false,
+      startedBundledRuntime: false,
+      source: 'none',
+      message: String(error && error.message ? error.message : error)
+    };
+  }
+
+  try {
+    await waitForOllamaReady(30000);
+    return {
+      ok: true,
+      startedBundledRuntime: Boolean(launchInfo && launchInfo.started),
+      source: 'bundled',
+      pid: launchInfo && launchInfo.pid ? launchInfo.pid : 0
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      startedBundledRuntime: Boolean(launchInfo && launchInfo.started),
+      source: 'bundled',
+      message: `Bundled Ollama started but did not become ready: ${error && error.message ? error.message : error}`
+    };
+  }
+}
+
+async function ollamaPullModel(modelName) {
+  const model = String(modelName || '').trim();
+  if (!model) throw new Error('Model name required');
+  const response = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/pull`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: model, stream: false })
+  }, estimateOllamaPullTimeoutMs(model));
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error(`Ollama pull failed: HTTP ${response.status} ${safeSnippet(raw)}`);
+  }
+  let payload = {};
+  if (raw) {
+    try {
+      payload = JSON.parse(raw);
+    } catch (_) {
+      payload = { status: raw.slice(0, 200) };
+    }
+  }
+  return payload;
+}
+
+app.get('/api/setup/wizard-status', async (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const env = getDesktopSetupEnvironmentSnapshot();
+  try {
+    const tags = await ollamaTags();
+    env.localOllamaReachable = true;
+    env.localOllamaModels = Array.isArray(tags && tags.models)
+      ? tags.models.map((m) => String(m && (m.name || m.model) || '')).filter(Boolean).slice(0, 100)
+      : [];
+  } catch (_) {
+    env.localOllamaReachable = false;
+  }
+
+  res.json({
+    ok: true,
+    desktop: ELECTRON_DESKTOP,
+    setup: normalizeDesktopSetupConfig(appConfig.desktopSetup || {}),
+    environment: env,
+    recommendation: {
+      mode: getDesktopSetupRecommendedMode(env),
+      reason: env.apiProvidersConfigured
+        ? (env.localOllamaReachable ? 'Detected both API provider and local Ollama.' : 'Detected API provider, local Ollama not reachable.')
+        : (env.localOllamaReachable ? 'Detected local Ollama, no API provider configured yet.' : 'No local runtime or API provider detected; API mode is simplest to start.')
+    }
+  });
+});
+
+app.post('/api/setup/wizard-complete', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const runtimeMode = String(body.runtimeMode || '').trim().toLowerCase();
+  const mode = ['api', 'local', 'hybrid'].includes(runtimeMode) ? runtimeMode : '';
+  if (!mode) {
+    return res.status(400).json({
+      error: 'InvalidRuntimeMode',
+      message: 'runtimeMode must be one of: api, local, hybrid'
+    });
+  }
+  const localModels = Array.isArray(body.localModels) ? body.localModels : [];
+  appConfig.desktopSetup = normalizeDesktopSetupConfig({
+    ...(appConfig.desktopSetup || {}),
+    firstRunCompleted: true,
+    runtimeMode: mode,
+    localModels,
+    wizardVersion: Number(body.wizardVersion || 1) || 1,
+    completedAt: Date.now()
+  });
+  try {
+    syncDesktopSetupLocalModelsToOllamaProvider(appConfig.desktopSetup.localModels, mode);
+  } catch (_) {}
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'ConfigSaveFailed', message: 'Failed to save setup wizard config.' });
+  }
+  res.json({ ok: true, setup: normalizeDesktopSetupConfig(appConfig.desktopSetup || {}) });
+});
+
+app.post('/api/setup/wizard-reset', (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  appConfig.desktopSetup = normalizeDesktopSetupConfig({ firstRunCompleted: false, runtimeMode: 'api', localModels: [] });
+  if (!saveAppConfig()) {
+    return res.status(500).json({ error: 'ConfigSaveFailed', message: 'Failed to reset setup wizard config.' });
+  }
+  res.json({ ok: true, setup: normalizeDesktopSetupConfig(appConfig.desktopSetup || {}) });
+});
+
+app.post('/api/setup/wizard-install-local-models', async (req, res) => {
+  if (!requireAdminManagementRequest(req, res)) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const requestedModels = normalizeDesktopSetupLocalModelSelectionList(
+    Array.isArray(body.localModels) ? body.localModels : (appConfig.desktopSetup && appConfig.desktopSetup.localModels)
+  );
+  if (!requestedModels.length) {
+    return res.json({
+      ok: true,
+      skipped: true,
+      message: 'No local models selected.',
+      results: [],
+      environment: getDesktopSetupEnvironmentSnapshot()
+    });
+  }
+
+  const runtimeReady = await ensureDesktopSetupLocalOllamaReady();
+  if (!runtimeReady.ok) {
+    return res.status(502).json({
+      error: 'LocalOllamaUnavailable',
+      message: runtimeReady.message || 'Local Ollama is not available.',
+      startedBundledRuntime: Boolean(runtimeReady.startedBundledRuntime)
+    });
+  }
+
+  let currentTags = null;
+  try {
+    currentTags = await ollamaTags();
+  } catch (error) {
+    return res.status(502).json({
+      error: 'OllamaTagsFailed',
+      message: `Connected to local Ollama but failed to query models: ${error.message || error}`
+    });
+  }
+
+  const installedSet = new Set(
+    (Array.isArray(currentTags && currentTags.models) ? currentTags.models : [])
+      .map((m) => String(m && (m.name || m.model) || '').trim())
+      .filter(Boolean)
+  );
+
+  const results = [];
+  for (const item of requestedModels) {
+    const model = item.model;
+    if (installedSet.has(model)) {
+      results.push({ model, status: 'already-installed' });
+      continue;
+    }
+    try {
+      const payload = await ollamaPullModel(model);
+      results.push({
+        model,
+        status: 'installed',
+        detail: String(payload && (payload.status || payload.message) || 'ok')
+      });
+      installedSet.add(model);
+    } catch (error) {
+      results.push({
+        model,
+        status: 'failed',
+        error: String(error && (error.message || error) || 'pull failed')
+      });
+    }
+  }
+
+  try {
+    const afterTags = await ollamaTags();
+    const ollamaProvider = getProvider('ollama-default') || appConfig.providers.find((p) => p && p.type === 'ollama');
+    if (ollamaProvider) {
+      const available = Array.isArray(afterTags && afterTags.models) ? afterTags.models : [];
+      ollamaProvider.availableModels = available
+        .map((m) => {
+          const id = String(m && (m.name || m.model) || '').trim();
+          return id ? { id, name: id } : null;
+        })
+        .filter(Boolean)
+        .slice(0, 500);
+      syncDesktopSetupLocalModelsToOllamaProvider(requestedModels, (appConfig.desktopSetup && appConfig.desktopSetup.runtimeMode) || 'local');
+      saveAppConfig();
+    }
+  } catch (_) {
+    // Ignore follow-up sync failure; install results are still useful.
+  }
+
+  const failed = results.filter((r) => r.status === 'failed');
+  res.status(failed.length ? 207 : 200).json({
+    ok: failed.length === 0,
+    partial: failed.length > 0,
+    startedBundledRuntime: Boolean(runtimeReady.startedBundledRuntime),
+    results,
+    summary: {
+      requested: requestedModels.length,
+      installed: results.filter((r) => r.status === 'installed').length,
+      alreadyInstalled: results.filter((r) => r.status === 'already-installed').length,
+      failed: failed.length
+    }
   });
 });
 

@@ -967,8 +967,10 @@ if (!sharedChatRenderCore) {
   throw new Error('EchoMuseChatRenderCore not loaded. Check script order in public/index.html.');
 }
 const sharedVoiceTts = window.EchoMuseVoiceTts || null;
+const sharedFirstRunSetup = window.EchoMuseFirstRunSetup || null;
 
 let voiceTtsController = null;
+let firstRunSetupController = null;
 const {
   countQuestionTotal,
   toolName,
@@ -1207,6 +1209,7 @@ function boot() {
   applySettings();
   syncSettingsUI();
   initVoiceTtsModule();
+  initFirstRunSetupModule();
   registerServiceWorker();
   syncMaterialsFromSession();
   applyToolModeUI();
@@ -1239,6 +1242,24 @@ function initVoiceTtsModule() {
     voiceTtsController.init();
   } catch (error) {
     console.warn('[voice-tts] init failed:', error);
+  }
+}
+
+function initFirstRunSetupModule() {
+  if (!sharedFirstRunSetup || typeof sharedFirstRunSetup.createController !== 'function') return;
+  if (firstRunSetupController) return;
+  try {
+    firstRunSetupController = sharedFirstRunSetup.createController({
+      apiRequest,
+      setStatus,
+      refreshServiceStatus,
+      openSettingsPanel,
+      openSettingsSection
+    });
+    firstRunSetupController.init();
+    window.openFirstRunSetupWizard = () => firstRunSetupController && firstRunSetupController.openWizard({ force: true });
+  } catch (error) {
+    console.warn('[first-run-setup] init failed:', error);
   }
 }
 
@@ -7125,13 +7146,33 @@ function updateModelSelectFromProviders(providers) {
   if (!select) return;
   const currentDomValue = String(select.value || '').trim();
   const enabledProviders = (providers || []).filter((p) => p.enabled);
+  const desktopSetupLocalModes = new Map(
+    (Array.isArray(state.info && state.info.desktopSetup && state.info.desktopSetup.localModels)
+      ? state.info.desktopSetup.localModels
+      : [])
+      .map((m) => [String(m && m.model || '').trim(), {
+        flashEnabled: m && m.flashEnabled !== false,
+        thinkingEnabled: Boolean(m && m.thinkingEnabled)
+      }])
+      .filter((entry) => entry[0])
+  );
   let html = '';
   for (const p of enabledProviders) {
     const models = Array.isArray(p.models) && p.models.length ? p.models : ['default'];
     for (const m of models) {
       if (p.type === 'ollama') {
-        html += `<option value="${p.id}::${m}::flash">⚡ ${escapeHtml(m)} (Flash)</option>`;
-        html += `<option value="${p.id}::${m}::thinking">🧠 ${escapeHtml(m)} (Thinking)</option>`;
+        const modeCfg = desktopSetupLocalModes.get(String(m || '').trim()) || null;
+        const allowFlash = !modeCfg || modeCfg.flashEnabled !== false;
+        const allowThinking = !modeCfg || Boolean(modeCfg.thinkingEnabled);
+        if (allowFlash) {
+          html += `<option value="${p.id}::${m}::flash">⚡ ${escapeHtml(m)} (Flash)</option>`;
+        }
+        if (allowThinking) {
+          html += `<option value="${p.id}::${m}::thinking">🧠 ${escapeHtml(m)} (Thinking)</option>`;
+        }
+        if (!allowFlash && !allowThinking) {
+          html += `<option value="${p.id}::${m}::flash">⚡ ${escapeHtml(m)} (Flash)</option>`;
+        }
       } else {
         html += `<option value="${p.id}::${m}::flash">${escapeHtml(p.name)} · ${escapeHtml(m)}</option>`;
       }

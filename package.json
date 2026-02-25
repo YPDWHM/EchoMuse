@@ -51,7 +51,6 @@
       "public/**/*",
       "prompts/**/*",
       "scripts/**/*",
-      "vendor/**/*",
       "server.js",
       "mcp-manager.js",
       "package.json",

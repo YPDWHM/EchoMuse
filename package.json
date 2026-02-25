@@ -42,6 +42,7 @@
   "build": {
     "appId": "com.echomuse.desktop",
     "productName": "EchoMuse",
+    "icon": "图1.png",
     "asar": false,
     "compression": "normal",
     "npmRebuild": false,
@@ -63,6 +64,7 @@
       "output": "desktop-dist"
     },
     "win": {
+      "icon": "图1.png",
       "target": [
         "nsis",
         "portable"

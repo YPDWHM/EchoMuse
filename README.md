@@ -79,7 +79,7 @@ graph LR
 
 ### 方式一：桌面安装包（推荐普通用户）
 
-> 前往 [Releases](https://github.com/YPDWHM/EchoMuse/releases) 下载最新安装包（NSIS 安装版或 Portable 便携版）。
+> 前往 [GitHub Releases](https://github.com/YPDWHM/EchoMuse/releases) 或 [Gitee Releases](https://gitee.com/tutuHM/echo-muse/releases) 下载最新安装包（NSIS 安装版或 Portable 便携版）。
 
 ### 方式二：从源码运行（开发者）
 

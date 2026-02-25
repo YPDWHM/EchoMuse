@@ -15,10 +15,14 @@
     "win:local": "set HOST=127.0.0.1&& node server.js",
     "win:share": "set HOST=0.0.0.0&& set SHARE_MODE=1&& node server.js",
     "desktop:dev": "electron .",
-    "desktop:build:dir": "electron-builder --dir",
-    "desktop:build": "electron-builder --win",
-    "desktop:build:portable": "electron-builder --win portable",
-    "desktop:build:nsis": "electron-builder --win nsis"
+    "desktop:build:dir:raw": "electron-builder --dir",
+    "desktop:build:raw": "electron-builder --win",
+    "desktop:build:portable:raw": "electron-builder --win portable",
+    "desktop:build:nsis:raw": "electron-builder --win nsis",
+    "desktop:build:dir": "node scripts/release/protect-and-build.js --dir",
+    "desktop:build": "node scripts/release/protect-and-build.js --win",
+    "desktop:build:portable": "node scripts/release/protect-and-build.js --win portable",
+    "desktop:build:nsis": "node scripts/release/protect-and-build.js --win nsis"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -37,14 +41,15 @@
   },
   "devDependencies": {
     "electron": "^35.5.1",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "terser": "^5.39.2"
   },
   "build": {
     "appId": "com.echomuse.desktop",
     "productName": "EchoMuse",
     "icon": "图1.png",
-    "asar": false,
-    "compression": "normal",
+    "asar": true,
+    "compression": "maximum",
     "npmRebuild": false,
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [

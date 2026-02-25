@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/runtime-Node.js%20≥18-green?logo=node.js" alt="Node.js">
   <img src="https://img.shields.io/badge/framework-Electron-9feaf9?logo=electron" alt="Electron">
   <img src="https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20%7C%20Claude-orange" alt="LLM">
-  <img src="https://img.shields.io/badge/license-BSL%201.1-yellow" alt="License">
+  <img src="https://img.shields.io/badge/license-Source%20Available-yellow" alt="License">
   <img src="https://img.shields.io/badge/i18n-8%20languages-purple" alt="i18n">
 </p>
 
@@ -266,7 +266,7 @@ EchoMuse/
 
 ## License
 
-[Business Source License 1.1](LICENSE) — 代码公开可查看、学习、非生产环境使用。商业用途需获得授权。4 年后自动转为 Apache 2.0 开源许可。
+[EchoMuse Source Available License](LICENSE) — 个人使用、学习、教育用途免费。商业用途需获得作者授权。
 
 
 

@@ -25,17 +25,27 @@ conditions:
    All copies or substantial portions of the Software must include this
    license notice and the above copyright notice.
 
-3. NO TRADEMARK RIGHTS
+3. COPYLEFT / SOURCE DISCLOSURE
+
+   If you distribute or publicly deploy the Software or any derivative work
+   (including making it available over a network as a service), you must:
+   (a) make the complete corresponding source code of your derivative work
+       publicly available under this same license, at no charge, via a
+       publicly accessible repository or download link; and
+   (b) prominently state that your work is based on EchoMuse and include
+       a link to the original repository.
+
+4. NO TRADEMARK RIGHTS
 
    This license does not grant you any right to use the trade names,
    trademarks, service marks, or product names of the Licensor.
 
-4. COMMERCIAL LICENSING
+5. COMMERCIAL LICENSING
 
    For commercial use, please contact the Licensor to obtain a separate
    commercial license.
 
-5. DISCLAIMER
+6. DISCLAIMER
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF

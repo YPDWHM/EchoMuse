@@ -269,3 +269,24 @@ EchoMuse/
 [Business Source License 1.1](LICENSE) — 代码公开可查看、学习、非生产环境使用。商业用途需获得授权。4 年后自动转为 Apache 2.0 开源许可。
 
 
+
+---
+
+## Source Availability Notice / 开源说明（重要）
+
+This repository keeps the **open-core community edition** of EchoMuse.
+
+Some features are being upgraded and are **temporarily not open-sourced** (moved to a separate private/closed repository for iterative development), for example:
+
+- Team sharing / relay service enhancements
+- First-run installer automation (advanced runtime/model bootstrap)
+- Online voice packs / commercial TTS provider integrations
+- Future cloud sync / account / billing related modules
+
+我们会持续维护本仓库的社区版核心功能（本地聊天、角色、知识库基础、MCP 基础、桌面端基础能力）。
+部分升级中的功能将暂时在独立仓库中迭代，后续会根据稳定性与版本规划决定是否开放实现或开放接口。
+
+Design principle:
+- Core experience stays usable in the public repo
+- Upgrade modules are developed separately
+- Boundaries and roadmap are documented transparently

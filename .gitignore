@@ -7,6 +7,7 @@ node_modules/
 /vendor/
 desktop-dist/
 dist/
+close/
 
 # Keep frontend vendor assets
 !/public/vendor/

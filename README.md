@@ -1,207 +1,271 @@
-﻿# EchoMuse（桌面版 + 本地/API 混合 AI 助手）
+<p align="center">
+  <img src="public/icons/icon.svg" width="120" alt="EchoMuse Logo">
+</p>
 
-![EchoMuse 图标](./图1.png)
+<h1 align="center">EchoMuse</h1>
 
-> 一个面向学习 / RP / 日常使用的桌面 AI 应用：支持角色卡、Lorebook（世界观书）、知识库、MCP、翻译覆盖层、语音（TTS/STT）、消息分支等。
+<p align="center">
+  零云端、本地优先的桌面 AI 助手 — 聊天 · 角色扮演 · 学习工具 · 知识库，一个应用全搞定
+</p>
 
-## 这份 README 是给谁看的？
-
-- **普通用户**：想下载安装后直接用（推荐看“下载安装与首次启动”）
-- **进阶用户**：想用本地模型 / 混合模式（看“模型怎么选”）
-- **开发者**：想从源码运行或继续开发（看“开发模式”）
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/runtime-Node.js%20≥18-green?logo=node.js" alt="Node.js">
+  <img src="https://img.shields.io/badge/framework-Electron-9feaf9?logo=electron" alt="Electron">
+  <img src="https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20%7C%20Claude-orange" alt="LLM">
+  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
+  <img src="https://img.shields.io/badge/i18n-8%20languages-purple" alt="i18n">
+</p>
 
 ---
 
-## 下载安装与首次启动（目标流程）
+## 它能做什么？
 
-> 你之前提的方案已经整理进 `docs/desktop-installer-first-run-spec.md`，后续会按它实现“轻量安装包 + 首启向导按需安装依赖/模型”。
+EchoMuse 不只是又一个 ChatBox 替代品。它把**日常聊天、角色扮演（RP）、学习工具、知识库检索**融合在一个轻量桌面应用里，同时支持本地模型和云端 API。
 
-### 推荐分发方式（给别人）
+### 核心功能一览
 
-1. **轻量安装包（NSIS）**（推荐）
-   - 安装应用本体
-   - 首次启动时再询问是否安装本地模型 / 配置 API
-2. **便携版（Portable）**（备用）
-   - 解压即用
-   - 适合临时试用 / 无管理员权限环境
+| 功能 | 说明 |
+|:---|:---|
+| 💬 **多会话聊天** | 多会话管理、收藏、搜索，支持 Flash / Thinking 双模式切换 |
+| 🤖 **多模型后端** | Ollama 本地模型 + OpenAI / DeepSeek / Kimi / Claude 等 7+ 云端 API |
+| 🎭 **角色系统** | 自定义角色卡、Tavern 卡导入、表情/头像、记忆文本、关系设定 |
+| 📖 **Lorebook 世界观书** | 关键词触发型设定注入，RP 深度玩家的刚需 |
+| 👥 **群聊** | 多角色群组对话、旁观模式、角色间互动 |
+| 🌳 **消息分支** | 任意消息节点重新生成 / 编辑重发，形成树状对话分支 |
+| 📚 **知识库 RAG** | 上传文档（txt/md/pdf/docx）→ 分块 → BM25 + 向量混合检索 |
+| 🔧 **MCP 工具** | 接入外部 MCP 服务器（时间、网页抓取、笔记、思维链等） |
+| 🌐 **翻译覆盖层** | 实时翻译 AI 回复，支持 8 种语言，原文保留 |
+| 🔊 **语音 TTS / STT** | TTS 朗读回复 + 本地 Whisper 语音输入 |
+| 🔍 **联网搜索** | DuckDuckGo 搜索结果注入对话上下文 |
+| 🎓 **学习工具** | 期末复习包生成器 + 论文/实验报告生成器 |
+| 📤 **多格式导出** | JSON / Anki CSV / PDF / Word 导出 |
+| 👨‍👩‍👧‍👦 **团队共享** | OpenAI 兼容 API 中继，多成员 Token 管理与用量统计 |
+| 🌍 **国际化** | 中/英/日/韩/法/德/西/俄 8 语言完整 UI |
+| 📱 **局域网访问** | QR 码分享，手机/平板直接用 |
 
-### 首次启动用户会做什么（设计目标）
+---
+
+## 架构概览
 
 ```mermaid
-flowchart TD
-  A[启动 EchoMuse] --> B[首次启动向导]
-  B --> C{选择模式}
-  C -->|仅 API| D[配置 API Provider]
-  C -->|仅本地| E[检测/安装本地运行时]
-  C -->|混合模式| F[API + 本地都配置]
-  E --> G[勾选本地模型]
-  F --> G
-  G --> H[每模型配置 Flash / Thinking]
-  D --> I[完成向导并进入主界面]
-  H --> I
+graph LR
+  subgraph 前端
+    A[Vanilla JS SPA] --> B[Chat UI]
+    A --> C[Settings Panel]
+    A --> D[Artifact Drawer]
+  end
+
+  subgraph 后端
+    E[Express Server]
+    E --> F[Ollama Local]
+    E --> G[OpenAI / DeepSeek / Kimi / Claude API]
+    E --> H[MCP Manager]
+    E --> I[RAG Engine]
+    E --> J[Translation Service]
+    E --> K[Team Sharing Relay]
+  end
+
+  A <-->|HTTP + SSE| E
+
+  subgraph 桌面
+    L[Electron Shell] --> E
+  end
 ```
 
 ---
 
-## 模型怎么选（重点：看清“几B”）
+## 快速开始
 
-### `7B / 8B / 13B / 34B` 是什么意思？
+### 方式一：桌面安装包（推荐普通用户）
 
-- `B` = 参数规模（十亿级参数）
-- 一般规律：
-  - **参数越大**：通常效果更强，但更慢、更吃资源
-  - **参数越小**：通常更快、更省资源，但能力上限会低一些
+> 前往 [Releases](https://github.com/YPDWHM/EchoMuse/releases) 下载最新安装包（NSIS 安装版或 Portable 便携版）。
 
-### 本地模型选择速查（用户版）
-
-> 实际速度/占用受量化版本（Q4/Q5 等）、CPU/GPU、系统环境影响，下表是“选型参考”。
-
-| 模型 | 规模 | 适合做什么 | 推荐硬件（大致） | 新手建议 |
-|---|---:|---|---|---|
-| `qwen3:8b` | 8B | 通用聊天 / RP / 学习 | 16GB 内存（CPU可跑）或 6-8GB 显存 | ✅ 推荐先试 |
-| `mistral:7b` | 7B | 通用问答 / RP（速度好） | 16GB 内存或 6-8GB 显存 | ✅ 推荐先试 |
-| `llama2:7b` | 7B | 基础聊天 | 16GB 内存或 6GB 显存 | ✅ 可选 |
-| `llama2:13b` | 13B | 更稳写作/问答 | 24GB+ 内存或 10-12GB 显存 | ⚠ 配置一般别先选 |
-| `codellama:7b/13b/34b` | 7B~34B | 编码/代码解释 | 看规模决定硬件 | 👨‍💻 代码场景再选 |
-| `vicuna:7b/13b` | 7B~13B | 对话/RP | 中等硬件 | ⚠ 版本差异较大 |
-| `yi:6b/9b/34b` | 6B~34B | 中文/双语（视版本） | 看规模决定硬件 | ⚠ 先从小模型开始 |
-| `solar:10.7b` | 10.7B | 通用写作/对话 | 16-32GB 内存或 8-12GB 显存 | ✅ 中配可尝试 |
-| `mixtral:8x7b` | MoE（重） | 高质量生成 | 高端机器（显存/内存要求高） | ❌ 新手不建议首选 |
-
-### 不知道怎么选？直接按这个选
-
-#### 情况 A：我只想先能用（最快）
-- 选 **仅 API**
-- 不装本地模型
-- 先开始聊天，后面再补本地模型
-
-#### 情况 B：我想离线用，但电脑一般
-- 选 **仅本地** 或 **混合模式**
-- 只勾一个：`qwen3:8b` 或 `mistral:7b`
-- 先不开大模型（13B+、mixtral）
-
-#### 情况 C：我主要做 RP（角色扮演）
-- 本地先选 `qwen3:8b` / `mistral:7b`
-- 机器好再加更大模型
-- 重点是角色/Lorebook/群聊设置，不一定非要一开始上大模型
-
-#### 情况 D：我主要写代码/学编程
-- 可加 `codellama`
-- 仍建议先从 `7b/13b` 开始
-
----
-
-## `Flash / Thinking` 到底怎么选？（按模型来，不写死 Qwen）
-
-你之前要求得很对：
-
-- **每个模型单独配置** `Flash / Thinking`
-- **不再全局写死** `Qwen Flash / Qwen Thinking`
-
-### 给用户的简单解释（应该在向导里显示）
-
-- `Flash`：更快，适合日常聊天、快速问答
-- `Thinking`：更慢，适合复杂推理、长回答、深一点的问题
-
-### 推荐选择方式
-
-- **电脑一般**：先只开 `Flash`
-- **机器够强 / 需要复杂推理**：再开 `Thinking`
-- **某模型不稳定**：可以只开 `Flash`，关闭 `Thinking`
-
-### UI 显示规则（后续实现）
-
-统一显示成：
-
-- `⚡ 快速模式（当前模型）`
-- `🧠 深度模式（当前模型）`
-
-例如：
-
-- `⚡ 快速模式（qwen3:8b）`
-- `🧠 深度模式（mistral:7b）`
-
----
-
-## 功能概览（当前项目方向）
-
-- **角色系统**：角色卡、开场场景、角色画廊
-- **Lorebook（世界观书）**：关键词触发型设定注入（RP 核心）
-- **知识库**：检索型 RAG（文本/文件、分块、检索）
-- **MCP 工具**：本地/远程工具接入与管理
-- **翻译覆盖层**：角色原文保留，翻译只做显示层
-- **语音**：TTS 朗读 + 本地 Whisper STT（桌面优先）
-- **消息分支（Message Tree）**：重新生成/编辑重发形成分支（MVP）
-- **群聊增强（MVP）**：角色关系、旁观模式（持续优化中）
-
----
-
-## 给别人下载时怎么说（简化版话术）
-
-你可以直接发这段给使用者：
-
-1. 下载并安装 `EchoMuse`（推荐安装包）
-2. 第一次打开时按向导选择：
-   - 不懂模型：选 **仅 API**
-   - 想离线：选 **本地模型**，先勾 `qwen3:8b` 或 `mistral:7b`
-3. 进入主界面后再慢慢调角色、知识库、语音
-
----
-
-## 开发模式（源码运行）
-
-### 1) 安装依赖
+### 方式二：从源码运行（开发者）
 
 ```bash
+# 1. 克隆仓库
+git clone https://github.com/YPDWHM/EchoMuse.git
+cd EchoMuse
+
+# 2. 安装依赖
 npm install
-```
 
-### 2) 启动桌面版（开发）
+# 3. 启动 Web 版（仅本地访问）
+npm run local
 
-```bash
+# 4. 或启动桌面版（Electron）
 npm run desktop:dev
 ```
 
-### 3) 打包桌面版（开发者）
+> 如果需要局域网共享访问：`npm run share`
+
+### 方式三：一键引导（Windows）
 
 ```bash
+npm run bootstrap:win
+```
+
+---
+
+## 模型配置
+
+EchoMuse 支持**本地模型**和**云端 API** 混合使用，你可以随时在设置面板切换。
+
+### 本地模型（Ollama）
+
+安装 [Ollama](https://ollama.com) 后拉取模型即可：
+
+```bash
+ollama pull qwen3:8b    # 推荐首选，8B 通用模型
+ollama pull mistral:7b   # 备选，速度快
+```
+
+### 云端 API
+
+在设置面板添加 Provider，支持：
+
+| Provider | 说明 |
+|:---|:---|
+| OpenAI | GPT 系列 |
+| DeepSeek | 性价比高 |
+| Kimi (Moonshot) | 长上下文 |
+| SiliconFlow | 国内加速 |
+| Zhipu AI (智谱) | GLM 系列 |
+| Baichuan (百川) | 中文优化 |
+| Anthropic | Claude 系列 |
+| 自定义 | 任意 OpenAI 兼容端点 |
+
+### Flash vs Thinking 模式
+
+- **Flash（快速模式）**：低温度、快响应，适合日常聊天
+- **Thinking（深度模式）**：高 token 上限、支持思维链，适合复杂推理
+
+每个模型可独立配置这两种模式。
+
+---
+
+## 功能详解
+
+### 🎭 角色扮演系统
+
+- 创建自定义角色：名称、关系、自定义 prompt、表情/图片头像
+- 导入 Tavern 角色卡（PNG 内嵌 `chara` 数据 或 JSON 格式）
+- 记忆文本导入：粘贴或上传 `.txt` / `.md` / `.json`，让 AI 模仿特定人格
+- 角色绑定到会话，不同会话可以用不同角色
+
+### 📖 Lorebook 世界观书
+
+- 定义关键词触发的世界观条目
+- 对话中提到关键词时自动注入背景设定
+- 适合构建复杂的 RP 世界观（魔法体系、组织架构、地理设定等）
+
+### 👥 群聊
+
+- 创建多角色群组，AI 扮演多个角色轮流发言
+- 设定角色间关系影响对话风格
+- 旁观模式：用户可以观看 AI 角色之间的互动
+
+### 🌳 消息分支（Message Tree）
+
+- 在任意消息节点重新生成或编辑后重发
+- 形成树状对话结构，左右箭头切换分支
+- 适合探索不同思路、尝试不同剧情走向
+
+### 📚 知识库 RAG
+
+- 上传文档（txt / md / pdf / docx）自动分块索引
+- BM25 词法检索 + 向量语义检索混合排序
+- 可配置：分块大小、重叠、Top-K、最低分数
+- 在聊天中一键启用，AI 回答自动引用知识库内容
+
+### 🔧 MCP 工具集成
+
+- 连接外部 MCP 服务器（stdio / SSE / HTTP）
+- 内置预设：时间日历、网页抓取、笔记记忆、思维链
+- 支持自定义 MCP 服务器配置和剪贴板 JSON 导入
+- 对话中自动多轮工具调用（最多 5 轮）
+
+### 🎓 学习工具
+
+- **期末复习包生成器**：章节大纲 + 重点 + 题库（选择/填空/简答/综合）+ Anki 卡片
+- **论文报告生成器**：实验报告 / 课程报告 / 学术论文，含方法/结果/讨论结构
+
+---
+
+## 打包发布
+
+```bash
+# NSIS 安装包
+npm run desktop:build:nsis
+
+# 便携版
+npm run desktop:build:portable
+
+# 两者都构建
 npm run desktop:build
 ```
 
-> 注意：当前建议按 `docs/desktop-installer-first-run-spec.md` 调整打包策略，默认不要把大型本地运行时/模型打进安装包。
+输出目录：`desktop-dist/`
 
 ---
 
-## 本地模型 / 语音相关说明（当前版本）
+## 项目结构
 
-### 本地 Ollama（可选）
-
-- 如果启用本地模型，需要本地运行时可用（如 Ollama）
-- 项目里可能存在 `vendor/ollama/`（开发阶段资源），但**面向普通用户的安装包不应默认塞进去**
-
-### 本地 Whisper 语音输入（可选）
-
-- 本地 STT 依赖 `whisper-cli` + 模型文件
-- 这类资源也不应默认打包进轻量安装包
-- 更合理做法：首次向导或设置页按需下载/配置
+```
+EchoMuse/
+├── server.js              # Express 后端（API、LLM、RAG、MCP、翻译、团队共享）
+├── mcp-manager.js         # MCP 客户端连接管理
+├── public/
+│   ├── index.html         # 主页面
+│   ├── app.js             # 前端主逻辑
+│   ├── styles.css         # 样式（亮/暗主题）
+│   └── js/
+│       ├── utils-core.js  # 通用工具函数
+│       ├── domain-core.js # 领域逻辑（会话、角色、Tavern 解析）
+│       └── chat-render-core.js  # 聊天渲染
+├── desktop/
+│   ├── main.js            # Electron 主进程
+│   └── preload.js         # Electron 预加载脚本
+├── prompts/               # Prompt 模板
+├── scripts/               # 启动 & 引导脚本
+└── docs/                  # 设计文档
+```
 
 ---
 
-## 文档索引
+## 常见问题
 
-- 安装包 + 首启向导实施规格：`docs/desktop-installer-first-run-spec.md`
-- 开发记录（短日志）：`DEVLOG.md`
-- 阶段总结：`notes/`
+**Q: 不懂模型怎么选？**
+直接在设置里添加一个云端 API Provider（如 DeepSeek），不装本地模型也能用。
+
+**Q: 电脑配置一般，能跑本地模型吗？**
+16GB 内存可以跑 `qwen3:8b` 或 `mistral:7b`（8B 级别）。更大的模型（13B+）需要更好的硬件。
+
+**Q: Tavern 角色卡怎么导入？**
+侧边栏「联系人」→「导入酒馆卡片」，支持 PNG（内嵌数据）和 JSON 格式。
+
+**Q: 怎么让别人也能用我的服务？**
+设置里开启「团队共享」，生成成员 Token，对方通过局域网 IP 访问即可。
 
 ---
 
-## 常见问题（简短版）
+## 技术栈
 
-### 1) 我看不懂模型，怕选错
-直接选 **仅 API**，先用起来；后面再加本地模型。
+| 层 | 技术 |
+|:---|:---|
+| 前端 | Vanilla JS、KaTeX、Marked |
+| 后端 | Node.js、Express |
+| 桌面 | Electron |
+| LLM | Ollama、OpenAI API、Anthropic API |
+| 检索 | BM25 + 向量嵌入（余弦相似度） |
+| 工具 | MCP (Model Context Protocol) |
+| 导出 | jsPDF、docx、html2canvas |
 
-### 2) 我电脑一般，但想本地跑
-先选一个 `7B/8B` 模型：`qwen3:8b` 或 `mistral:7b`。
+---
 
-### 3) 为什么不要把本地模型直接打进安装包？
-因为会让安装包巨大、构建容易失败，也不符合“按用户选择安装”的流程。
+## License
+
+MIT
+
+

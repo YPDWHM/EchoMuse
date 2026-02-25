@@ -20,9 +20,6 @@ fix_*.py
 scripts/repair_*.py
 scripts/__pycache__/
 
-# Local screenshots / temp captures
-/图*.png
-
 # OS/editor junk
 .DS_Store
 Thumbs.db

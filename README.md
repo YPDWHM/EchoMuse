@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/icons/icon.svg" width="120" alt="EchoMuse Logo">
+  <img src="图1.png" width="360" alt="EchoMuse Banner">
 </p>
 
 <h1 align="center">EchoMuse</h1>

@@ -321,7 +321,7 @@ const UI_PACK_EXTRAS = {
     basicSettings: '基础设置',
     mobileAccess: '手机访问',
     viewLanQr: '查看局域网地址 / 二维码',
-    importTavernCard: '🃏 导入酒馆卡片',
+    importTavernCard: '🃏 导入卡片',
     newGroup: '新建群组',
     accessDialogTitle: '手机访问',
     close: '关闭',
@@ -381,7 +381,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji 如 😀',
     avatarAiPlaceholder: 'emoji 如 🤖',
     labelUnset: '未设置',
-    labelMessagesUnit: '条'
+    labelMessagesUnit: '条',
+    newChat: '新会话',
+    chat: '会话',
+    noMessages: '暂无消息',
+    avatarLabel: '角色',
+    confirmDeleteChat: '确认删除会话',
+    confirmBtn: '确认',
+    cancelBtn: '取消'
   },
   'en-US': {
     basicSettings: 'Basic Settings',
@@ -447,7 +454,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji e.g. 😀',
     avatarAiPlaceholder: 'emoji e.g. 🤖',
     labelUnset: 'Unset',
-    labelMessagesUnit: 'msgs'
+    labelMessagesUnit: 'msgs',
+    newChat: 'New Chat',
+    chat: 'Chat',
+    noMessages: 'No messages',
+    avatarLabel: 'Avatar',
+    confirmDeleteChat: 'Delete chat',
+    confirmBtn: 'Confirm',
+    cancelBtn: 'Cancel'
   },
   'ja-JP': {
     basicSettings: '基本設定',
@@ -513,7 +527,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji 例 😀',
     avatarAiPlaceholder: 'emoji 例 🤖',
     labelUnset: '未設定',
-    labelMessagesUnit: '件'
+    labelMessagesUnit: '件',
+    newChat: '新しいチャット',
+    chat: 'チャット',
+    noMessages: 'メッセージなし',
+    avatarLabel: 'キャラ',
+    confirmDeleteChat: 'チャットを削除',
+    confirmBtn: '確認',
+    cancelBtn: 'キャンセル'
   },
   'ko-KR': {
     basicSettings: '기본 설정',
@@ -579,7 +600,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji 예: 😀',
     avatarAiPlaceholder: 'emoji 예: 🤖',
     labelUnset: '미설정',
-    labelMessagesUnit: '개'
+    labelMessagesUnit: '개',
+    newChat: '새 채팅',
+    chat: '채팅',
+    noMessages: '메시지 없음',
+    avatarLabel: '캐릭터',
+    confirmDeleteChat: '채팅 삭제',
+    confirmBtn: '확인',
+    cancelBtn: '취소'
   },
   'fr-FR': {
     basicSettings: 'Paramètres de base',
@@ -645,7 +673,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji ex. 😀',
     avatarAiPlaceholder: 'emoji ex. 🤖',
     labelUnset: 'Non défini',
-    labelMessagesUnit: 'msg'
+    labelMessagesUnit: 'msg',
+    newChat: 'Nouvelle discussion',
+    chat: 'Discussion',
+    noMessages: 'Aucun message',
+    avatarLabel: 'Personnage',
+    confirmDeleteChat: 'Supprimer la discussion',
+    confirmBtn: 'Confirmer',
+    cancelBtn: 'Annuler'
   },
   'de-DE': {
     basicSettings: 'Grundeinstellungen',
@@ -711,7 +746,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'Emoji z. B. 😀',
     avatarAiPlaceholder: 'Emoji z. B. 🤖',
     labelUnset: 'Nicht gesetzt',
-    labelMessagesUnit: 'Nachr.'
+    labelMessagesUnit: 'Nachr.',
+    newChat: 'Neuer Chat',
+    chat: 'Chat',
+    noMessages: 'Keine Nachrichten',
+    avatarLabel: 'Charakter',
+    confirmDeleteChat: 'Chat löschen',
+    confirmBtn: 'Bestätigen',
+    cancelBtn: 'Abbrechen'
   },
   'es-ES': {
     basicSettings: 'Configuración básica',
@@ -777,7 +819,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji p. ej. 😀',
     avatarAiPlaceholder: 'emoji p. ej. 🤖',
     labelUnset: 'Sin definir',
-    labelMessagesUnit: 'mens.'
+    labelMessagesUnit: 'mens.',
+    newChat: 'Nuevo chat',
+    chat: 'Chat',
+    noMessages: 'Sin mensajes',
+    avatarLabel: 'Personaje',
+    confirmDeleteChat: 'Eliminar chat',
+    confirmBtn: 'Confirmar',
+    cancelBtn: 'Cancelar'
   },
   'ru-RU': {
     basicSettings: 'Базовые настройки',
@@ -843,7 +892,14 @@ const UI_PACK_EXTRAS = {
     avatarUserPlaceholder: 'emoji напр. 😀',
     avatarAiPlaceholder: 'emoji напр. 🤖',
     labelUnset: 'Не задано',
-    labelMessagesUnit: 'сообщ.'
+    labelMessagesUnit: 'сообщ.',
+    newChat: 'Новый чат',
+    chat: 'Чат',
+    noMessages: 'Нет сообщений',
+    avatarLabel: 'Персонаж',
+    confirmDeleteChat: 'Удалить чат',
+    confirmBtn: 'Подтвердить',
+    cancelBtn: 'Отмена'
   }
 };
 
@@ -906,6 +962,7 @@ const state = {
   },
   ui: {
     chatStreaming: false,
+    chatAbortController: null,
     toolRunning: false,
     activeTool: '',
     drawerOpen: false,
@@ -971,6 +1028,8 @@ const sharedFirstRunSetup = window.EchoMuseFirstRunSetup || null;
 
 let voiceTtsController = null;
 let firstRunSetupController = null;
+let composerRecoveryTimer = null;
+let composerFocusRecoveryTimer = null;
 const {
   countQuestionTotal,
   toolName,
@@ -1210,6 +1269,7 @@ function boot() {
   syncSettingsUI();
   initVoiceTtsModule();
   initFirstRunSetupModule();
+  startComposerRecoveryWatchdog();
   registerServiceWorker();
   syncMaterialsFromSession();
   applyToolModeUI();
@@ -1380,6 +1440,53 @@ function getUiPack() {
   const extrasDefault = UI_PACK_EXTRAS['en-US'] || {};
   const extras = UI_PACK_EXTRAS[lang] || {};
   return { ...base, ...extrasDefault, ...extras };
+}
+
+function getLocalizedNewSessionTitle() {
+  const pack = getUiPack();
+  return String(pack.newChat || pack.newSession || 'New Chat').trim() || 'New Chat';
+}
+
+function getKnownDefaultSessionTitles() {
+  const set = new Set();
+  Object.values(UI_PACKS || {}).forEach((pack) => {
+    if (!pack || typeof pack !== 'object') return;
+    const newSessionTitle = String(pack.newSession || '').trim();
+    const sessionsLabel = String(pack.sessions || '').trim();
+    if (newSessionTitle) set.add(newSessionTitle);
+    if (sessionsLabel) set.add(sessionsLabel);
+  });
+  Object.values(UI_PACK_EXTRAS || {}).forEach((pack) => {
+    if (!pack || typeof pack !== 'object') return;
+    const newChatTitle = String(pack.newChat || '').trim();
+    const chatLabel = String(pack.chat || '').trim();
+    if (newChatTitle) set.add(newChatTitle);
+    if (chatLabel) set.add(chatLabel);
+  });
+  ['新会话', '会话', '会话 1', 'Chat', 'Chat 1'].forEach((v) => set.add(v));
+  return set;
+}
+
+function isDefaultSessionTitle(title) {
+  const raw = String(title || '').trim();
+  if (!raw) return true;
+  const known = getKnownDefaultSessionTitles();
+  if (known.has(raw)) return true;
+  return /^(会话|chat|チャット|대화|discussion|diskussion|conversación|чат)\s*\d*$/i.test(raw);
+}
+
+function relocalizeDefaultSessionTitles() {
+  const target = getLocalizedNewSessionTitle();
+  let changed = false;
+  (state.sessions || []).forEach((session) => {
+    if (!session || typeof session.title !== 'string') return;
+    if (!isDefaultSessionTitle(session.title)) return;
+    if (session.title === target) return;
+    session.title = target;
+    touchSession(session);
+    changed = true;
+  });
+  return changed;
 }
 
 function getLangLabelMap() {
@@ -1611,6 +1718,11 @@ function applyLanguage() {
   updateTranslateSettingsUI();
   refreshDynamicUiLanguageLabels();
   try { voiceTtsController && voiceTtsController.refreshUi && voiceTtsController.refreshUi(); } catch (_) { }
+
+  if (relocalizeDefaultSessionTitles()) {
+    persistSessionsState();
+    renderSessionList();
+  }
 }
 
 function isZhUiLanguage() {
@@ -1788,12 +1900,13 @@ function bindEvents() {
   if (els.groupCancelBtn) els.groupCancelBtn.addEventListener('click', () => els.groupDialog.close());
 
   els.newSessionBtn.addEventListener('click', () => {
-    createSession('新会话');
+    createSession(getLocalizedNewSessionTitle());
     clearToolMode();
     renderSessionList();
     syncMaterialsFromSession();
     renderMessages();
     renderDrawer();
+    restoreComposerAfterSessionMutation({ focus: true, forceUnlockStreaming: true });
   });
 
   els.sessionSearch.addEventListener('input', () => {
@@ -1824,6 +1937,7 @@ function bindEvents() {
     const sid = item.dataset.sid || '';
     if (!sid) return;
     switchSession(sid);
+    restoreComposerAfterSessionMutation({ focus: true, forceUnlockStreaming: true });
   });
 
   els.settingsBtn.addEventListener('click', () => openSettingsPanel());
@@ -2127,11 +2241,21 @@ function bindEvents() {
   });
 
   els.sendBtn.addEventListener('click', sendChatMessage);
+  els.chatInput.addEventListener('focus', () => {
+    restoreComposerAfterSessionMutation({ focus: false, forceUnlockStreaming: true });
+  });
+  els.chatInput.addEventListener('mousedown', () => {
+    restoreComposerAfterSessionMutation({ focus: false, forceUnlockStreaming: true });
+  });
   els.chatInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && event.ctrlKey) {
       event.preventDefault();
       sendChatMessage();
     }
+  });
+
+  window.addEventListener('focus', () => {
+    restoreComposerAfterSessionMutation({ focus: true, forceUnlockStreaming: true });
   });
 
   document.addEventListener('keydown', (event) => {
@@ -2616,7 +2740,7 @@ function loadSessionsState() {
   }
 
   if (!state.sessions.length) {
-    state.sessions = [createSessionObject('会话 1')];
+    state.sessions = [createSessionObject(getLocalizedNewSessionTitle())];
   }
   state.sessions.forEach((s) => {
     try { ensureSessionMessageTreeState(s); } catch (_) { }
@@ -2640,27 +2764,265 @@ function persistSessionsState() {
 }
 
 function createSession(title) {
-  const session = createSessionObject(title);
+  const resolvedTitle = String(title || '').trim() || getLocalizedNewSessionTitle();
+  const session = createSessionObject(resolvedTitle);
   ensureSessionMessageTreeState(session);
   state.sessions.unshift(session);
   state.activeSessionId = session.id;
   persistSessionsState();
 }
 
-function deleteSession(sessionId) {
+function hasPendingAssistantStreamMessage(session) {
+  if (!session || !Array.isArray(session.messages) || !session.messages.length) return false;
+  // Keep this check independent from message-tree helpers.
+  // If session tree data is malformed, composer unlock must still work.
+  let last = null;
+  for (let i = session.messages.length - 1; i >= 0; i -= 1) {
+    const msg = session.messages[i];
+    if (!msg || (msg.kind && msg.kind !== 'chat')) continue;
+    last = msg;
+    break;
+  }
+  if (!last) return false;
+  if (last.role !== 'assistant') return false;
+  if (last.kind && last.kind !== 'chat') return false;
+  return !String(last.content || '').trim();
+}
+
+function startComposerRecoveryWatchdog() {
+  if (composerRecoveryTimer != null) return;
+  composerRecoveryTimer = window.setInterval(() => {
+    try {
+      if (!els || !els.chatInput || !els.sendBtn) return;
+      const active = state.sessions.find((s) => s && s.id === state.activeSessionId) || null;
+      const isRealStreaming = Boolean(state.ui.chatStreaming) && hasPendingAssistantStreamMessage(active);
+      const inputLocked = Boolean(
+        els.chatInput.disabled ||
+        els.chatInput.readOnly ||
+        String(els.chatInput.style.pointerEvents || '') === 'none'
+      );
+      const sendLocked = Boolean(els.sendBtn.disabled) && !isRealStreaming;
+      if (inputLocked || sendLocked || !isRealStreaming) {
+        restoreComposerInteractivityNow({ focus: false, forceUnlockStreaming: false });
+      }
+    } catch (_) { }
+  }, 420);
+}
+
+/* ── In-app confirm dialog (theme-aware, replaces window.confirm) ── */
+function appConfirm(message) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const cancelLabel = getUiPack().cancelBtn || 'Cancel';
+    const okLabel = getUiPack().confirmBtn || 'Confirm';
+    overlay.innerHTML =
+      '<div class="confirm-box">' +
+        '<div class="confirm-msg"></div>' +
+        '<div class="confirm-actions">' +
+          '<button class="confirm-btn-cancel">' + cancelLabel + '</button>' +
+          '<button class="confirm-btn-ok">' + okLabel + '</button>' +
+        '</div>' +
+      '</div>';
+    overlay.querySelector('.confirm-msg').textContent = message;
+    const close = (result) => {
+      overlay.remove();
+      resolve(result);
+    };
+    overlay.querySelector('.confirm-btn-ok').onclick = () => close(true);
+    overlay.querySelector('.confirm-btn-cancel').onclick = () => close(false);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    document.body.appendChild(overlay);
+    overlay.querySelector('.confirm-btn-ok').focus();
+  });
+}
+
+function tryFocusHostWindow() {
+  try {
+    if (typeof window.focus === 'function') window.focus();
+  } catch (_) { }
+  try {
+    if (window.EchoMuseDesktop && typeof window.EchoMuseDesktop.focusWindow === 'function') {
+      window.EchoMuseDesktop.focusWindow();
+    }
+  } catch (_) { }
+}
+
+function stopComposerFocusRecovery() {
+  if (composerFocusRecoveryTimer != null) {
+    try { window.clearInterval(composerFocusRecoveryTimer); } catch (_) { }
+    composerFocusRecoveryTimer = null;
+  }
+}
+
+function scheduleComposerFocusRecovery(options = {}) {
+  const durationMs = Math.max(400, Number(options && options.durationMs) || 1800);
+  const forceUnlockStreaming = Boolean(options && options.forceUnlockStreaming);
+  stopComposerFocusRecovery();
+  const startedAt = Date.now();
+  const tick = () => {
+    try {
+      if (!els || !els.chatInput) {
+        stopComposerFocusRecovery();
+        return;
+      }
+      const activeEl = document.activeElement;
+      const activeTag = activeEl && activeEl.tagName ? String(activeEl.tagName).toUpperCase() : '';
+      const activeInSessionList = Boolean(activeEl && typeof activeEl.closest === 'function' && activeEl.closest('#sessionList'));
+      const userEditingElsewhere = Boolean(
+        activeEl &&
+        activeEl !== document.body &&
+        activeEl !== els.chatInput &&
+        !activeInSessionList &&
+        /^(INPUT|TEXTAREA|SELECT)$/.test(activeTag)
+      );
+      if (userEditingElsewhere) {
+        stopComposerFocusRecovery();
+        return;
+      }
+      restoreComposerInteractivityNow({
+        focus: true,
+        forceUnlockStreaming
+      });
+      const focused = document.activeElement === els.chatInput;
+      if (focused || (Date.now() - startedAt >= durationMs)) {
+        stopComposerFocusRecovery();
+      }
+    } catch (_) {
+      stopComposerFocusRecovery();
+    }
+  };
+  tick();
+  composerFocusRecoveryTimer = window.setInterval(tick, 120);
+}
+
+function cleanupDanglingAssistantStreamMessages(session) {
+  if (!session || !Array.isArray(session.messages) || !session.messages.length) return false;
+  const originalLength = session.messages.length;
+  session.messages = session.messages.filter((m) => {
+    if (!m || m.role !== 'assistant') return true;
+    if (m.kind && m.kind !== 'chat') return true;
+    const text = String(m.content || '').trim();
+    if (text) return true;
+    return false;
+  });
+  if (session.messages.length !== originalLength) {
+    try { ensureSessionMessageTreeState(session); } catch (_) { }
+    touchSession(session);
+    return true;
+  }
+  return false;
+}
+
+function cancelActiveChatStream(reason = 'cancelled', options = {}) {
+  const cleanup = Boolean(options && options.cleanup);
+  try {
+    const controller = state.ui.chatAbortController;
+    if (controller && typeof controller.abort === 'function') {
+      controller.abort(String(reason || 'cancelled'));
+    }
+  } catch (_) { }
+  state.ui.chatAbortController = null;
+  state.ui.chatStreaming = false;
+  if (cleanup) {
+    try {
+      const active = state.sessions.find((s) => s && s.id === state.activeSessionId) || null;
+      cleanupDanglingAssistantStreamMessages(active);
+    } catch (_) { }
+  }
+  if (els.sendBtn) els.sendBtn.disabled = false;
+}
+
+function restoreComposerInteractivityNow(options = {}) {
+  const focus = Boolean(options && options.focus);
+  const forceUnlockStreaming = Boolean(options && options.forceUnlockStreaming);
+  // Always unlock the input area first; never let session state errors block typing.
+  try {
+    if (els.chatInput) {
+      els.chatInput.disabled = false;
+      els.chatInput.readOnly = false;
+      els.chatInput.removeAttribute('disabled');
+      els.chatInput.removeAttribute('readonly');
+      els.chatInput.style.pointerEvents = '';
+      els.chatInput.style.userSelect = '';
+    }
+    const composerWrap = els.chatInput && els.chatInput.closest('.composer-input-wrap');
+    if (composerWrap) {
+      composerWrap.style.pointerEvents = '';
+      composerWrap.style.userSelect = '';
+    }
+    const composerRoot = els.chatInput && els.chatInput.closest('.composer');
+    if (composerRoot) composerRoot.style.pointerEvents = '';
+    if (els.sendBtn) {
+      els.sendBtn.disabled = Boolean(state.ui.chatStreaming);
+    }
+    if (focus && els.chatInput) {
+      tryFocusHostWindow();
+      try { els.chatInput.focus(); } catch (_) { }
+    }
+  } catch (_) { }
+  try {
+    const active = state.sessions.find((s) => s && s.id === state.activeSessionId) || null;
+    const staleStreaming = Boolean(state.ui.chatStreaming) && !hasPendingAssistantStreamMessage(active);
+    if (forceUnlockStreaming || staleStreaming) {
+      cancelActiveChatStream('stale-streaming-reset');
+    }
+  } catch (_) {
+    if (forceUnlockStreaming) {
+      try { cancelActiveChatStream('force-unlock-fallback'); } catch (_) { }
+    }
+  }
+  try {
+    if (els.sendBtn) {
+      // Keep send button usable; sendChatMessage() itself still guards streaming state.
+      els.sendBtn.disabled = false;
+    }
+  } catch (_) { }
+}
+
+function restoreComposerAfterSessionMutation(options = {}) {
+  const focus = Boolean(options && options.focus);
+  const forceUnlockStreaming = Boolean(options && options.forceUnlockStreaming);
+  if (focus) {
+    scheduleComposerFocusRecovery({
+      durationMs: 1800,
+      forceUnlockStreaming
+    });
+  }
+  // Some render hooks (translation/TTS) may re-touch composer state asynchronously.
+  // Re-assert interactivity a few times to avoid sticky disabled/readonly behavior.
+  const retries = [0, 40, 140, 320, 650];
+  retries.forEach((delay, index) => {
+    window.setTimeout(() => {
+      const shouldFocusNow = focus && (index === 0 || index === retries.length - 1);
+      restoreComposerInteractivityNow({
+        focus: shouldFocusNow,
+        forceUnlockStreaming: forceUnlockStreaming && index === 0
+      });
+    }, delay);
+  });
+}
+
+async function deleteSession(sessionId) {
   const sid = String(sessionId || '').trim();
   if (!sid) return false;
   const idx = state.sessions.findIndex((s) => s && s.id === sid);
   if (idx < 0) return false;
   const session = state.sessions[idx];
-  const title = String(session && session.title || '该会话');
-  if (!window.confirm(`确认删除会话「${title}」？`)) return false;
+  const pack = getUiPack();
+  const title = String(session && session.title || pack.chat || 'Chat');
+  // Use in-app confirm dialog (theme-aware, no focus loss)
+  const confirmed = await appConfirm(`${pack.confirmDeleteChat || 'Delete chat'}「${title}」？`);
+  if (!confirmed) return false;
 
   const wasActive = state.activeSessionId === sid;
+  if (wasActive && state.ui.chatStreaming) {
+    cancelActiveChatStream('session-deleted');
+  }
   state.sessions.splice(idx, 1);
 
   if (!state.sessions.length) {
-    const replacement = createSessionObject('会话 1');
+    const replacement = createSessionObject(getLocalizedNewSessionTitle());
     ensureSessionMessageTreeState(replacement);
     state.sessions = [replacement];
     state.activeSessionId = replacement.id;
@@ -2678,6 +3040,12 @@ function deleteSession(sessionId) {
   renderMessages();
   renderDrawer();
   renderAvatarSelectPanel();
+  restoreComposerAfterSessionMutation({
+    focus: true,
+    // When deleting the active session during/after a send cycle, stale streaming
+    // lock can survive and block further typing/sending.
+    forceUnlockStreaming: wasActive
+  });
   return true;
 }
 
@@ -2689,8 +3057,12 @@ function getActiveSession() {
 
 function switchSession(sessionId) {
   if (!state.sessions.some((s) => s.id === sessionId)) return;
+  if (state.ui.chatStreaming) {
+    cancelActiveChatStream('session-switched');
+  }
   state.activeSessionId = sessionId;
   state.ui.activeTool = '';
+  state.ui.selectedMessageId = '';
   persistSessionsState();
   syncMaterialsFromSession();
   applyToolModeUI();
@@ -2698,6 +3070,7 @@ function switchSession(sessionId) {
   renderMessages();
   renderDrawer();
   renderAvatarSelectPanel();
+  restoreComposerAfterSessionMutation({ focus: true, forceUnlockStreaming: true });
 }
 
 function toggleFavorite(sessionId) {
@@ -3608,7 +3981,7 @@ function getRegularSessions() {
   return state.sessions.filter((s) => !isContactDedicatedSession(s));
 }
 
-/* ── Tavern Character Card Import (酒馆卡片导入) ── */
+/* ── Tavern Character Card Import (卡片导入) ── */
 
 function getTavernCardData(raw) {
   return (raw && raw.spec === 'chara_card_v2' && raw.data) ? raw.data : (raw || {});
@@ -3766,7 +4139,7 @@ async function handleTavernImport(file) {
     openingScenarios: card.firstMessage
       ? [{
         title: '默认开场',
-        description: '导入酒馆卡时自动生成',
+        description: '导入卡片时自动生成',
         openingMessage: String(card.firstMessage || '').trim(),
         tags: ['导入']
       }]
@@ -3833,7 +4206,7 @@ function switchSidebarTab(tab) {
       if (regular) {
         switchSession(regular.id);
       } else {
-        createSession('新会话');
+        createSession(getLocalizedNewSessionTitle());
         syncMaterialsFromSession();
         renderMessages();
         renderDrawer();
@@ -3862,7 +4235,7 @@ function renderContactList() {
   const activeSession = getActiveSession();
   const activeAvatarId = (state.ui.activeContactAvatarId || (activeSession && activeSession.avatarId) || '');
   if (!avatars.length) {
-    els.contactList.innerHTML = '<div class="muted">还没有联系人，导入酒馆卡片或在设置中创建角色</div>';
+    els.contactList.innerHTML = '<div class="muted">还没有联系人，导入卡片或在设置中创建角色</div>';
     refreshContactsLorebookShortcut();
     return;
   }
@@ -3888,7 +4261,7 @@ function renderContactList() {
       ? `<img src="${iconVal}" alt="avatar">`
       : iconVal;
     const boundSession = resolveContactSession(a.id, { createIfMissing: false, focus: false });
-    const preview = boundSession ? getOverlaySessionPreview(boundSession) : '暂无消息';
+    const preview = boundSession ? getOverlaySessionPreview(boundSession) : (getUiPack().noMessages || 'No messages');
     const badge = isGroup ? '<span class="contact-badge">群组</span>' : '';
     const isActive = activeAvatarId && a.id === activeAvatarId;
     const activeItemStyle = isActive
@@ -5009,7 +5382,7 @@ function updateAvatarBtnLabel() {
   if (!els.toggleAvatarBtn) return;
   const session = getActiveSession();
   const avatar = session && session.avatarId ? getAvatarById(session.avatarId) : null;
-  els.toggleAvatarBtn.textContent = avatar ? `🎭 ${avatar.name}` : '🎭 角色';
+  els.toggleAvatarBtn.textContent = avatar ? `🎭 ${avatar.name}` : `🎭 ${getUiPack().avatarLabel || 'Avatar'}`;
 }
 
 function renderSessionList() {
@@ -5468,6 +5841,7 @@ function renderMessages() {
   const visibleMessages = getVisibleSessionMessages(session);
   if (!session || !visibleMessages.length) {
     els.messageList.innerHTML = '<div class="muted">开始提问吧。你可以先上传资料，再点击工具生成结构化产物。</div>';
+    if (!state.ui.chatStreaming) restoreComposerInteractivityNow({ focus: false });
     try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) { }
     return;
   }
@@ -5569,6 +5943,7 @@ function renderMessages() {
 
   setSelectedMessageBubble(state.ui.selectedMessageId || '');
   els.messageList.scrollTop = els.messageList.scrollHeight;
+  if (!state.ui.chatStreaming) restoreComposerInteractivityNow({ focus: false });
   try { voiceTtsController && voiceTtsController.afterRenderMessages && voiceTtsController.afterRenderMessages(); } catch (_) { }
 }
 
@@ -5646,7 +6021,11 @@ function appendChatMessage(role, content, extra) {
   setSessionBranchSelection(session, treeParentId, message.id);
   if (role === 'user') {
     const trimmed = message.content.trim();
-    if (state.settings.chatAutoTitle && trimmed && (!session.title || /^会话/.test(session.title) || session.title === '新会话')) {
+    const _pack = getUiPack();
+    const isDefaultTitle = isDefaultSessionTitle(session.title)
+      || session.title === (_pack.newChat || 'New Chat')
+      || session.title === (_pack.chat || 'Chat');
+    if (state.settings.chatAutoTitle && trimmed && isDefaultTitle) {
       session.title = trimmed.slice(0, 18);
     }
   }
@@ -5914,6 +6293,8 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
 }
 
 async function sendChatMessage() {
+  // hard self-heal for stale lock after session deletion/switching
+  restoreComposerInteractivityNow({ forceUnlockStreaming: true, focus: false });
   if (state.ui.sidebarTab === 'contacts' && state.ui.activeContactAvatarId) {
     const active = getActiveSession();
     const required = resolveContactSession(state.ui.activeContactAvatarId, { createIfMissing: true, focus: false });
@@ -5922,7 +6303,10 @@ async function sendChatMessage() {
     }
   }
   const session = getActiveSession();
-  if (!session || state.ui.chatStreaming) return;
+  if (!session) return;
+  if (state.ui.chatStreaming) {
+    cancelActiveChatStream('preempt-by-new-send', { cleanup: true });
+  }
 
   const text = String(els.chatInput.value || '').trim();
   if (!text) return;
@@ -5952,14 +6336,17 @@ async function sendSingleChatMessage(session, options = {}) {
     ? options.assistantMessage
     : appendChatMessage('assistant', '', { modelName: getChatModelName() });
   const samplingOptions = getChatSamplingOptions();
+  const streamAbortController = new AbortController();
 
   state.ui.chatStreaming = true;
+  state.ui.chatAbortController = streamAbortController;
   els.sendBtn.disabled = true;
-  renderMessages();
-  renderSessionList();
-  persistSessionsState();
 
   try {
+    renderMessages();
+    renderSessionList();
+    persistSessionsState();
+
     /* 联网搜索 */
     let searchResults = [];
     if (state.ui.webSearchEnabled) {
@@ -5977,6 +6364,7 @@ async function sendSingleChatMessage(session, options = {}) {
     const proxyHeader = getClientProxyHeaderValue();
     const response = await fetch('/api/chat', {
       method: 'POST',
+      signal: streamAbortController.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(state.token ? { 'x-access-token': state.token } : {}),
@@ -6028,9 +6416,14 @@ async function sendSingleChatMessage(session, options = {}) {
     if (session.avatarId) recordAvatarUsage(session.avatarId, 1);
     await streamSSEResponse(response, assistant.id, requestStartedAt);
   } catch (error) {
-    updateMessage(assistant.id, (m) => ({ ...m, content: `测试失败：${error.message || error}`, isThinking: false }));
-    renderMessages();
+    if (!(streamAbortController.signal && streamAbortController.signal.aborted)) {
+      updateMessage(assistant.id, (m) => ({ ...m, content: `测试失败：${error.message || error}`, isThinking: false }));
+      renderMessages();
+    }
   } finally {
+    if (state.ui.chatAbortController === streamAbortController) {
+      state.ui.chatAbortController = null;
+    }
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
     persistSessionsState();
@@ -6046,13 +6439,16 @@ async function sendGroupChatMessage(session, group, options = {}) {
     ? clampGroupSpectatorRounds((options && options.spectatorRounds) || (groupSettings && groupSettings.spectatorRoundsPerTrigger) || 1)
     : 1;
   let groupSettingsChanged = false;
+  const streamAbortController = new AbortController();
   state.ui.chatStreaming = true;
+  state.ui.chatAbortController = streamAbortController;
   els.sendBtn.disabled = true;
-  renderMessages();
-  renderSessionList();
-  persistSessionsState();
 
   try {
+    renderMessages();
+    renderSessionList();
+    persistSessionsState();
+
     const members = (group.memberIds || [])
       .map((id) => getAvatarById(id))
       .filter(Boolean);
@@ -6119,6 +6515,7 @@ async function sendGroupChatMessage(session, group, options = {}) {
           const requestStartedAt = Date.now();
           const response = await fetch('/api/chat', {
             method: 'POST',
+            signal: streamAbortController.signal,
             headers: {
               'Content-Type': 'application/json',
               ...(state.token ? { 'x-access-token': state.token } : {}),
@@ -6243,9 +6640,14 @@ async function sendGroupChatMessage(session, group, options = {}) {
       }
     }
   } catch (error) {
-    appendChatMessage('assistant', `群组聊天失败：${error.message}`);
-    renderMessages();
+    if (!(streamAbortController.signal && streamAbortController.signal.aborted)) {
+      appendChatMessage('assistant', `群组聊天失败：${error.message}`);
+      renderMessages();
+    }
   } finally {
+    if (state.ui.chatAbortController === streamAbortController) {
+      state.ui.chatAbortController = null;
+    }
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
     if (groupSettingsChanged) persistAvatars();
@@ -7158,7 +7560,21 @@ function updateModelSelectFromProviders(providers) {
   );
   let html = '';
   for (const p of enabledProviders) {
-    const models = Array.isArray(p.models) && p.models.length ? p.models : ['default'];
+    let models = Array.isArray(p.models) && p.models.length ? p.models.slice() : ['default'];
+    if (p.type === 'ollama') {
+      const hasAvailableField = Array.isArray(p.availableModels);
+      const installedModels = (hasAvailableField ? p.availableModels : [])
+        .map((entry) => String(entry && (entry.id || entry.name || entry.model) || '').trim())
+        .filter(Boolean);
+      if (installedModels.length) {
+        const installedSet = new Set(installedModels);
+        const preferred = models.filter((m) => installedSet.has(String(m || '').trim()));
+        const extras = installedModels.filter((m) => !preferred.includes(m));
+        models = preferred.concat(extras);
+      } else if (hasAvailableField) {
+        models = [];
+      }
+    }
     for (const m of models) {
       if (p.type === 'ollama') {
         const modeCfg = desktopSetupLocalModes.get(String(m || '').trim()) || null;

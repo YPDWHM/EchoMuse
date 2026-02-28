@@ -64,6 +64,32 @@ ipcMain.handle('echomuse:open-file-dialog', async (event, options) => {
   }
 });
 
+ipcMain.on('echomuse:focus-window', () => {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.focus();
+  } catch (_) {
+    // ignore focus failures
+  }
+});
+
+ipcMain.handle('echomuse:confirm-dialog', (_event, message) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const result = dialog.showMessageBoxSync(mainWindow, {
+    type: 'question',
+    buttons: ['确认', '取消'],
+    defaultId: 0,
+    cancelId: 1,
+    message: String(message || '确认操作？')
+  });
+  // showMessageBoxSync returns button index; 0 = confirm
+  mainWindow.webContents.focus();
+  return result === 0;
+});
+
 function ensureDesktopServerEnv() {
   if (!process.env.HOST) process.env.HOST = '127.0.0.1';
   if (!process.env.SHARE_MODE) process.env.SHARE_MODE = '0';

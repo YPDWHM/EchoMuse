@@ -43,8 +43,8 @@
     "appId": "com.echomuse.desktop",
     "productName": "EchoMuse",
     "icon": "图1.png",
-    "asar": false,
-    "compression": "normal",
+    "asar": true,
+    "compression": "maximum",
     "npmRebuild": false,
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [

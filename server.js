@@ -507,7 +507,19 @@ app.use('/api', (req, res, next) => {
   });
 });
 
-app.get('/api/info', (req, res) => {
+app.get('/api/info', async (req, res) => {
+  let liveOllamaAvailableModels = null;
+  try {
+    const tags = await ollamaTags(1200);
+    liveOllamaAvailableModels = (Array.isArray(tags && tags.models) ? tags.models : [])
+      .map((m) => {
+        const id = String(m && (m.name || m.model) || '').trim();
+        return id ? { id, name: id } : null;
+      })
+      .filter(Boolean)
+      .slice(0, 500);
+  } catch (_) { }
+
   res.json({
     host: HOST,
     port: PORT,
@@ -519,7 +531,14 @@ app.get('/api/info', (req, res) => {
     model: getActiveModel(),
     providerType: getActiveProvider().type,
     providers: appConfig.providers.map((p) => ({
-      id: p.id, name: p.name, type: p.type, models: p.models || [], enabled: p.enabled
+      id: p.id,
+      name: p.name,
+      type: p.type,
+      models: p.models || [],
+      availableModels: p.type === 'ollama' && Array.isArray(liveOllamaAvailableModels)
+        ? liveOllamaAvailableModels
+        : (p.availableModels || []),
+      enabled: p.enabled
     })),
     activeProviderId: appConfig.activeProviderId,
     rateLimitPerMin: RATE_LIMIT_PER_MIN,
@@ -588,14 +607,12 @@ function syncDesktopSetupLocalModelsToOllamaProvider(localModels, runtimeMode) {
   if (!ollamaProvider) return;
   ollamaProvider.enabled = true;
   ollamaProvider.models = Array.from(new Set(selectedModels));
-  const mergedAvailable = new Map();
-  (Array.isArray(ollamaProvider.availableModels) ? ollamaProvider.availableModels : []).forEach((m) => {
-    const id = String(m && (m.id || m.name) || '').trim();
-    if (!id) return;
-    mergedAvailable.set(id, { id, name: String(m && (m.name || m.id) || id) });
-  });
-  selectedModels.forEach((m) => mergedAvailable.set(m, { id: m, name: m }));
-  ollamaProvider.availableModels = Array.from(mergedAvailable.values()).slice(0, 200);
+  // Keep availableModels as "actually detected" local models only.
+  // Selected-but-not-installed models belong in desktopSetup.localModels / provider.models,
+  // and should not be exposed as already available in the runtime model selector.
+  if (!Array.isArray(ollamaProvider.availableModels)) {
+    ollamaProvider.availableModels = [];
+  }
 
   if (mode === 'local') {
     appConfig.activeProviderId = ollamaProvider.id || 'ollama-default';
@@ -4899,11 +4916,11 @@ async function ollamaChatStream(messages, options, signal, model) {
   return { body: res.body, format: 'ollama' };
 }
 
-async function ollamaTags() {
+async function ollamaTags(timeoutMs) {
   const response = await fetchWithTimeout(`${OLLAMA_BASE_URL}/api/tags`, {
     method: 'GET',
     headers: { 'Content-Type': 'application/json' }
-  });
+  }, timeoutMs);
   if (!response.ok) throw new Error(`Ollama tags failed: HTTP ${response.status}`);
   return response.json();
 }

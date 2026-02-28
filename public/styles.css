@@ -829,7 +829,7 @@ body.dark .startup-text {
 
 .chat-upload-btn {
   position: absolute;
-  right: 56px;
+  right: 68px;
   bottom: 8px;
   border: none;
   background: none;
@@ -837,7 +837,7 @@ body.dark .startup-text {
   cursor: pointer;
   padding: 4px 6px;
   border-radius: 6px;
-  opacity: 0.6;
+  opacity: 0.75;
   transition: opacity 0.15s;
 }
 
@@ -996,6 +996,55 @@ body.dark .startup-text {
 
 .hidden {
   display: none !important;
+}
+
+/* ── Custom confirm dialog (auto adapts to all themes via CSS vars) ── */
+.confirm-overlay {
+  position: fixed; inset: 0; z-index: 99999;
+  background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+  animation: confirmFadeIn 0.15s ease;
+}
+.confirm-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 28px 32px 22px;
+  min-width: 320px; max-width: 420px;
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.confirm-box .confirm-msg {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.6;
+  margin-bottom: 22px;
+}
+.confirm-box .confirm-actions {
+  display: flex; gap: 12px; justify-content: center;
+}
+.confirm-box .confirm-actions button {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 28px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.confirm-box .confirm-btn-ok {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+.confirm-box .confirm-btn-ok:hover { filter: brightness(1.1); }
+.confirm-box .confirm-btn-cancel {
+  background: var(--soft);
+  color: var(--text);
+}
+.confirm-box .confirm-btn-cancel:hover { border-color: var(--muted); }
+@keyframes confirmFadeIn {
+  from { opacity: 0; } to { opacity: 1; }
 }
 
 .muted {

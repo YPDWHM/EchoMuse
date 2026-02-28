@@ -1,106 +1,142 @@
 <p align="center">
-  <img src="图1.png" width="360" alt="EchoMuse Banner">
+  <img src="图1.png" width="360" alt="EchoMuse — Local-First AI Desktop Assistant">
 </p>
 
 <h1 align="center">EchoMuse</h1>
 
 <p align="center">
-  零云端、本地优先的桌面 AI 助手 — 聊天 · 角色扮演 · 学习工具 · 知识库，一个应用全搞定
+  <strong>Your Private, Local-First AI Desktop Assistant</strong><br>
+  Chat · Roleplay · Study Tools · Knowledge Base · MCP Tools — All in One App
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Windows">
-  <img src="https://img.shields.io/badge/runtime-Node.js%20≥18-green?logo=node.js" alt="Node.js">
-  <img src="https://img.shields.io/badge/framework-Electron-9feaf9?logo=electron" alt="Electron">
-  <img src="https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20%7C%20Claude-orange" alt="LLM">
+  <a href="#quick-start--快速开始">Quick Start</a> ·
+  <a href="#features--功能亮点">Features</a> ·
+  <a href="https://github.com/YPDWHM/EchoMuse/releases">Download</a> ·
+  <a href="https://gitee.com/tutuHM/echo-muse/releases">国内下载</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white" alt="Windows">
+  <img src="https://img.shields.io/badge/Node.js-≥18-339933?logo=node.js&logoColor=white" alt="Node.js">
+  <img src="https://img.shields.io/badge/Electron-Desktop-47848F?logo=electron&logoColor=white" alt="Electron">
+  <img src="https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20%7C%20Claude%20%7C%207+-FF6F00" alt="LLM">
+  <img src="https://img.shields.io/badge/i18n-8%20Languages-blueviolet" alt="i18n">
   <img src="https://img.shields.io/badge/license-Source%20Available-yellow" alt="License">
-  <img src="https://img.shields.io/badge/i18n-8%20languages-purple" alt="i18n">
+  <img src="https://img.shields.io/github/stars/YPDWHM/EchoMuse?style=social" alt="GitHub Stars">
 </p>
 
 ---
 
-## 它能做什么？
+## Why EchoMuse? / 为什么选 EchoMuse？
 
-EchoMuse 把**日常聊天、角色扮演（RP）、学习工具、知识库检索**融合在一个轻量桌面应用里，同时支持本地模型和云端 API。
+> **Zero cloud dependency. Your data never leaves your machine.**
 
-### 核心功能一览
+Most AI chat apps force you to pick a lane — casual chat, roleplay, or productivity. EchoMuse doesn't. It's a single lightweight desktop app that handles **daily conversations, deep character roleplay, academic study tools, and document-powered knowledge retrieval** — all running locally on your machine with optional cloud API support.
 
-| 功能 | 说明 |
-|:---|:---|
-| 💬 **多会话聊天** | 多会话管理、收藏、搜索，支持 Flash / Thinking 双模式切换 |
-| 🤖 **多模型后端** | Ollama 本地模型 + OpenAI / DeepSeek / Kimi / Claude 等 7+ 云端 API |
-| 🎭 **角色系统** | 自定义角色卡、Tavern 卡导入、表情/头像、记忆文本、关系设定 |
-| 📖 **Lorebook 世界观书** | 关键词触发型设定注入，RP 深度玩家的刚需 |
-| 👥 **群聊** | 多角色群组对话、旁观模式、角色间互动 |
-| 🌳 **消息分支** | 任意消息节点重新生成 / 编辑重发，形成树状对话分支 |
-| 📚 **知识库 RAG** | 上传文档（txt/md/pdf/docx）→ 分块 → BM25 + 向量混合检索 |
-| 🔧 **MCP 工具** | 接入外部 MCP 服务器（时间、网页抓取、笔记、思维链等） |
-| 🌐 **翻译覆盖层** | 实时翻译 AI 回复，支持 8 种语言，原文保留 |
-| 🔊 **语音 TTS / STT** | TTS 朗读回复 + 本地 Whisper 语音输入 |
-| 🔍 **联网搜索** | DuckDuckGo 搜索结果注入对话上下文 |
-| 🎓 **学习工具** | 期末复习包生成器 + 论文/实验报告生成器 |
-| 📤 **多格式导出** | JSON / Anki CSV / PDF / Word 导出 |
-| 👨‍👩‍👧‍👦 **团队共享** | OpenAI 兼容 API 中继，多成员 Token 管理与用量统计 |
-| 🌍 **国际化** | 中/英/日/韩/法/德/西/俄 8 语言完整 UI |
-| 📱 **局域网访问** | QR 码分享，手机/平板直接用 |
+> **零云端依赖，数据始终留在本地。**
+>
+> 大多数 AI 聊天工具只能做一件事。EchoMuse 不一样 — 日常聊天、深度角色扮演、学习工具、知识库检索，一个桌面应用全部搞定，本地运行，也可接入云端 API。
 
 ---
 
-## 架构概览
+## Features / 功能亮点
 
-```mermaid
-graph LR
-  subgraph 前端
-    A[Vanilla JS SPA] --> B[Chat UI]
-    A --> C[Settings Panel]
-    A --> D[Artifact Drawer]
-  end
+### 🤖 Connect Any LLM / 接入任意模型
 
-  subgraph 后端
-    E[Express Server]
-    E --> F[Ollama Local]
-    E --> G[OpenAI / DeepSeek / Kimi / Claude API]
-    E --> H[MCP Manager]
-    E --> I[RAG Engine]
-    E --> J[Translation Service]
-    E --> K[Team Sharing Relay]
-  end
+Run **Ollama models locally** (Qwen3, Mistral, Llama, etc.) or connect to **7+ cloud APIs** (OpenAI, DeepSeek, Kimi, Claude, SiliconFlow, Zhipu, Baichuan) — or mix both. Every model supports **Flash** (fast response) and **Thinking** (deep reasoning with chain-of-thought) dual modes.
 
-  A <-->|HTTP + SSE| E
+本地 Ollama 模型 + 7 种以上云端 API，可混合使用。每个模型支持 Flash（快速）和 Thinking（深度推理）双模式切换。
 
-  subgraph 桌面
-    L[Electron Shell] --> E
-  end
-```
+### 💬 Smart Conversations / 智能对话
+
+- **Multi-session management** with search, favorites, and auto-titling
+- **Message branching** — regenerate or edit any message to create tree-structured conversation paths
+- **Web search injection** — DuckDuckGo results fed directly into context
+- **Real-time translation overlay** — translate AI replies into 8 languages while keeping the original
+
+多会话管理 · 消息分支（树状对话） · 联网搜索注入 · 实时翻译覆盖层（8 语言）
+
+### 🎭 Deep Roleplay System / 深度角色扮演
+
+- **Custom characters** with avatars, expressions, memory text, and relationship settings
+- **Tavern card import** — drag-and-drop PNG/JSON character cards
+- **Lorebook** — keyword-triggered world-building lore auto-injected into context
+- **Multi-character group chat** with spectator mode
+- **Message branching** for exploring different story paths
+
+自定义角色卡 · Tavern 卡导入 · Lorebook 世界观书 · 多角色群聊 · 旁观模式 · 剧情分支探索
+
+### 📚 Knowledge Base (RAG) / 知识库检索
+
+Upload documents (txt / md / pdf / docx) → automatic chunking → **BM25 + vector hybrid retrieval**. Toggle it on in any chat and the AI answers with your documents as context.
+
+上传文档自动分块索引，BM25 + 向量混合检索，聊天中一键启用。
+
+### 🔧 MCP Tool Integration / MCP 工具集成
+
+Connect external **MCP servers** (stdio / SSE / HTTP) to extend the AI's capabilities — web scraping, sequential thinking, note-taking, and more. Supports multi-turn automatic tool calling.
+
+接入外部 MCP 服务器，扩展 AI 能力 — 网页抓取、深度推理、笔记等，支持多轮自动工具调用。
+
+### 🎓 Study Tools / 学习工具
+
+- **Exam Review Pack Generator** — outlines, key points, question banks (MCQ / fill-in / short answer), Anki flashcard export
+- **Paper & Report Generator** — lab reports, course papers, structured academic writing
+
+期末复习包生成器（大纲 + 题库 + Anki 卡片） · 论文/实验报告生成器
+
+### 🔊 Voice / 语音
+
+- **TTS** — AI reads replies aloud with configurable voice packs
+- **STT** — browser speech recognition + local Whisper offline transcription
+
+TTS 语音朗读 + 本地 Whisper 语音输入
+
+### 📤 Export & Share / 导出与共享
+
+- Export to **JSON / Anki CSV / PDF / Word**
+- **Team sharing** — OpenAI-compatible API relay with member tokens and usage tracking
+- **LAN access** — QR code for mobile/tablet access over local network
+
+多格式导出 · 团队共享（OpenAI 兼容中继） · 局域网 QR 码访问
+
+### 🌍 Polished Experience / 精致体验
+
+- **8 languages** — Chinese, English, Japanese, Korean, French, German, Spanish, Russian
+- **3 themes** — Light, Dark, System auto
+- **First-run setup wizard** — guided onboarding for beginners
+- **PWA support** — also works as a web app in your browser
+
+8 语言 UI · 3 种主题 · 新手引导向导 · PWA 支持
 
 ---
 
-## 快速开始
+## Quick Start / 快速开始
 
-### 方式一：桌面安装包（推荐普通用户）
+### Option 1: Download Installer (Recommended)
 
-> 前往 [GitHub Releases](https://github.com/YPDWHM/EchoMuse/releases) 或 [Gitee Releases](https://gitee.com/tutuHM/echo-muse/releases) 下载最新安装包（NSIS 安装版或 Portable 便携版）。
+> Go to [GitHub Releases](https://github.com/YPDWHM/EchoMuse/releases) or [Gitee Releases (国内)](https://gitee.com/tutuHM/echo-muse/releases) and grab the latest `.exe` — NSIS installer or portable version.
 
-### 方式二：从源码运行（开发者）
+### Option 2: Run from Source
 
 ```bash
-# 1. 克隆仓库
 git clone https://github.com/YPDWHM/EchoMuse.git
 cd EchoMuse
-
-# 2. 安装依赖
 npm install
 
-# 3. 启动 Web 版（仅本地访问）
+# Web version (local only)
 npm run local
 
-# 4. 或启动桌面版（Electron）
+# Desktop version (Electron)
 npm run desktop:dev
 ```
 
-> 如果需要局域网共享访问：`npm run share`
+> Gitee 用户：`git clone https://gitee.com/tutuHM/echo-muse.git`
 
-### 方式三：一键引导（Windows）
+> LAN sharing: `npm run share`
+
+### Option 3: Windows One-Click Bootstrap
 
 ```bash
 npm run bootstrap:win
@@ -108,185 +144,136 @@ npm run bootstrap:win
 
 ---
 
-## 模型配置
+## Model Setup / 模型配置
 
-EchoMuse 支持**本地模型**和**云端 API** 混合使用，你可以随时在设置面板切换。
+EchoMuse works with both local and cloud models — use one or both.
 
-### 本地模型（Ollama）
+### Local Models (Ollama)
 
-安装 [Ollama](https://ollama.com) 后拉取模型即可：
+Install [Ollama](https://ollama.com), then pull a model:
 
 ```bash
-ollama pull qwen3:8b    # 推荐首选，8B 通用模型
-ollama pull mistral:7b   # 备选，速度快
+ollama pull qwen3:8b      # Recommended — 8B general purpose
+ollama pull mistral:7b     # Alternative — fast and lightweight
 ```
 
-### 云端 API
+### Cloud APIs
 
-在设置面板添加 Provider，支持：
+Add a Provider in Settings. Supported:
 
-| Provider | 说明 |
+| Provider | Notes |
 |:---|:---|
-| OpenAI | GPT 系列 |
-| DeepSeek | 性价比高 |
-| Kimi (Moonshot) | 长上下文 |
-| SiliconFlow | 国内加速 |
-| Zhipu AI (智谱) | GLM 系列 |
-| Baichuan (百川) | 中文优化 |
-| Anthropic | Claude 系列 |
-| 自定义 | 任意 OpenAI 兼容端点 |
-
-### Flash vs Thinking 模式
-
-- **Flash（快速模式）**：低温度、快响应，适合日常聊天
-- **Thinking（深度模式）**：高 token 上限、支持思维链，适合复杂推理
-
-每个模型可独立配置这两种模式。
+| OpenAI | GPT series |
+| DeepSeek | Cost-effective |
+| Kimi (Moonshot) | Long context |
+| SiliconFlow | China-optimized CDN |
+| Zhipu AI | GLM series |
+| Baichuan | Chinese-optimized |
+| Anthropic | Claude series |
+| Custom | Any OpenAI-compatible endpoint |
 
 ---
 
-## 功能详解
+## Architecture / 架构
 
-### 🎭 角色扮演系统
+```mermaid
+graph LR
+  subgraph Frontend
+    A[Vanilla JS SPA] --> B[Chat UI]
+    A --> C[Settings]
+    A --> D[Artifact Drawer]
+  end
 
-- 创建自定义角色：名称、关系、自定义 prompt、表情/图片头像
-- 导入 Tavern 角色卡（PNG 内嵌 `chara` 数据 或 JSON 格式）
-- 记忆文本导入：粘贴或上传 `.txt` / `.md` / `.json`，让 AI 模仿特定人格
-- 角色绑定到会话，不同会话可以用不同角色
+  subgraph Backend
+    E[Express Server]
+    E --> F[Ollama Local]
+    E --> G[Cloud APIs]
+    E --> H[MCP Manager]
+    E --> I[RAG Engine]
+    E --> J[Translation]
+    E --> K[Team Relay]
+  end
 
-### 📖 Lorebook 世界观书
+  A <-->|HTTP + SSE| E
 
-- 定义关键词触发的世界观条目
-- 对话中提到关键词时自动注入背景设定
-- 适合构建复杂的 RP 世界观（魔法体系、组织架构、地理设定等）
-
-### 👥 群聊
-
-- 创建多角色群组，AI 扮演多个角色轮流发言
-- 设定角色间关系影响对话风格
-- 旁观模式：用户可以观看 AI 角色之间的互动
-
-### 🌳 消息分支（Message Tree）
-
-- 在任意消息节点重新生成或编辑后重发
-- 形成树状对话结构，左右箭头切换分支
-- 适合探索不同思路、尝试不同剧情走向
-
-### 📚 知识库 RAG
-
-- 上传文档（txt / md / pdf / docx）自动分块索引
-- BM25 词法检索 + 向量语义检索混合排序
-- 可配置：分块大小、重叠、Top-K、最低分数
-- 在聊天中一键启用，AI 回答自动引用知识库内容
-
-### 🔧 MCP 工具集成
-
-- 连接外部 MCP 服务器（stdio / SSE / HTTP）
-- 内置预设：时间日历、网页抓取、笔记记忆、思维链
-- 支持自定义 MCP 服务器配置和剪贴板 JSON 导入
-- 对话中自动多轮工具调用（最多 5 轮）
-
-### 🎓 学习工具
-
-- **期末复习包生成器**：章节大纲 + 重点 + 题库（选择/填空/简答/综合）+ Anki 卡片
-- **论文报告生成器**：实验报告 / 课程报告 / 学术论文，含方法/结果/讨论结构
-
----
-
-## 打包发布
-
-```bash
-# NSIS 安装包
-npm run desktop:build:nsis
-
-# 便携版
-npm run desktop:build:portable
-
-# 两者都构建
-npm run desktop:build
+  subgraph Desktop
+    L[Electron Shell] --> E
+  end
 ```
 
-输出目录：`desktop-dist/`
+---
+
+## Tech Stack / 技术栈
+
+| Layer | Tech |
+|:---|:---|
+| Frontend | Vanilla JS, KaTeX, Marked |
+| Backend | Node.js, Express |
+| Desktop | Electron |
+| LLM | Ollama, OpenAI API, Anthropic API |
+| Retrieval | BM25 + Vector Embedding (Cosine Similarity) |
+| Tools | MCP (Model Context Protocol) |
+| Export | jsPDF, docx, html2canvas |
 
 ---
 
-## 项目结构
+## Project Structure / 项目结构
 
 ```
 EchoMuse/
-├── server.js              # Express 后端（API、LLM、RAG、MCP、翻译、团队共享）
-├── mcp-manager.js         # MCP 客户端连接管理
+├── server.js              # Express backend (API, LLM, RAG, MCP, translation, team sharing)
+├── mcp-manager.js         # MCP client connection manager
 ├── public/
-│   ├── index.html         # 主页面
-│   ├── app.js             # 前端主逻辑
-│   ├── styles.css         # 样式（亮/暗主题）
-│   └── js/
-│       ├── utils-core.js  # 通用工具函数
-│       ├── domain-core.js # 领域逻辑（会话、角色、Tavern 解析）
-│       └── chat-render-core.js  # 聊天渲染
+│   ├── index.html         # Main page
+│   ├── app.js             # Frontend logic
+│   ├── styles.css         # Styles (light/dark themes)
+│   └── js/                # Modular JS (utils, domain, chat render, voice, setup wizard)
 ├── desktop/
-│   ├── main.js            # Electron 主进程
-│   └── preload.js         # Electron 预加载脚本
-├── prompts/               # Prompt 模板
-├── scripts/               # 启动 & 引导脚本
-└── docs/                  # 设计文档
+│   ├── main.js            # Electron main process
+│   └── preload.js         # Electron preload
+├── prompts/               # Prompt templates
+└── scripts/               # Startup & build scripts
 ```
 
 ---
 
-## 常见问题
+## FAQ / 常见问题
 
-**Q: 不懂模型怎么选？**
-直接在设置里添加一个云端 API Provider（如 DeepSeek），不装本地模型也能用。
+**Q: I don't know which model to pick. / 不懂选什么模型？**
+Add a cloud API Provider in Settings (e.g. DeepSeek) — no local model needed.
+在设置里添加云端 API Provider（如 DeepSeek），不装本地模型也能用。
 
-**Q: 电脑配置一般，能跑本地模型吗？**
-16GB 内存可以跑 `qwen3:8b` 或 `mistral:7b`（8B 级别）。更大的模型（13B+）需要更好的硬件。
+**Q: Can my PC run local models? / 电脑能跑本地模型吗？**
+16GB RAM can handle 8B models (qwen3:8b, mistral:7b). 13B+ needs better hardware.
+16GB 内存可跑 8B 级别模型，更大模型需要更好配置。
 
-**Q: Tavern 角色卡怎么导入？**
-侧边栏「联系人」→「导入卡片」，支持 PNG（内嵌数据）和 JSON 格式。
+**Q: How to import character cards? / 怎么导入角色卡？**
+Sidebar → Contacts → Import Card. Supports PNG (embedded data) and JSON.
+侧边栏「联系人」→「导入卡片」，支持 PNG 和 JSON 格式。
 
-**Q: 怎么让别人也能用我的服务？**
-设置里开启「团队共享」，生成成员 Token，对方通过局域网 IP 访问即可。
+**Q: How to share with others on LAN? / 怎么局域网共享？**
+Enable Team Sharing in Settings, generate member tokens, others connect via your LAN IP.
+设置里开启「团队共享」，生成成员 Token，对方通过局域网 IP 访问。
 
 ---
 
-## 技术栈
+## Contributing / 参与贡献
 
-| 层 | 技术 |
-|:---|:---|
-| 前端 | Vanilla JS、KaTeX、Marked |
-| 后端 | Node.js、Express |
-| 桌面 | Electron |
-| LLM | Ollama、OpenAI API、Anthropic API |
-| 检索 | BM25 + 向量嵌入（余弦相似度） |
-| 工具 | MCP (Model Context Protocol) |
-| 导出 | jsPDF、docx、html2canvas |
+Issues and feature requests are welcome on [GitHub](https://github.com/YPDWHM/EchoMuse/issues) or [Gitee](https://gitee.com/tutuHM/echo-muse/issues).
+
+欢迎在 GitHub 或 Gitee 提交 Issue 和功能建议。
 
 ---
 
 ## License
 
-[EchoMuse Source Available License](LICENSE) — 个人使用、学习、教育用途免费。商业用途需获得作者授权。
+[EchoMuse Source Available License](LICENSE) — Free for personal, educational, and non-commercial use. Commercial use requires author authorization.
 
-
+个人使用、学习、教育用途免费。商业用途需获得作者授权。
 
 ---
 
-## Source Availability Notice / 开源说明（重要）
-
-This repository keeps the **open-core community edition** of EchoMuse.
-
-Some features are being upgraded and are **temporarily not open-sourced** (moved to a separate private/closed repository for iterative development), for example:
-
-- Team sharing / relay service enhancements
-- First-run installer automation (advanced runtime/model bootstrap)
-- Online voice packs / commercial TTS provider integrations
-- Future cloud sync / account / billing related modules
-
-我们会持续维护本仓库的社区版核心功能（本地聊天、角色、知识库基础、MCP 基础、桌面端基础能力）。
-部分升级中的功能将暂时在独立仓库中迭代，后续会根据稳定性与版本规划决定是否开放实现或开放接口。
-
-Design principle:
-- Core experience stays usable in the public repo
-- Upgrade modules are developed separately
-- Boundaries and roadmap are documented transparently
+<p align="center">
+  If EchoMuse helps you, consider giving it a ⭐ — it means a lot!<br>
+  如果 EchoMuse 对你有帮助，点个 ⭐ Star 支持一下吧！
+</p>

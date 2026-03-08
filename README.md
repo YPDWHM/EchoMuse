@@ -40,6 +40,19 @@ Most AI chat apps force you to pick a lane — casual chat, roleplay, or product
 
 ---
 
+## Screenshots / 界面预览
+
+<p align="center">
+  <img src="screenshots/chat.png" width="45%" alt="Chat Interface">&nbsp;&nbsp;
+  <img src="screenshots/character.png" width="45%" alt="Character Cards">
+</p>
+<p align="center">
+  <img src="screenshots/knowledge.png" width="45%" alt="Knowledge Base">&nbsp;&nbsp;
+  <img src="screenshots/settings.png" width="45%" alt="Settings">
+</p>
+
+---
+
 ## Features / 功能亮点
 
 ### 🤖 Connect Any LLM / 接入任意模型

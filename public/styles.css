@@ -2027,6 +2027,45 @@ img.avatar-card-icon {
   text-decoration: underline;
 }
 
+/* Contacts toolbar — compact icon chips */
+.contacts-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.contacts-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.contacts-chip:hover {
+  border-color: var(--brand);
+  background: #eef2ff;
+  color: var(--brand);
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.08);
+}
+
+.contacts-group-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  padding: 0 2px;
+}
+
 /* Contact list */
 .contact-list {
   flex: 1;
@@ -2050,6 +2089,80 @@ img.avatar-card-icon {
   border-radius: 12px;
   cursor: pointer;
   transition: background .15s;
+}
+
+.contact-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.contact-row .contact-item {
+  flex: 1;
+  padding-right: 96px;
+}
+
+.contact-row-actions {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(calc(-50% + 4px));
+  transition: all 0.2s ease;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.contact-row:hover .contact-row-actions,
+.contact-row:focus-within .contact-row-actions {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.contact-shortcut-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .15s, box-shadow .15s;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+.contact-shortcut-btn:hover {
+  border-color: #cbd5e1;
+  color: #475569;
+  background: #fff;
+  transform: translateY(-1px);
+}
+
+.contact-shortcut-btn.active {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.28);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.12) inset;
+}
+
+.contact-shortcut-btn span {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.contact-invite-btn span {
+  font-size: 18px;
 }
 
 .contact-item:hover {

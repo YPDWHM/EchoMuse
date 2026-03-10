@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const STORAGE_TOKEN_KEY = 'chatbox_access_token_v3';
 const STORAGE_SESSIONS_KEY = 'chatbox_sessions_v3';
@@ -1214,6 +1214,8 @@ const els = {
   newGroupBtn: document.getElementById('newGroupBtn'),
   groupDialog: document.getElementById('groupDialog'),
   groupNameInput: document.getElementById('groupNameInput'),
+  groupMemberLabel: document.getElementById('groupMemberLabel'),
+  groupMemberHint: document.getElementById('groupMemberHint'),
   groupMemberList: document.getElementById('groupMemberList'),
   groupSaveBtn: document.getElementById('groupSaveBtn'),
   groupCancelBtn: document.getElementById('groupCancelBtn'),
@@ -1872,6 +1874,13 @@ function bindEvents() {
         openLorebookSettingsForAvatar(lorebookBtn.dataset.avatarId || '', { create: true }).catch(() => { });
         return;
       }
+      const editGroupBtn = e.target.closest('[data-action="edit-group-members"]');
+      if (editGroupBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        openGroupDialog(editGroupBtn.dataset.avatarId || '');
+        return;
+      }
       const item = e.target.closest('[data-action="open-contact"]');
       if (!item) return;
       openContact(item.dataset.avatarId || '');
@@ -1897,7 +1906,11 @@ function bindEvents() {
   /* Group creation */
   if (els.newGroupBtn) els.newGroupBtn.addEventListener('click', () => openGroupDialog());
   if (els.groupSaveBtn) els.groupSaveBtn.addEventListener('click', () => saveGroup());
-  if (els.groupCancelBtn) els.groupCancelBtn.addEventListener('click', () => els.groupDialog.close());
+  if (els.groupCancelBtn) els.groupCancelBtn.addEventListener('click', () => {
+    if (els.groupDialog && els.groupDialog.dataset) els.groupDialog.dataset.editGroupId = '';
+    refreshGroupDialogUi(null);
+    els.groupDialog.close();
+  });
 
   els.newSessionBtn.addEventListener('click', () => {
     createSession(getLocalizedNewSessionTitle());
@@ -2866,6 +2879,10 @@ function scheduleComposerFocusRecovery(options = {}) {
         stopComposerFocusRecovery();
         return;
       }
+      if (getOpenModalDialog()) {
+        stopComposerFocusRecovery();
+        return;
+      }
       const activeEl = document.activeElement;
       const activeTag = activeEl && activeEl.tagName ? String(activeEl.tagName).toUpperCase() : '';
       const activeInSessionList = Boolean(activeEl && typeof activeEl.closest === 'function' && activeEl.closest('#sessionList'));
@@ -2936,6 +2953,7 @@ function cancelActiveChatStream(reason = 'cancelled', options = {}) {
 function restoreComposerInteractivityNow(options = {}) {
   const focus = Boolean(options && options.focus);
   const forceUnlockStreaming = Boolean(options && options.forceUnlockStreaming);
+  const openModal = getOpenModalDialog();
   // Always unlock the input area first; never let session state errors block typing.
   try {
     if (els.chatInput) {
@@ -2956,7 +2974,7 @@ function restoreComposerInteractivityNow(options = {}) {
     if (els.sendBtn) {
       els.sendBtn.disabled = Boolean(state.ui.chatStreaming);
     }
-    if (focus && els.chatInput) {
+    if (focus && els.chatInput && !openModal) {
       tryFocusHostWindow();
       try { els.chatInput.focus(); } catch (_) { }
     }
@@ -3056,11 +3074,14 @@ function getActiveSession() {
 }
 
 function switchSession(sessionId) {
-  if (!state.sessions.some((s) => s.id === sessionId)) return;
+  const nextSession = state.sessions.find((s) => s && s.id === sessionId) || null;
+  if (!nextSession) return;
   if (state.ui.chatStreaming) {
     cancelActiveChatStream('session-switched');
   }
   state.activeSessionId = sessionId;
+  const nextContactAvatarId = String(nextSession.contactOwnerAvatarId || nextSession.avatarId || '').trim();
+  state.ui.activeContactAvatarId = nextContactAvatarId;
   state.ui.activeTool = '';
   state.ui.selectedMessageId = '';
   persistSessionsState();
@@ -3440,6 +3461,7 @@ function normalizeGroupChatSettings(raw, memberIds) {
   return {
     allowAiCrossTalk: src.allowAiCrossTalk !== false,
     spectatorRoundsPerTrigger: clampGroupSpectatorRounds(src.spectatorRoundsPerTrigger),
+    lastStarterId: String(src.lastStarterId || '').trim(),
     lastSpeakerId: String(src.lastSpeakerId || '').trim(),
     relationMap: normalizeGroupRelationMap(src.relationMap, memberIds)
   };
@@ -3449,6 +3471,58 @@ function ensureGroupChatSettings(group) {
   if (!group || group.type !== 'group') return null;
   group.groupChatSettings = normalizeGroupChatSettings(group.groupChatSettings, group.memberIds || []);
   return group.groupChatSettings;
+}
+
+function normalizeGroupMemberIds(rawMemberIds) {
+  const ids = Array.isArray(rawMemberIds) ? rawMemberIds : [];
+  const out = [];
+  const seen = new Set();
+  for (const item of ids) {
+    const id = String(item || '').trim();
+    if (!id || seen.has(id)) continue;
+    const avatar = getAvatarById(id);
+    if (!avatar || avatar.type === 'group') continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function repairGroupAvatarMembers(group) {
+  if (!group || group.type !== 'group') return { changed: false, validIds: [], invalidCount: 0 };
+  const prev = Array.isArray(group.memberIds)
+    ? group.memberIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const next = normalizeGroupMemberIds(prev);
+  const changed = prev.length !== next.length || prev.some((id, index) => id !== next[index]);
+  if (changed || !Array.isArray(group.memberIds)) {
+    group.memberIds = next;
+    group.groupChatSettings = normalizeGroupChatSettings(group.groupChatSettings, next);
+  }
+  return {
+    changed,
+    validIds: next,
+    invalidCount: Math.max(0, prev.length - next.length)
+  };
+}
+
+function repairAllGroupAvatars() {
+  let changed = false;
+  for (const avatar of (state.avatars || [])) {
+    if (!(avatar && avatar.type === 'group')) continue;
+    const repaired = repairGroupAvatarMembers(avatar);
+    if (repaired.changed) changed = true;
+    else ensureGroupChatSettings(avatar);
+  }
+  return changed;
+}
+
+function getGroupMembers(group) {
+  if (!group || group.type !== 'group') return [];
+  const repaired = repairGroupAvatarMembers(group);
+  return repaired.validIds
+    .map((id) => getAvatarById(id))
+    .filter((avatar) => avatar && avatar.type !== 'group');
 }
 
 function getGroupPairRelationType(group, aId, bId) {
@@ -3471,18 +3545,122 @@ function getGroupRelationHintsForSpeaker(group, speaker, members) {
     }));
 }
 
-function getGroupOrderedMembersForTurn(group, members) {
+function getLastGroupSpeakerIdFromSession(session, group) {
+  if (!session || !group || !Array.isArray(session.messages)) return '';
+  const validIds = new Set(getGroupMembers(group).map((m) => String(m && m.id || '').trim()).filter(Boolean));
+  if (!validIds.size) return '';
+  const visible = getVisibleSessionMessages(session);
+  for (let i = visible.length - 1; i >= 0; i -= 1) {
+    const msg = visible[i];
+    if (!(msg && msg.role === 'assistant' && msg.speakerAvatarId)) continue;
+    const speakerId = String(msg.speakerAvatarId || '').trim();
+    if (!speakerId || !validIds.has(speakerId)) continue;
+    if (looksLikeGroupPromptLeak(String(msg.content || '').trim())) continue;
+    return speakerId;
+  }
+  return '';
+}
+
+function shuffleGroupMembers(list) {
+  const out = Array.isArray(list) ? list.filter(Boolean) : [];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+function getLastGroupUserMessageText(session) {
+  if (!session || !Array.isArray(session.messages)) return '';
+  const visible = getVisibleSessionMessages(session);
+  for (let i = visible.length - 1; i >= 0; i -= 1) {
+    const msg = visible[i];
+    if (!(msg && msg.kind === 'chat' && msg.role === 'user')) continue;
+    const text = stripConversationBoundaryMarkers(String(msg.content || '').trim());
+    if (text) return text;
+  }
+  return '';
+}
+
+function getGroupMemberMentionKeys(member) {
+  const name = String(member && member.name || '').trim();
+  if (!name) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return;
+    const key = normalizeSpeakerTagKey(raw);
+    if (!key || seen.has(key)) return;
+    if (key.length < 2 && !/[\u4e00-\u9fa5]/.test(key)) return;
+    seen.add(key);
+    out.push(key);
+  };
+  push(name);
+  const trimmedHead = name.split(/\s*[-|/｜()（）【】[\]<>《》]\s*/).map((part) => String(part || '').trim()).find(Boolean) || '';
+  if (trimmedHead && trimmedHead !== name) push(trimmedHead);
+  const englishHead = name.match(/^[A-Za-z][A-Za-z0-9_'’.-]*/);
+  if (englishHead && englishHead[0]) push(englishHead[0]);
+  return out;
+}
+
+function getAddressedGroupMemberIds(text, members) {
+  const source = stripConversationBoundaryMarkers(text);
+  if (!source) return [];
+  const normalizedText = normalizeSpeakerTagKey(source);
+  if (!normalizedText) return [];
+  const matches = [];
+  for (const member of (Array.isArray(members) ? members : [])) {
+    const memberId = String(member && member.id || '').trim();
+    if (!memberId) continue;
+    const mentionKeys = getGroupMemberMentionKeys(member);
+    let bestIndex = -1;
+    for (const key of mentionKeys) {
+      if (!key) continue;
+      const idx = normalizedText.indexOf(key);
+      if (idx < 0) continue;
+      if (bestIndex < 0 || idx < bestIndex) bestIndex = idx;
+    }
+    if (bestIndex < 0) continue;
+    matches.push({ memberId, index: bestIndex });
+  }
+  return matches
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.memberId);
+}
+
+function getGroupOrderedMembersForTurn(group, members, session) {
   if (!group || !Array.isArray(members) || members.length <= 1) return [...(members || [])];
   const settings = ensureGroupChatSettings(group);
   if (!settings) return [...members];
-  const lastId = String(settings.lastSpeakerId || '').trim();
-  const startIdxBase = lastId ? members.findIndex((m) => m && m.id === lastId) : -1;
-  const startIdx = startIdxBase >= 0 ? ((startIdxBase + 1) % members.length) : 0;
-  const ordered = [];
-  for (let i = 0; i < members.length; i += 1) {
-    ordered.push(members[(startIdx + i) % members.length]);
+  const latestUserText = getLastGroupUserMessageText(session);
+  const addressedIds = getAddressedGroupMemberIds(latestUserText, members);
+  if (addressedIds.length) {
+    const addressedSet = new Set(addressedIds);
+    const addressedMembers = addressedIds
+      .map((id) => members.find((m) => m && String(m.id || '').trim() === id))
+      .filter(Boolean);
+    const remainingMembers = shuffleGroupMembers(
+      members.filter((m) => m && !addressedSet.has(String(m.id || '').trim()))
+    );
+    return [...addressedMembers, ...remainingMembers];
   }
-  return ordered.filter(Boolean);
+  const sessionLastId = getLastGroupSpeakerIdFromSession(session, group);
+  const excludedIds = new Set(
+    [settings.lastStarterId, sessionLastId]
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+  );
+  const starterPool = members.filter((m) => m && !excludedIds.has(String(m.id || '').trim()));
+  const candidatePool = starterPool.length ? starterPool : members.filter(Boolean);
+  const pickedStarter = candidatePool[Math.floor(Math.random() * candidatePool.length)] || members[0];
+  const pickedId = String(pickedStarter && pickedStarter.id || '').trim();
+  const remaining = shuffleGroupMembers(
+    members.filter((m) => m && String(m.id || '').trim() !== pickedId)
+  );
+  return [pickedStarter, ...remaining].filter(Boolean);
 }
 
 function normalizeSpeakerTagKey(value) {
@@ -3492,16 +3670,25 @@ function normalizeSpeakerTagKey(value) {
 }
 
 function isGroupReplyTaggedLine(line) {
-  return /^\s*[\[【(（]?\s*[^:\]】)）]{1,80}\s*[\]】)）]?\s*[:：]\s+/.test(String(line || ''));
+  const raw = String(line || '');
+  return /^\s*[\[【(（]?\s*[^:\]】)）]{1,80}\s*[\]】)）]?\s*[:：]\s*/.test(raw)
+    || /^\s*[\[【(（]\s*[^\]】)）]{1,80}\s*[\]】)）]\s*$/.test(raw);
 }
 
 function parseGroupReplyTaggedLine(line) {
   const s = String(line || '');
   const m = s.match(/^\s*[\[【(（]?\s*([^:\]】)）]{1,80})\s*[\]】)）]?\s*[:：]\s*(.*)$/);
-  if (!m) return null;
+  if (m) {
+    return {
+      speakerLabel: String(m[1] || '').trim(),
+      text: String(m[2] || '').trim()
+    };
+  }
+  const bare = s.match(/^\s*[\[【(（]\s*([^\]】)）]{1,80})\s*[\]】)）]\s*$/);
+  if (!bare) return null;
   return {
-    speakerLabel: String(m[1] || '').trim(),
-    text: String(m[2] || '').trim()
+    speakerLabel: String(bare[1] || '').trim(),
+    text: ''
   };
 }
 
@@ -3510,6 +3697,19 @@ function isCurrentGroupSpeakerLabel(label, member) {
   const nameKey = normalizeSpeakerTagKey(member && member.name);
   if (!tagKey || !nameKey) return false;
   return tagKey === nameKey || tagKey.includes(nameKey) || nameKey.includes(tagKey);
+}
+
+function trimGroupLineToEmbeddedSpeakerTag(line, member) {
+  const raw = String(line || '');
+  if (!raw || !member) return raw;
+  const re = /[\[【(（]?\s*([^:\]】)）]{1,80})\s*[\]】)）]?\s*[:：]\s*/g;
+  let match;
+  while ((match = re.exec(raw))) {
+    const label = String(match[1] || '').trim();
+    if (!label || !isCurrentGroupSpeakerLabel(label, member)) continue;
+    return raw.slice(match.index).trim();
+  }
+  return raw;
 }
 
 function dedupeRepeatedLines(lines, maxRepeat = 1) {
@@ -3538,10 +3738,391 @@ function dedupeRepeatedLines(lines, maxRepeat = 1) {
   return out;
 }
 
-function sanitizeGroupSpeakerReplyContent(content, member, members) {
-  const raw = String(content || '').replace(/\r/g, '').trim();
+function stripConversationBoundaryMarkers(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .replace(/^\s*<{3}\s*(?:BEGIN|END|开始|结束)\s*>{3}\s*$/gim, '')
+    .replace(/<<<\s*(?:BEGIN|END|开始|结束|寮€濮媩缁撴潫|瀵偓婵缂佹挻娼?)\s*>>>/gi, '')
+    .trim();
+}
+
+function isLikelyBareGroupSpeakerTag(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+  const parsed = parseGroupReplyTaggedLine(trimmed);
+  if (!parsed || String(parsed.text || '').trim()) return false;
+  const label = String(parsed.speakerLabel || '').trim();
+  if (!label) return false;
+  return /[A-Za-z0-9]/.test(label) || /[-_·•]/.test(label) || /\s/.test(label);
+}
+
+function isGroupInvalidPlaceholderReply(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return true;
+  if (trimmed === '暂无消息') return true;
+  if (isLikelyBareGroupSpeakerTag(trimmed)) return true;
+  const normalized = trimmed
+    .replace(/<<<\s*(?:BEGIN|END|开始|结束)\s*>>>/gi, '')
+    .replace(/[()（）\[\]【】\s]+/g, '')
+    .trim();
+  if (!normalized) return true;
+  return /^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。|本轮没有拿到可显示的群成员回复，请重试。)$/.test(trimmed);
+}
+
+function stripGroupActionLikeSegments(text) {
+  return String(text || '')
+    .replace(/(^|[\s　])[(（][^()（）"'“”'‘’\n]{0,160}[)）](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[(（][^()（）"'“”'‘’\n]{0,160}(?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[*＊][^*＊"'“”'‘’\n]{0,160}[*＊](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[*＊][^*＊"'“”'‘’\n]{0,160}(?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[【\[][^【】\[\]"'“”'‘’\n]{0,160}[】\]](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[【\[][^【】\[\]"'“”'‘’\n]{0,160}(?=$|[\s　])/g, ' ');
+}
+
+function isGroupActionOnlyReply(text) {
+  const raw = stripConversationBoundaryMarkers(text);
+  if (!raw) return false;
+  const body = raw
+    .split('\n')
+    .map((line) => {
+      const parsed = parseGroupReplyTaggedLine(line);
+      return parsed ? String(parsed.text || '').trim() : String(line || '').trim();
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  if (!body) return false;
+  if (/^[.…~～·•\s]+$/.test(body)) return true;
+  const stripped = stripGroupActionLikeSegments(body)
+    .replace(/["“”'‘’]/g, '')
+    .replace(/[.…~～·•,，;；:：!?！？、\s]+/g, '')
+    .trim();
+  return !stripped;
+}
+
+function looksLikeGroupAdviceMeta(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean) || '';
+  if (/^(建议|改进建议|可以这样改|可以补充|可以加一句)\s*[:：]/.test(firstLine)) return true;
+  const bulletCount = (raw.match(/^\s*(?:[-*•]|\d+\.)\s+/gm) || []).length;
+  const hits = [
+    '推进剧情',
+    '情绪细节',
+    '具体动作',
+    '加一句',
+    '加一个',
+    '比如“',
+    '比如「',
+    '可以改成'
+  ].filter((token) => raw.includes(token)).length;
+  return bulletCount >= 2 && hits >= 2;
+}
+
+function looksLikeGroupPromptLeak(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  if (looksLikeGroupPromptFragmentReply(raw)) return true;
+  const retryLeakRe = /(?:上(?:一条|一次|次)?回复(?:为空|无效)|请直接输出(?:本次|这一轮|当前轮次|这次).{0,16}(?:完整发言|正式回复|回复正文))/u;
+  const groupControlLeakRe = /(?:这是群聊(?:中的单个角色回合)?|必须和其他角色自然对话|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|不要输出前缀|不要输出规则说明|不要代替他人发言|不要写多轮对话脚本|回合补充要求|输出要求|当前为旁观模式|群聊回合规则|只输出|只写当前角色|你这次只能输出)/u;
+  const systemPersonaLeakRe = /(?:^\s*(?:\[\s*系统\s*\]|系统[:：]).{0,160}(?:角色名称|角色身份|扮演)|请提供您希望扮演的角色名称|我将以该角色身份进行回复)/u;
+  const englishLeakRe = /(reply in chinese|respond in chinese|speak chinese|output in chinese|turnInstruction|relationshipHints|<<<BEGIN>>>|<<<END>>>)/i;
+  if (/\u8ba9\u60c5\u8282\u81ea\u7136\u6d41\u6dCC\uff0c\u65e0\u9700\u523b\u610f\u8854\u63a5/.test(raw)) return true;
+  if (retryLeakRe.test(raw)) return true;
+  if (groupControlLeakRe.test(raw)) return true;
+  if (systemPersonaLeakRe.test(raw)) return true;
+  if (englishLeakRe.test(raw)) return true;
+  if (looksLikeGroupAdviceMeta(raw)) return true;
+  const indicators = [
+    '需要注意',
+    '可能的反应',
+    '只输出',
+    '不要控制用户',
+    '这是群聊回合',
+    '当前为旁观模式',
+    '群聊回合规则',
+    '你这次只能输出',
+    '不要代替他人发言',
+    '不要写多轮对话脚本',
+    '这是群聊中的单个角色回合',
+    '这是群聊，当前发言者是',
+    '当前发言者是',
+    '根据设定和关系',
+    '优先回应 ta',
+    '也可回应用户',
+    '保持中文回复',
+    '必须使用中文',
+    '必须用中文',
+    '请使用中文',
+    '用中文回答',
+    '上一次回复为空或无效',
+    '检测到群聊陷入短句重复',
+    '你扮演',
+    '请扮演',
+    '角色设定',
+    '身份设定',
+    '历史参考记录',
+    '模仿其说话语气',
+    '回合补充要求',
+    'turnInstruction',
+    'relationshipHints',
+    '<<<BEGIN>>>',
+    '<<<END>>>',
+    '<<<开始>>>',
+    '<<<结束>>>'
+  ];
+  let hits = 0;
+  for (const token of indicators) {
+    if (raw.includes(token)) hits += 1;
+  }
+  const directLeakRe = /(必须使用中文|必须用中文|请使用中文|用中文回答|你扮演.{0,40}角色|请扮演.{0,40}角色|角色设定|身份设定|历史参考记录|模仿其说话语气|回合补充要求|当前是旁观模式|重要：你正在群聊|这是群聊中的单个角色回合|这是群聊，当前发言者是|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|不要输出前缀|不要输出规则说明|必须和其他角色自然对话)/;
+  const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean) || '';
+  const profileLead = /^([A-Za-z0-9_\-·\u4e00-\u9fa5]{1,40})(是一个|是个|目前|性格|喜欢|习惯|正在|在)/.test(firstLine);
+  const bioMarkers = [
+    '性格',
+    '喜欢',
+    '目前',
+    '习惯',
+    '背景',
+    '身份',
+    '设定',
+    '用户的',
+    '名叫',
+    '她在',
+    '他在',
+    '她是',
+    '他是'
+  ];
+  const bioHits = bioMarkers.filter((token) => raw.includes(token)).length;
+  const bulletCount = (raw.match(/^\s*(?:[-*•]|\d+\.)\s+/gm) || []).length;
+  return hits >= 2 || (hits >= 1 && bulletCount >= 2) || directLeakRe.test(raw) || (profileLead && bioHits >= 2);
+}
+
+function looksLikeGroupReasoningOnly(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  if (looksLikeGroupPromptLeak(raw)) return true;
+  if (looksLikeGroupAdviceMeta(raw)) return true;
+  const bulletCount = (raw.match(/^\s*(?:[-*•]|\d+\.)\s+/gm) || []).length;
+  const metaHits = [
+    '思考',
+    '分析',
+    '回应策略',
+    '可能的反应',
+    '需要注意',
+    '当前角色',
+    '用户喜好',
+    '保持中文回复',
+    '只输出',
+    '不要控制用户'
+  ].filter((token) => raw.includes(token)).length;
+  return metaHits >= 2 || (metaHits >= 1 && bulletCount >= 2);
+}
+
+function looksLikeGroupSpeakerNameEcho(text, member, members) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw || /[。！？.!?]/.test(raw)) return false;
+  const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+  if (lines.length !== 1) return false;
+  const key = normalizeSpeakerTagKey(lines[0]);
+  if (!key) return false;
+  const candidateKeys = new Set();
+  const pushMemberKey = (item) => {
+    const memberKey = normalizeSpeakerTagKey(item && item.name);
+    if (memberKey) candidateKeys.add(memberKey);
+  };
+  pushMemberKey(member);
+  for (const item of (Array.isArray(members) ? members : [])) pushMemberKey(item);
+  for (const candidate of candidateKeys) {
+    if (!candidate) continue;
+    if (key === candidate) return true;
+    if (key.length >= 4 && (candidate.startsWith(key) || key.startsWith(candidate))) return true;
+  }
+  return false;
+}
+
+function looksLikeGroupProfileFragmentReply(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw || /[。！？.!?]/.test(raw)) return false;
+  const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+  if (lines.length !== 1) return false;
+  const line = lines[0];
+  if (line.length > 60) return false;
+  return /^[^\n。！？.!?]{1,24}\s*(?:-|:|：)\s*[^\n。！？.!?]{1,30}$/u.test(line);
+}
+
+function looksLikeGroupPromptFragmentReply(text) {
+  const raw = stripConversationBoundaryMarkers(text);
+  if (!raw) return false;
+  const compact = raw.replace(/\s+/g, '');
+  const exactShortTokens = new Set([
+    '保持',
+    '只',
+    '输出',
+    '回复',
+    '中文',
+    '角色',
+    '规则',
+    '回合',
+    '前缀',
+    '当前',
+    '用户',
+    '当前角色',
+    '当前说话人'
+  ]);
+  if (compact.length <= 6 && exactShortTokens.has(compact)) return true;
+  if (compact === '如果' || compact === '暂无消息') return true;
+
+  const fragmentTokens = [
+    '不要包含未指定角色的括号说明',
+    '未指定角色',
+    '角色语言风格',
+    '基于之前的对话内容',
+    '之前的对话内容',
+    '务必保持',
+    '只写当前角色',
+    '只输出当前角色',
+    '输出当前角色',
+    '当前角色这一轮',
+    '当前说话人是',
+    '最终发言正文',
+    '不要输出前缀',
+    '不要输出规则说明',
+    '不要复读',
+    '不要代替其他角色',
+    '不要替别人说话',
+    '直接接上上文',
+    '自然接话',
+    '代码块',
+    '角色名前缀',
+    '场景说明标题'
+  ];
+  if (raw.includes('避免输出多余信息')) return true;
+  const hits = fragmentTokens.filter((token) => raw.includes(token)).length;
+  if (hits >= 2) return true;
+  if (hits >= 1 && raw.length <= 90) return true;
+
+  const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+  if (!lines.length || lines.length > 2) return false;
+  return lines.every((line) => /^(?:保持|只|输出|回复|中文|规则|回合|当前角色|当前说话人|不要输出|不要包含|务必保持|基于之前的对话内容)/.test(line));
+}
+
+function looksLikeGroupSelfAddressReply(text, member) {
+  const raw = stripConversationBoundaryMarkers(text);
+  const name = String(member && member.name || '').trim();
+  if (!raw || !name) return false;
+  const firstLine = raw.split('\n').map((line) => String(line || '').trim()).find(Boolean) || '';
+  if (!firstLine) return false;
+  const compactLine = firstLine.replace(/\s+/g, '');
+  const compactName = name.replace(/\s+/g, '');
+  if (!compactLine || !compactName || !compactLine.startsWith(compactName)) return false;
+  const rest = compactLine.slice(compactName.length);
+  return /^(?:酱|醬|ちゃん|同学|老师|老師|先生|小姐|宝宝|宝贝|亲|親|呀|啊|呢|啦|嘛|喵)?(?:[，,：:!！?？\s]|$)/.test(rest);
+}
+
+function getGroupAssistantReplyIssue(text, member, members, rawText = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return 'empty';
+  if (isGroupInvalidPlaceholderReply(raw)) return 'empty';
+  if (looksLikeGroupPromptFragmentReply(rawText || raw)) return 'prompt-leak';
+  if (looksLikeGroupPromptLeak(rawText || raw) || looksLikeGroupReasoningOnly(rawText || raw)) return 'prompt-leak';
+  if (isGroupActionOnlyReply(raw)) return 'action-only';
+  if (looksLikeGroupSelfAddressReply(raw, member)) return 'wrong-speaker';
+  if (looksLikeGroupSpeakerNameEcho(raw, member, members) || looksLikeGroupProfileFragmentReply(raw)) return 'too-short';
+  return '';
+}
+
+function looksLikeGroupMetaInstructionLine(line) {
+  const raw = String(line || '').trim();
+  if (!raw) return false;
+  const retryLeakRe = /(?:上(?:一条|一次|次)?回复(?:为空|无效)|请直接输出(?:本次|这一轮|当前轮次|这次).{0,16}(?:完整发言|正式回复|回复正文))/u;
+  if (retryLeakRe.test(raw)) return true;
+  if (looksLikeGroupPromptLeak(raw)) return true;
+  return /(需要注意|可能的反应|只输出|不要控制用户|这是群聊回合|当前为旁观模式|群聊回合规则|输出要求|turnInstruction|relationshipHints|不要代替他人发言|不要写多轮对话脚本|这是群聊中的单个角色回合|这是群聊，当前发言者是|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|保持中文回复|必须使用中文|请使用中文|用中文回答|你扮演|请扮演|角色设定|身份设定|历史参考记录|模仿其说话语气|回合补充要求|上一次回复为空或无效|检测到群聊陷入短句重复)/.test(raw);
+}
+
+function extractGroupReplyBestEffortContent(text, member, members) {
+  const raw = stripConversationBoundaryMarkers(text);
   if (!raw) return '';
-  const lines = raw.split('\n');
+  const sanitized = sanitizeGroupSpeakerReplyContent(raw, member, members).trim();
+  if (sanitized && !isGroupInvalidPlaceholderReply(sanitized) && !looksLikeGroupPromptLeak(sanitized)) {
+    return sanitized;
+  }
+  const lines = raw
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  if (!lines.length) return '';
+  const kept = [];
+  let seenBody = false;
+  for (const line of lines) {
+    const parsed = parseGroupReplyTaggedLine(line);
+    if (parsed && !String(parsed.text || '').trim()) continue;
+    if (!seenBody && looksLikeGroupMetaInstructionLine(line)) continue;
+    if (!seenBody && /^\s*(?:[-*•]|\d+\.)\s+/.test(line) && looksLikeGroupMetaInstructionLine(line.replace(/^\s*(?:[-*•]|\d+\.)\s+/, ''))) {
+      continue;
+    }
+    const nextLine = parsed ? String(parsed.text || '').trim() : line;
+    if (!nextLine) continue;
+    seenBody = true;
+    kept.push(nextLine);
+  }
+  const candidate = dedupeRepeatedLines(kept, 1).join('\n').trim();
+  if (!candidate) return '';
+  if (isGroupInvalidPlaceholderReply(candidate)) return '';
+  if (looksLikeGroupPromptLeak(candidate) && candidate.length < 240) return '';
+  return candidate;
+}
+
+function extractGroupReplyVisibleFallback(text, member, members) {
+  const raw = stripConversationBoundaryMarkers(text);
+  if (!raw) return '';
+  const sanitized = sanitizeGroupSpeakerReplyContent(raw, member, members).trim();
+  if (sanitized && !isGroupInvalidPlaceholderReply(sanitized)) {
+    return sanitized;
+  }
+  const lines = raw
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  if (!lines.length) return '';
+  const kept = [];
+  for (const line of lines) {
+    if (looksLikeGroupMetaInstructionLine(line) && !kept.length) continue;
+    const parsed = parseGroupReplyTaggedLine(line);
+    if (parsed) {
+      const textPart = String(parsed.text || '').trim();
+      if (textPart) {
+        kept.push(textPart);
+      } else if (!isLikelyBareGroupSpeakerTag(line)) {
+        kept.push(line);
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+  let candidate = dedupeRepeatedLines(kept.length ? kept : lines, 1).join('\n').trim();
+  if (!candidate || isGroupInvalidPlaceholderReply(candidate)) return '';
+  if (looksLikeGroupPromptLeak(candidate)) return '';
+  if (candidate.length > 1200) {
+    const slice = candidate.slice(0, 1200);
+    const cutIdx = Math.max(
+      slice.lastIndexOf('\n'),
+      slice.lastIndexOf('。'),
+      slice.lastIndexOf('！'),
+      slice.lastIndexOf('!'),
+      slice.lastIndexOf('？'),
+      slice.lastIndexOf('?')
+    );
+    candidate = (cutIdx > 120 ? slice.slice(0, cutIdx) : slice).trim();
+  }
+  return candidate;
+}
+
+function sanitizeGroupSpeakerReplyContent(content, member, members) {
+  const raw = stripConversationBoundaryMarkers(content);
+  if (!raw) return '';
+  const lines = raw.split('\n').map((line) => trimGroupLineToEmbeddedSpeakerTag(line, member));
   const hasTaggedLines = lines.some(isGroupReplyTaggedLine);
   let collected = [];
   let startedFromTaggedCurrent = false;
@@ -3549,14 +4130,18 @@ function sanitizeGroupSpeakerReplyContent(content, member, members) {
 
   if (hasTaggedLines) {
     for (const line of lines) {
+      if (!seenTaggedBoundary && (looksLikeGroupMetaInstructionLine(line) || looksLikeGroupPromptLeak(line))) {
+        continue;
+      }
       const parsed = parseGroupReplyTaggedLine(line);
       if (!parsed) {
         if (!seenTaggedBoundary) {
+          if (looksLikeGroupMetaInstructionLine(line) || looksLikeGroupPromptLeak(line)) continue;
           // Keep natural untagged opener text before model starts scripting multiple speakers.
           collected.push(String(line || ''));
           continue;
         }
-        if (startedFromTaggedCurrent && collected.length) {
+        if (startedFromTaggedCurrent) {
           collected.push(String(line || ''));
         }
         continue;
@@ -3577,40 +4162,18 @@ function sanitizeGroupSpeakerReplyContent(content, member, members) {
   }
 
   if (!collected.some((l) => String(l || '').trim())) {
-    // If the model scripted multiple speakers and we could not match the current
-    // speaker label (e.g. translated/aliased names), keep only the first tagged
-    // speaker's first segment to avoid preserving a whole dialogue script.
-    if (hasTaggedLines) {
-      let firstSpeakerKey = '';
-      let fallbackCollected = [];
-      for (const line of lines) {
-        const parsed = parseGroupReplyTaggedLine(line);
-        if (!parsed) {
-          if (fallbackCollected.some((l) => String(l || '').trim())) {
-            fallbackCollected.push(String(line || ''));
-          }
-          continue;
-        }
-        const speakerKey = normalizeSpeakerTagKey(parsed.speakerLabel);
-        if (!firstSpeakerKey) firstSpeakerKey = speakerKey;
-        if (speakerKey && firstSpeakerKey && speakerKey !== firstSpeakerKey) {
-          if (fallbackCollected.some((l) => String(l || '').trim())) break;
-          continue;
-        }
-        if (parsed.text) fallbackCollected.push(parsed.text);
-      }
-      if (fallbackCollected.some((l) => String(l || '').trim())) {
-        collected = fallbackCollected;
-      }
-    }
-  }
-
-  if (!collected.some((l) => String(l || '').trim())) {
     collected = [...lines];
   }
 
   collected = dedupeRepeatedLines(collected, 1);
   let text = collected.join('\n').trim();
+  text = stripConversationBoundaryMarkers(text);
+
+  const cleanedLines = text
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter((line, index) => !(index === 0 && (looksLikeGroupMetaInstructionLine(line) || looksLikeGroupPromptLeak(line))));
+  text = cleanedLines.join('\n').trim();
 
   // Strip self-tag prefix that may still remain on first line.
   const firstParsed = parseGroupReplyTaggedLine(text.split('\n')[0] || '');
@@ -3621,7 +4184,7 @@ function sanitizeGroupSpeakerReplyContent(content, member, members) {
   }
 
   // Hard cap group single-turn reply length to reduce runaway output and translation stalls.
-  const hardLimit = 900;
+  const hardLimit = 1800;
   if (text.length > hardLimit) {
     const slice = text.slice(0, hardLimit);
     const cutIdx = Math.max(
@@ -3635,7 +4198,101 @@ function sanitizeGroupSpeakerReplyContent(content, member, members) {
     text = (cutIdx > 120 ? slice.slice(0, cutIdx) : slice).trim();
     if (!/[。！？!?…]$/.test(text)) text += '…';
   }
+  text = stripConversationBoundaryMarkers(text);
   return text || raw;
+}
+
+function findGroupMemberBySpeakerLabel(label, members) {
+  const raw = String(label || '').trim();
+  if (!raw || !Array.isArray(members)) return null;
+  return members.find((member) => member && isCurrentGroupSpeakerLabel(raw, member)) || null;
+}
+
+function splitExplicitTaggedGroupReplySegments(text, currentMember, members) {
+  const raw = stripConversationBoundaryMarkers(text);
+  if (!raw || !currentMember) return [];
+  const validMembers = Array.isArray(members) ? members.filter(Boolean) : [];
+  const tagRe = /[\[\u3010(（]\s*([^\]\u3011)）:\n]{1,80})\s*[\]\u3011)）]\s*[:：]\s*/gu;
+  const matches = [];
+  let match;
+  while ((match = tagRe.exec(raw))) {
+    const targetMember = findGroupMemberBySpeakerLabel(match[1], validMembers);
+    if (!targetMember) continue;
+    matches.push({
+      index: match.index,
+      end: tagRe.lastIndex,
+      member: targetMember
+    });
+  }
+  if (!matches.length) {
+    const single = sanitizeGroupSpeakerReplyContent(raw, currentMember, validMembers).trim();
+    return single && !isGroupInvalidPlaceholderReply(single) && !looksLikeGroupPromptLeak(single)
+      ? [{ member: currentMember, content: single }]
+      : [];
+  }
+
+  const segments = [];
+  const prefix = raw.slice(0, matches[0].index).trim();
+  if (prefix) {
+    segments.push({ member: currentMember, rawContent: prefix });
+  }
+  for (let i = 0; i < matches.length; i += 1) {
+    const current = matches[i];
+    const nextIndex = i + 1 < matches.length ? matches[i + 1].index : raw.length;
+    const body = raw.slice(current.end, nextIndex).trim();
+    if (!body) continue;
+    segments.push({ member: current.member, rawContent: body });
+  }
+
+  const merged = [];
+  for (const item of segments) {
+    const owner = item && item.member ? item.member : currentMember;
+    const content = sanitizeGroupSpeakerReplyContent(item && item.rawContent || '', owner, validMembers).trim()
+      || String(item && item.rawContent || '').trim();
+    if (!content || isGroupInvalidPlaceholderReply(content) || looksLikeGroupPromptLeak(content)) continue;
+    const last = merged[merged.length - 1];
+    if (last && last.member && owner && String(last.member.id || '') === String(owner.id || '')) {
+      last.content = `${last.content}\n${content}`.trim();
+    } else {
+      merged.push({ member: owner, content });
+    }
+  }
+  return merged;
+}
+
+function resolveGroupAssistantReply(message, member, members) {
+  const msg = message && typeof message === 'object' ? message : null;
+  if (!msg) return { content: '', source: '' };
+
+  const contentText = sanitizeGroupSpeakerReplyContent(msg.content || '', member, members).trim();
+  if (!isGroupInvalidPlaceholderReply(contentText) && !looksLikeGroupPromptLeak(contentText)) {
+    return { content: contentText, source: 'content' };
+  }
+  const thinkText = sanitizeGroupSpeakerReplyContent(msg.thinkContent || '', member, members).trim();
+  if (!isGroupInvalidPlaceholderReply(thinkText) && !looksLikeGroupReasoningOnly(thinkText)) {
+    return { content: thinkText, source: 'think' };
+  }
+  const bestEffortContent = extractGroupReplyBestEffortContent(msg.content || '', member, members);
+  if (bestEffortContent) {
+    return { content: bestEffortContent, source: 'content-best-effort' };
+  }
+  const bestEffortThink = extractGroupReplyBestEffortContent(msg.thinkContent || '', member, members);
+  if (bestEffortThink && !looksLikeGroupReasoningOnly(bestEffortThink)) {
+    return { content: bestEffortThink, source: 'think-best-effort' };
+  }
+  const visibleFallback = extractGroupReplyVisibleFallback(msg.content || '', member, members);
+  if (visibleFallback) {
+    return { content: visibleFallback, source: 'content-visible-fallback' };
+  }
+  const thinkVisibleFallback = extractGroupReplyVisibleFallback(msg.thinkContent || '', member, members);
+  if (thinkVisibleFallback) {
+    return { content: thinkVisibleFallback, source: 'think-visible-fallback' };
+  }
+  const rawContent = String(msg.content || '').trim();
+  if (rawContent && !isGroupInvalidPlaceholderReply(rawContent) && !looksLikeGroupPromptLeak(rawContent)) {
+    return { content: rawContent, source: 'content-raw' };
+  }
+  return { content: '', source: '' };
 }
 
 function detectGroupReplyRunawayDuringStream(content, member, members) {
@@ -3659,19 +4316,21 @@ function detectGroupReplyRunawayDuringStream(content, member, members) {
 
   const deduped = dedupeRepeatedLines(lines, 1);
   const removedRepeats = Math.max(0, lines.length - deduped.filter((l) => String(l || '').trim()).length);
-  const hasLoopPattern = removedRepeats >= 2;
-  const hasMultiSpeakerScript = (foreignTaggedCount >= 1 && taggedLines.length >= 2)
-    || (taggedSpeakerKeys.size >= 2 && taggedLines.length >= 2);
-  const tooManyTaggedTurns = taggedLines.length >= 3;
-  const tooLong = trimmed.length > 1400;
+  const hasLoopPattern = removedRepeats >= 5 && trimmed.length >= 220;
+  const hasMultiSpeakerScript = ((foreignTaggedCount >= 2 && taggedLines.length >= 3)
+    || (taggedSpeakerKeys.size >= 2 && taggedLines.length >= 3))
+    && trimmed.length >= 180;
+  const tooManyTaggedTurns = taggedLines.length >= 6 && trimmed.length >= 500;
+  const tooLong = trimmed.length > 4200;
 
-  if (!(hasLoopPattern || hasMultiSpeakerScript || tooManyTaggedTurns || tooLong)) return null;
+  // Do not stop early just because the model starts scripting multiple speakers.
+  // Let the model finish the current turn, then sanitize the final text once.
+  if (!(hasLoopPattern || tooLong)) return null;
 
   let sanitized = sanitizeGroupSpeakerReplyContent(trimmed, member, members);
 
-  const aggressiveCut = hasLoopPattern || hasMultiSpeakerScript || tooManyTaggedTurns;
+  const aggressiveCut = hasLoopPattern;
   if (aggressiveCut) {
-    // Stronger single-turn cutoff only when we detect scripting/looping.
     const firstBlock = String(sanitized || '')
       .split(/\n{2,}/g)
       .map((s) => s.trim())
@@ -3682,28 +4341,27 @@ function detectGroupReplyRunawayDuringStream(content, member, members) {
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
-      .slice(0, 3);
+      .slice(0, 5);
     if (firstLines.length) sanitized = dedupeRepeatedLines(firstLines, 1).join('\n').trim();
 
-    if (!sanitized) sanitized = trimmed.slice(0, 240).trim();
-    if (sanitized.length > 260) {
-      const cut = sanitized.slice(0, 260);
+    if (!sanitized) sanitized = trimmed.slice(0, 520).trim();
+    if (sanitized.length > 560) {
+      const cut = sanitized.slice(0, 560);
       const p = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('!'), cut.lastIndexOf('？'), cut.lastIndexOf('?'), cut.lastIndexOf('\n'));
-      sanitized = (p > 60 ? cut.slice(0, p) : cut).trim();
+      sanitized = (p > 120 ? cut.slice(0, p) : cut).trim();
     }
   } else if (tooLong) {
-    // Legit long single-speaker reply: keep more content, just prevent UI/translation runaway.
-    if (!sanitized) sanitized = trimmed.slice(0, 900).trim();
-    if (sanitized.length > 900) {
-      const cut = sanitized.slice(0, 900);
+    if (!sanitized) sanitized = trimmed.slice(0, 1200).trim();
+    if (sanitized.length > 1200) {
+      const cut = sanitized.slice(0, 1200);
       const p = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('!'), cut.lastIndexOf('？'), cut.lastIndexOf('?'), cut.lastIndexOf('\n'));
-      sanitized = (p > 140 ? cut.slice(0, p) : cut).trim();
+      sanitized = (p > 180 ? cut.slice(0, p) : cut).trim();
     }
   }
   if (sanitized && !/[。！？!?…]$/.test(sanitized)) sanitized += '…';
 
   return {
-    reason: hasLoopPattern ? 'repeat-loop' : (hasMultiSpeakerScript ? 'multi-speaker-script' : (tooLong ? 'too-long' : 'tagged-turns')),
+    reason: hasLoopPattern ? 'repeat-loop' : 'too-long',
     content: sanitized
   };
 }
@@ -3725,7 +4383,7 @@ function detectGroupShortLoopReplyCandidate(session, content, member, options = 
   const key = normalizeGroupLoopComparableText(text);
   if (!key) return null;
   // Only target short replies so normal long roleplay content is unaffected.
-  if (text.length > 120 || key.length > 18) return null;
+  if (text.length > 80 || key.length > 20) return null;
 
   const excludeMessageId = String(options && options.excludeMessageId || '').trim();
   const visible = getVisibleSessionMessages(session)
@@ -3734,7 +4392,7 @@ function detectGroupShortLoopReplyCandidate(session, content, member, options = 
       if (excludeMessageId && String(m.id || '') === excludeMessageId) return false;
       const t = String(m.content || '').trim();
       if (!t) return false;
-      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(t)) return false;
+      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。|本轮没有拿到可显示的群成员回复，请重试。)$/.test(t)) return false;
       return true;
     })
     .slice(-8);
@@ -3746,17 +4404,28 @@ function detectGroupShortLoopReplyCandidate(session, content, member, options = 
     key: normalizeGroupLoopComparableText(m.content || '')
   })).filter((x) => x.key);
 
+  const currentMemberId = String(member && member.id || '').trim();
+  const latest = recent.length ? recent[recent.length - 1] : null;
+  if (latest
+    && latest.key === key
+    && currentMemberId
+    && latest.speakerAvatarId
+    && latest.speakerAvatarId !== currentMemberId) {
+    return {
+      reason: 'duplicate-other-speaker',
+      key,
+      text
+    };
+  }
+
   const sameCount = recent.filter((x) => x.key === key).length;
   const last4 = recent.slice(-4);
   const last4SameCount = last4.filter((x) => x.key === key).length;
   const farewellRe = /(再见|拜拜|回头见|下次见|またね|じゃあね|bye|goodbye|see you)/i;
   const isFarewell = farewellRe.test(text);
   const recentFarewellCount = last4.filter((x) => farewellRe.test(x.text)).length;
-  const alternatesTwoShortKeys = last4.length >= 4
-    && last4.every((x) => x.key.length <= 12)
-    && new Set(last4.map((x) => x.key)).size <= 2;
 
-  if (sameCount >= 2 || last4SameCount >= 1 || (isFarewell && recentFarewellCount >= 1) || alternatesTwoShortKeys) {
+  if (sameCount >= 3 || last4SameCount >= 2 || (isFarewell && recentFarewellCount >= 2)) {
     return {
       reason: isFarewell ? 'farewell-loop' : (sameCount >= 2 ? 'repeat-short' : 'short-loop'),
       key,
@@ -3773,7 +4442,7 @@ function buildGroupLoopBreakHint(session) {
       if (!(m && m.kind === 'chat' && m.role === 'assistant' && m.speakerAvatarId)) return false;
       const text = String(m.content || '').trim();
       if (!text) return false;
-      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(text)) return false;
+      if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。|本轮没有拿到可显示的群成员回复，请重试。)$/.test(text)) return false;
       return true;
     })
     .slice(-8);
@@ -3797,6 +4466,38 @@ function buildGroupLoopBreakHint(session) {
     return '注意：最近群聊出现重复寒暄/重复句循环。请换一个新话题或推进情节，不要继续重复“再见/好的/嗯嗯”等短句。';
   }
   return '';
+}
+
+function cleanupInvalidGroupAssistantMessages(session) {
+  if (!session || !Array.isArray(session.messages) || !session.messages.length) return false;
+  const boundAvatar = session.avatarId ? getAvatarById(session.avatarId) : null;
+  const groupMembers = boundAvatar && boundAvatar.type === 'group'
+    ? getGroupMembers(boundAvatar)
+    : [];
+  const before = session.messages.length;
+  session.messages = session.messages.filter((m) => {
+    if (!(m && m.kind === 'chat' && m.role === 'assistant' && m.speakerAvatarId)) return true;
+    const member = groupMembers.find((item) => String(item && item.id || '') === String(m.speakerAvatarId || '')) || null;
+    const resolved = resolveGroupAssistantReply(m, member, groupMembers);
+    if (resolved.content) {
+      m.content = resolved.content;
+      m.isThinking = false;
+      if (resolved.source === 'think') m.thinkContent = undefined;
+      return true;
+    }
+    return true;
+  });
+  session.messages = session.messages.filter((m) => {
+    if (!(m && m.kind === 'chat' && m.role === 'assistant' && m.speakerAvatarId)) return true;
+    const contentText = String(m.content || '').trim();
+    if (state.ui.chatStreaming && !contentText && m.isThinking) return true;
+    const member = groupMembers.find((item) => String(item && item.id || '') === String(m.speakerAvatarId || '')) || null;
+    return !getGroupAssistantReplyIssue(contentText, member, groupMembers, contentText);
+  });
+  if (session.messages.length === before) return false;
+  try { ensureSessionMessageTreeState(session); } catch (_) { }
+  touchSession(session);
+  return true;
 }
 
 function getAvatarScenarioDraftItems() {
@@ -3865,10 +4566,12 @@ function loadAvatars() {
         return avatar;
       })
       : [];
+    repairAllGroupAvatars();
   } catch (_) { state.avatars = []; }
 }
 
 function persistAvatars() {
+  repairAllGroupAvatars();
   localStorage.setItem(STORAGE_AVATARS_KEY, JSON.stringify(state.avatars));
 }
 
@@ -3915,6 +4618,7 @@ function updateAvatar(id, data) {
 
 function deleteAvatar(id) {
   state.avatars = state.avatars.filter((a) => a.id !== id);
+  repairAllGroupAvatars();
   state.sessions.forEach((s) => {
     if (s.avatarId === id) s.avatarId = null;
     if (s.contactOwnerAvatarId === id) delete s.contactOwnerAvatarId;
@@ -3930,25 +4634,41 @@ function resolveContactSession(avatarId, options = {}) {
   if (!avatar) return null;
 
   let session = null;
+  let clearedStaleBinding = false;
   if (avatar.contactSessionId) {
-    session = state.sessions.find((s) => s.id === avatar.contactSessionId && s.avatarId === avatarId) || null;
+    session = state.sessions.find((s) => s.id === avatar.contactSessionId && s.contactOwnerAvatarId === avatarId) || null;
+    if (!session) {
+      avatar.contactSessionId = '';
+      clearedStaleBinding = true;
+    }
+  }
+
+  const activeSession = getActiveSession();
+  if (!session && activeSession && String(activeSession.contactOwnerAvatarId || '') === String(avatarId || '')) {
+    session = activeSession;
   }
 
   if (!session) {
-    const candidates = state.sessions.filter((s) => s.avatarId === avatarId);
-    session = candidates.find((s) => s.contactOwnerAvatarId === avatarId) || null;
-    if (!session) {
-      session = candidates.find((s) => String(s.title || '').trim() === String(avatar.name || '').trim()) || null;
+    const candidates = state.sessions.filter((s) => String(s && s.contactOwnerAvatarId || '') === String(avatarId || ''));
+    if (activeSession && String(activeSession.contactOwnerAvatarId || '') === String(avatarId || '')) {
+      session = candidates.find((s) => s && s.id === activeSession.id) || null;
     }
-    if (!session && candidates.length) {
-      // Fallback to the oldest bound session; imported contact session is usually the earliest one.
-      session = candidates.slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))[0];
+    if (!session) {
+      session = candidates.find((s) => String(s && s.id || '') === String(avatar.contactSessionId || '')) || null;
+    }
+    if (!session) {
+      session = candidates.length
+        ? candidates.slice().sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))[0]
+        : null;
     }
     if (session) {
+      if (session.avatarId !== avatarId) session.avatarId = avatarId;
       session.contactOwnerAvatarId = avatarId;
       avatar.contactSessionId = session.id;
       persistAvatars();
       persistSessionsState();
+    } else if (clearedStaleBinding) {
+      persistAvatars();
     }
   }
 
@@ -3967,7 +4687,27 @@ function resolveContactSession(avatarId, options = {}) {
     }
   }
 
-  if (session && focus) {
+  if (session) {
+    let changed = false;
+    if (session.avatarId !== avatarId) {
+      session.avatarId = avatarId;
+      changed = true;
+    }
+    if (session.contactOwnerAvatarId !== avatarId) {
+      session.contactOwnerAvatarId = avatarId;
+      changed = true;
+    }
+    if (avatar.contactSessionId !== session.id) {
+      avatar.contactSessionId = session.id;
+      changed = true;
+    }
+    if (changed) {
+      persistAvatars();
+      persistSessionsState();
+    }
+  }
+
+  if (session && focus && state.activeSessionId !== session.id) {
     switchSession(session.id);
   }
   return session;
@@ -4261,33 +5001,37 @@ function renderContactList() {
       ? `<img src="${iconVal}" alt="avatar">`
       : iconVal;
     const boundSession = resolveContactSession(a.id, { createIfMissing: false, focus: false });
-    const preview = boundSession ? getOverlaySessionPreview(boundSession) : (getUiPack().noMessages || 'No messages');
+    const validGroupMembers = isGroup ? getGroupMembers(a) : [];
+    const preview = isGroup && validGroupMembers.length < 2
+      ? uiText(`当前仅 ${validGroupMembers.length} 个有效成员，请重新建群`, `Only ${validGroupMembers.length} valid member(s). Recreate this group.`)
+      : (boundSession ? getOverlaySessionPreview(boundSession) : (getUiPack().noMessages || 'No messages'));
     const badge = isGroup ? '<span class="contact-badge">群组</span>' : '';
     const isActive = activeAvatarId && a.id === activeAvatarId;
     const activeItemStyle = isActive
       ? 'background:linear-gradient(180deg, rgba(239,246,255,.95), rgba(238,242,255,.92)); border-color:rgba(59,130,246,.35); box-shadow:0 0 0 1px rgba(59,130,246,.22), 0 8px 18px rgba(59,130,246,.12);'
       : '';
-    const activeShortcutStyle = isActive
-      ? 'background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.28);box-shadow:0 0 0 1px rgba(59,130,246,.12) inset;'
-      : '';
+    const activeShortcutClass = isActive ? ' active' : '';
+    const lorebookTitle = uiText('世界观书', 'Lorebook');
+    const inviteTitle = uiText('邀请成员', 'Invite members');
     return `
-      <div class="contact-item-row" style="display:flex;align-items:stretch;gap:8px;">
-        <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}" style="flex:1;min-width:0;${activeItemStyle}">
+      <div class="contact-row">
+        <button class="contact-item${isActive ? ' active' : ''}" data-action="open-contact" data-avatar-id="${a.id}" type="button" aria-pressed="${isActive ? 'true' : 'false'}" style="${activeItemStyle}">
           <span class="contact-icon">${iconHtml}</span>
           <div class="contact-info">
             <div class="contact-name">${escapeHtml(a.name)} ${badge}</div>
             <div class="contact-preview">${escapeHtml(preview)}</div>
           </div>
         </button>
-        <button
-          class="btn ghost contact-lorebook-shortcut-btn"
-          data-action="open-contact-lorebook"
-          data-avatar-id="${a.id}"
-          type="button"
-          title="打开 ${escapeHtml(a.name)} 的世界观书（Lorebook）"
-          aria-label="打开 ${escapeHtml(a.name)} 的世界观书"
-          style="padding:0 10px;min-width:44px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-size:18px;${activeShortcutStyle}"
-        >📚</button>
+        <div class="contact-row-actions">
+          <button class="contact-shortcut-btn${activeShortcutClass}" data-action="open-contact-lorebook" data-avatar-id="${a.id}" type="button" title="${escapeHtml(lorebookTitle)}" aria-label="${escapeHtml(lorebookTitle)}">
+            <span aria-hidden="true">📚</span>
+          </button>
+          ${isGroup ? `
+            <button class="contact-shortcut-btn contact-invite-btn${activeShortcutClass}" data-action="edit-group-members" data-avatar-id="${a.id}" type="button" title="${escapeHtml(inviteTitle)}" aria-label="${escapeHtml(inviteTitle)}">
+              <span aria-hidden="true">＋</span>
+            </button>
+          ` : ''}
+        </div>
       </div>
     `;
   }).join('');
@@ -4313,20 +5057,65 @@ function openContact(avatarId) {
   if (els.chatInput) els.chatInput.focus();
 }
 
-function openGroupDialog() {
-  if (!els.groupDialog) return;
-  if (els.groupNameInput) els.groupNameInput.value = '';
-  renderGroupMemberList();
-  els.groupDialog.showModal();
+function getEffectiveActiveContactAvatarId() {
+  const explicit = String(state.ui.activeContactAvatarId || '').trim();
+  const activeSession = getActiveSession();
+  const activeContactOwnerId = String(activeSession && activeSession.contactOwnerAvatarId || '').trim();
+  if (activeContactOwnerId) {
+    if (!explicit || explicit !== activeContactOwnerId) return activeContactOwnerId;
+  }
+  if (explicit) return explicit;
+  return String(activeSession && activeSession.avatarId || '').trim();
 }
 
-function renderGroupMemberList() {
+function getEditingGroupId() {
+  return String((els.groupDialog && els.groupDialog.dataset && els.groupDialog.dataset.editGroupId) || '').trim();
+}
+
+function refreshGroupDialogUi(editingGroup) {
+  const title = els.groupDialog ? els.groupDialog.querySelector('h3') : null;
+  if (title) title.textContent = editingGroup ? uiText('编辑群组', 'Edit Group') : getUiPack().groupDialogTitle;
+  if (els.groupSaveBtn) els.groupSaveBtn.textContent = editingGroup ? uiText('保存群组', 'Save Group') : uiText('保存', 'Save');
+  if (els.groupMemberLabel) {
+    els.groupMemberLabel.textContent = uiText('选择成员（可随时增减，群聊至少 2 个）', 'Members (editable anytime, at least 2 for group chat)');
+  }
+  if (els.groupMemberHint) {
+    els.groupMemberHint.textContent = editingGroup
+      ? uiText('这个群组已经创建好了，后续可以随时在这里邀请新的单人角色进群或移除成员。这里只显示可邀请的单人角色。', 'This group already exists. You can invite more single-avatar contacts here anytime or remove members. Only inviteable single avatars are listed.')
+      : uiText('群组创建后也可以随时邀请新的单人角色进群；这里只显示可邀请的单人角色。', 'After creation, you can still invite more single-avatar contacts here anytime. Only inviteable single avatars are listed.');
+  }
+}
+
+function openGroupDialog(groupId = '') {
+  if (!els.groupDialog) return;
+  const editingGroup = groupId ? getAvatarById(groupId) : null;
+  stopComposerFocusRecovery();
+  if (els.groupDialog.dataset) els.groupDialog.dataset.editGroupId = editingGroup && editingGroup.type === 'group' ? editingGroup.id : '';
+  if (els.groupNameInput) els.groupNameInput.value = editingGroup && editingGroup.type === 'group' ? String(editingGroup.name || '') : '';
+  renderGroupMemberList(editingGroup && editingGroup.type === 'group' ? editingGroup.memberIds : []);
+  refreshGroupDialogUi(editingGroup && editingGroup.type === 'group' ? editingGroup : null);
+  try {
+    els.groupDialog.showModal();
+  } catch (_) {
+    els.groupDialog.open = true;
+  }
+  window.setTimeout(() => {
+    if (!els.groupDialog || !els.groupDialog.open || !els.groupNameInput) return;
+    try {
+      els.groupNameInput.focus();
+      els.groupNameInput.select();
+    } catch (_) { }
+  }, 0);
+}
+
+function renderGroupMemberList(selectedIds = []) {
   if (!els.groupMemberList) return;
   const singles = state.avatars.filter((a) => a.type !== 'group');
   if (!singles.length) {
     els.groupMemberList.innerHTML = '<div class="muted">先创建角色才能建群</div>';
     return;
   }
+  const selectedSet = new Set((Array.isArray(selectedIds) ? selectedIds : []).map((id) => String(id || '').trim()).filter(Boolean));
   els.groupMemberList.innerHTML = singles.map((a) => {
     const iconVal = a.icon || '😀';
     const iconHtml = iconVal.startsWith('data:image')
@@ -4334,7 +5123,7 @@ function renderGroupMemberList() {
       : iconVal;
     return `
       <label class="group-member-item">
-        <input type="checkbox" value="${a.id}">
+        <input type="checkbox" value="${a.id}" ${selectedSet.has(String(a.id || '').trim()) ? 'checked' : ''}>
         ${iconHtml} ${escapeHtml(a.name)}
       </label>
     `;
@@ -4345,26 +5134,46 @@ function saveGroup() {
   const name = (els.groupNameInput?.value || '').trim();
   if (!name) { alert('请输入群组名称'); return; }
   const checked = els.groupMemberList.querySelectorAll('input[type="checkbox"]:checked');
-  const memberIds = Array.from(checked).map((cb) => cb.value);
+  const memberIds = Array.from(new Set(
+    Array.from(checked)
+      .map((cb) => String(cb.value || '').trim())
+      .filter(Boolean)
+  )).filter((id) => {
+    const avatar = getAvatarById(id);
+    return Boolean(avatar && avatar.type !== 'group');
+  });
   if (memberIds.length < 2) { alert('至少选择两个成员'); return; }
-  const now = Date.now();
-  const group = {
-    id: `av_${now}_${Math.random().toString(36).slice(2, 8)}`,
-    type: 'group',
-    name,
-    icon: '👥',
-    relationship: '',
-    customPrompt: '',
-    memoryText: '',
-    memberIds,
-    createdAt: now
-  };
-  ensureGroupChatSettings(group);
-  state.avatars.unshift(group);
+  const editId = getEditingGroupId();
+  const editingGroup = editId ? getAvatarById(editId) : null;
+  if (editingGroup && editingGroup.type === 'group') {
+    editingGroup.name = name;
+    editingGroup.memberIds = memberIds;
+    editingGroup.updatedAt = Date.now();
+    ensureGroupChatSettings(editingGroup);
+  } else {
+    const now = Date.now();
+    const group = {
+      id: `av_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      type: 'group',
+      name,
+      icon: '👥',
+      relationship: '',
+      customPrompt: '',
+      memoryText: '',
+      memberIds,
+      createdAt: now
+    };
+    ensureGroupChatSettings(group);
+    state.avatars.unshift(group);
+  }
   persistAvatars();
+  if (els.groupDialog.dataset) els.groupDialog.dataset.editGroupId = '';
+  refreshGroupDialogUi(null);
   els.groupDialog.close();
   renderContactList();
   renderAvatarSelectPanel();
+  renderDrawer();
+  renderMessages();
 }
 
 /* ── Avatar UI (设置面板 + 选择器) ── */
@@ -5363,6 +6172,14 @@ function renderAvatarSelectPanel() {
 function applyAvatarSelection(avatarId) {
   const session = getActiveSession();
   if (!session) return;
+  if (isContactDedicatedSession(session)) {
+    if (!avatarId) {
+      alert('联系人会话不能移除角色绑定。');
+      return;
+    }
+    openContact(avatarId);
+    return;
+  }
   session.avatarId = avatarId || null;
   touchSession(session);
   persistSessionsState();
@@ -5402,6 +6219,20 @@ function syncMaterialsFromSession() { }
 
 function updateCharHint() { }
 
+function getSanitizedGroupAssistantText(session, message, sourceText = '') {
+  const raw = String(sourceText || (message && message.content) || '').trim();
+  if (!message || !message.speakerAvatarId) return stripConversationBoundaryMarkers(raw);
+  const boundAvatar = session && session.avatarId ? getAvatarById(session.avatarId) : null;
+  const groupMembers = boundAvatar && boundAvatar.type === 'group'
+    ? getGroupMembers(boundAvatar)
+    : [];
+  const member = groupMembers.find((item) => String(item && item.id || '') === String(message.speakerAvatarId || ''))
+    || getAvatarById(message.speakerAvatarId)
+    || null;
+  const cleaned = sanitizeGroupSpeakerReplyContent(raw, member, groupMembers).trim();
+  return cleaned || stripConversationBoundaryMarkers(raw);
+}
+
 function isAvatarTranslationOverlayEnabled(session) {
   return Boolean(
     session &&
@@ -5416,7 +6247,14 @@ function getSessionPreviewForUi(session) {
   const visibleMessages = getVisibleSessionMessages(session);
   if (!session) return getSessionPreview(session);
   if (!visibleMessages.length) return getSessionPreview(session);
-  const pseudoSession = { ...session, messages: visibleMessages };
+  const previewMessages = visibleMessages.map((message) => {
+    if (!(message && message.role === 'assistant' && message.speakerAvatarId)) return message;
+    return {
+      ...message,
+      content: getSanitizedGroupAssistantText(session, message)
+    };
+  });
+  const pseudoSession = { ...session, messages: previewMessages };
   return getSessionPreview(pseudoSession);
 }
 
@@ -5458,7 +6296,8 @@ function getMessageTranslationError(message, lang) {
   return {
     source: String(entry.source || ''),
     message: String(entry.message || ''),
-    failedAt: Number(entry.failedAt || 0) || 0
+    failedAt: Number(entry.failedAt || 0) || 0,
+    silent: Boolean(entry.silent)
   };
 }
 
@@ -5467,7 +6306,7 @@ function clearMessageTranslationError(message, lang) {
   delete message.translationErrorsByLang[lang];
 }
 
-function setMessageTranslationError(message, lang, sourceText, errorText) {
+function setMessageTranslationError(message, lang, sourceText, errorText, options = {}) {
   if (!message || !lang) return;
   if (!message.translationErrorsByLang || typeof message.translationErrorsByLang !== 'object') {
     message.translationErrorsByLang = {};
@@ -5475,7 +6314,8 @@ function setMessageTranslationError(message, lang, sourceText, errorText) {
   message.translationErrorsByLang[lang] = {
     source: String(sourceText || ''),
     message: String(errorText || '翻译失败'),
-    failedAt: Date.now()
+    failedAt: Date.now(),
+    silent: Boolean(options && options.silent)
   };
 }
 
@@ -5495,7 +6335,10 @@ function getOverlayDisplayContent(session, message) {
   if (!isTranslatableAssistantMessage(session, message)) return raw;
   const lang = String(state.settings.translateTo || 'zh-CN');
   const cached = getMessageTranslationCache(message, lang);
-  if (cached && cached.text && cached.source === raw) return cached.text;
+  if (cached && cached.text && cached.source === raw) {
+    if (!isSuspiciousOverlayTranslation(raw, cached.text, lang)) return cached.text;
+    return raw;
+  }
   const pendingKey = getOverlayTranslationTaskKey(session.id, message.id, lang, raw);
   if (translationOverlayRuntime.pending.has(pendingKey)) {
     return `${raw}\n\n[翻译中…]`;
@@ -5504,6 +6347,7 @@ function getOverlayDisplayContent(session, message) {
   if (err && err.source === raw) {
     const age = Date.now() - Number(err.failedAt || 0);
     if (age < Number(translationOverlayRuntime.failureCooldownMs || 12000)) {
+      if (err.silent) return raw;
       return `${raw}\n\n[翻译失败：${err.message || '请稍后重试'}]`;
     }
   }
@@ -5614,6 +6458,52 @@ function scheduleOverlayTranslationRefresh(sessionId) {
   }, 40);
 }
 
+const OVERLAY_TRANSLATE_NAME_TOKEN = "[A-Za-z\\u3400-\\u9fff][A-Za-z0-9_\\-.'\\u2019\\u00b7\\u3400-\\u9fff]{0,40}";
+const OVERLAY_TRANSLATE_JP_HONORIFICS = "(?:\\u3061\\u3083\\u3093|\\u304f\\u3093|\\u3055\\u3093|\\u3055\\u307e|\\u69d8|\\u5148\\u8f29|\\u5f8c\\u8f29)";
+const OVERLAY_TRANSLATE_KR_HONORIFICS = "(?:\\uc624\\ube60|\\uc5b8\\ub2c8|\\ub204\\ub098|\\ud615|\\uc120\\ubc30)";
+const OVERLAY_TRANSLATE_ANY_HONORIFIC_RE = new RegExp(`(?:${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:${OVERLAY_TRANSLATE_JP_HONORIFICS}|${OVERLAY_TRANSLATE_KR_HONORIFICS})`);
+const OVERLAY_TRANSLATE_LONG_FOREIGN_SEGMENT_RE = /[\u3040-\u30ff]{4,}|[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]{4,}/;
+
+function normalizeHonorificsForOverlayChinese(text) {
+  return String(text || '').trim()
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u3061\\u3083\\u3093`, 'g'), '$1\u9171')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u304f\\u3093`, 'g'), '$1\u541b')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:\\u3055\\u3093|\\u3055\\u307e|\\u69d8)`, 'g'), '$1')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u5148\\u8f29`, 'g'), '$1\u524d\u8f88')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u5f8c\\u8f29`, 'g'), '$1\u540e\u8f88')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\uc624\\ube60`, 'g'), '$1\u6b27\u5df4')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:\\uc5b8\\ub2c8|\\ub204\\ub098)`, 'g'), '$1\u59d0\u59d0')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\ud615`, 'g'), '$1\u54e5')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\uc120\\ubc30`, 'g'), '$1\u524d\u8f88')
+    .trim();
+}
+
+function stripOverlayHonorificsForHeuristic(text) {
+  return String(text || '')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*${OVERLAY_TRANSLATE_JP_HONORIFICS}`, 'g'), '$1')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*${OVERLAY_TRANSLATE_KR_HONORIFICS}`, 'g'), '$1');
+}
+
+function getDirectNormalizedOverlayTranslation(text, targetLang) {
+  const raw = String(text || '').trim();
+  if (!raw || String(targetLang || '').trim() !== 'zh-CN') return '';
+
+  const normalized = normalizeHonorificsForOverlayChinese(raw);
+  const stripped = stripOverlayHonorificsForHeuristic(raw);
+  const chineseChars = (stripped.match(/[\u3400-\u9fff]/g) || []).length;
+  const kanaChars = (stripped.match(/[\u3040-\u30ff]/g) || []).length;
+  const hangulChars = (stripped.match(/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/g) || []).length;
+  const latinWords = (stripped.match(/[A-Za-z]{3,}/g) || []).length;
+  const mostlyChinese =
+    chineseChars >= 4 &&
+    chineseChars >= Math.max(1, (kanaChars + hangulChars) * 2) &&
+    !OVERLAY_TRANSLATE_LONG_FOREIGN_SEGMENT_RE.test(stripped) &&
+    latinWords <= 4;
+
+  if (!mostlyChinese) return '';
+  return OVERLAY_TRANSLATE_ANY_HONORIFIC_RE.test(raw) ? normalized : '';
+}
+
 function likelyNeedsVisibleTranslation(sourceText, targetLang) {
   const src = String(sourceText || '').trim();
   const target = String(targetLang || '');
@@ -5621,14 +6511,70 @@ function likelyNeedsVisibleTranslation(sourceText, targetLang) {
   if (target === 'en-US') return false;
   const latinWords = (src.match(/[A-Za-z]{3,}/g) || []).length;
   const cjkChars = (src.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
-  return latinWords >= 6 && cjkChars < 6;
+  const kanaChars = (src.match(/[\u3040-\u30ff]/g) || []).length;
+  const hangulChars = (src.match(/[\uac00-\ud7af]/g) || []).length;
+  const cyrillicChars = (src.match(/[\u0400-\u04ff]/g) || []).length;
+  if (latinWords >= 6 && cjkChars < 6) return true;
+  if (target !== 'ja-JP' && kanaChars >= 2) return true;
+  if (target !== 'ko-KR' && hangulChars >= 2) return true;
+  if (target !== 'ru-RU' && cyrillicChars >= 4) return true;
+  return false;
 }
 
 function isLikelyUntranslatedResult(sourceText, translatedText, targetLang) {
   const src = String(sourceText || '').trim();
   const out = String(translatedText || '').trim();
   if (!src || !out) return true;
+  if (hasLikelyUntranslatedHonorifics(out, targetLang)) return true;
   if (out === src) return likelyNeedsVisibleTranslation(src, targetLang);
+  return false;
+}
+
+function normalizeOverlayCompactText(text) {
+  return String(text || '').replace(/\s+/g, '').trim();
+}
+
+function hasLikelyUntranslatedHonorifics(text, targetLang) {
+  const raw = String(text || '').trim();
+  const target = String(targetLang || '').trim();
+  if (!raw || target === 'ja-JP') return false;
+  const jpHonorificRe = /(?:[A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*(?:ちゃん|くん|さん|さま|様|先輩|後輩)/;
+  if (jpHonorificRe.test(raw)) return true;
+  if (target !== 'ko-KR') {
+    const krHonorificRe = /(?:[A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*(?:오빠|언니|누나|형|선배)/;
+    if (krHonorificRe.test(raw)) return true;
+  }
+  return false;
+}
+
+function isSuspiciousOverlayTranslation(sourceText, translatedText, targetLang) {
+  const src = String(sourceText || '').trim();
+  const out = String(translatedText || '').trim();
+  if (!src || !out) return true;
+  if (/[�]/.test(out) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(out)) return true;
+  if (isLikelyUntranslatedResult(src, out, targetLang)) return true;
+
+  if (hasLikelyUntranslatedHonorifics(out, targetLang)) return true;
+  const compactSrc = normalizeOverlayCompactText(src);
+  const compactOut = normalizeOverlayCompactText(out);
+  const sourceSentenceCount = (src.match(/[。！？.!?]/g) || []).length;
+  const outputSentenceCount = (out.match(/[。！？.!?]/g) || []).length;
+  const sourceLooksSubstantial = compactSrc.length >= 36 || sourceSentenceCount >= 2;
+  if (!sourceLooksSubstantial) return false;
+
+  if (/^[*（(【\[][^*（）()\[\]【】\n]{1,24}[*）)】\]]?$/.test(out)) return true;
+  if (sourceSentenceCount >= 2
+    && compactOut.length <= 10) {
+    return true;
+  }
+  if (compactOut.length <= Math.max(8, Math.floor(compactSrc.length * 0.05)) && outputSentenceCount === 0) {
+    return true;
+  }
+  if (/[A-Za-z]{8,}/.test(src)
+    && /[\u3400-\u9fff\uf900-\ufaff]/.test(out)
+    && compactOut.length <= 8) {
+    return true;
+  }
   return false;
 }
 
@@ -5723,6 +6669,8 @@ async function requestOverlayTranslationContent(task, fastMode, timeoutMs) {
 
 async function requestOverlayTranslationWithRetry(task, sourceText, opts = {}) {
   const chunkTask = sourceText === task.sourceText ? task : { ...task, sourceText };
+  const directNormalized = getDirectNormalizedOverlayTranslation(sourceText, task.lang);
+  if (directNormalized) return directNormalized;
   let translated = await requestOverlayTranslationContent(
     chunkTask,
     true,
@@ -5828,6 +6776,12 @@ async function runOverlayTranslationTask(task) {
 
   let translated = await translateOverlayTaskSourceWithChunking(task);
   if (!translated) return;
+  if (isSuspiciousOverlayTranslation(task.sourceText, translated, task.lang)) {
+    setMessageTranslationError(message, task.lang, task.sourceText, '翻译结果异常，已回退原文', { silent: true });
+    scheduleOverlayTranslationPersist();
+    scheduleOverlayTranslationRefresh(session.id);
+    return;
+  }
   clearMessageTranslationError(message, task.lang);
 
   setMessageTranslationCache(message, task.lang, task.sourceText, translated);
@@ -5870,20 +6824,29 @@ function renderMessages() {
     const avatarHtml = avatarVal.startsWith('data:image')
       ? `<img src="${avatarVal}" alt="avatar">`
       : avatarVal;
-    const displayText = role === 'assistant'
+    let displayText = role === 'assistant'
       ? getOverlayDisplayContent(session, message)
       : String(message.content || '');
-    const content = role === 'assistant'
-      ? renderAssistantMessageContent(displayText || '')
-      : escapeHtml(displayText || '').replace(/\n/g, '<br>');
+    if (role === 'assistant' && message.speakerAvatarId) {
+      displayText = getSanitizedGroupAssistantText(session, message, displayText);
+    }
     const isStreaming = state.ui.chatStreaming && role === 'assistant' && !message.content;
+    const showAssistantLoading = role === 'assistant'
+      && !String(displayText || '').trim()
+      && (message.isThinking || isStreaming);
+    const content = role === 'assistant'
+      ? (showAssistantLoading
+        ? '<div class="msg-loading-inline"><div class="thinking-indicator"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span> 正在回复</div></div>'
+        : renderAssistantMessageContent(displayText || ''))
+      : escapeHtml(displayText || '').replace(/\n/g, '<br>');
+    const allowThinkingBlock = role === 'assistant' && !message.speakerAvatarId && !session.avatarId;
     let thinkHtml = '';
-    if (message.isThinking || isStreaming) {
+    if (allowThinkingBlock && (message.isThinking || isStreaming)) {
       const partialThink = message.thinkContent
         ? `<div class="think-body">${escapeHtml(message.thinkContent)}</div>`
         : '';
       thinkHtml = `<details class="think-block thinking-active"><summary><div class="thinking-indicator"><span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span> thinking</div></summary>${partialThink}</details>`;
-    } else if (message.thinkContent) {
+    } else if (allowThinkingBlock && message.thinkContent) {
       thinkHtml = `<details class="think-block"><summary>思考过程</summary><div class="think-body">${escapeHtml(message.thinkContent)}</div></details>`;
     }
     let toolCallsHtml = '';
@@ -6167,7 +7130,8 @@ function buildChatPayloadMessages(session, options = {}) {
       if (m.role === 'assistant' && m.speakerAvatarId) {
         const text = String(m.content || '').trim();
         if (!text) return false;
-        if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。)$/.test(text)) return false;
+        if (looksLikeGroupPromptLeak(text)) return false;
+        if (/^(未收到有效回复，请重试。|本轮未生成有效回复（已跳过该角色本轮发言）。|本轮没有拿到可显示的群成员回复，请重试。)$/.test(text)) return false;
       }
       return true;
     });
@@ -6185,6 +7149,114 @@ function buildChatPayloadMessages(session, options = {}) {
     .filter((m) => m.content.length > 0);
 }
 
+function buildGroupPayloadMessages(session, memberCount) {
+  const visibleMessages = getVisibleSessionMessages(session);
+  const boundAvatar = session && session.avatarId ? getAvatarById(session.avatarId) : null;
+  const groupMembers = boundAvatar && boundAvatar.type === 'group'
+    ? getGroupMembers(boundAvatar)
+    : [];
+  const filtered = visibleMessages
+    .filter((m) => {
+      if (!(m && m.kind === 'chat' && (m.role === 'user' || m.role === 'assistant'))) return false;
+      if (m.excludeFromContext) return false;
+      if (m.role === 'assistant') {
+        if (!m.speakerAvatarId) return false;
+        const member = groupMembers.find((item) => String(item && item.id || '') === String(m.speakerAvatarId || '')) || null;
+        const text = getSanitizedGroupAssistantText(session, m, m.content);
+        if (!text) return false;
+        if (looksLikeGroupPromptLeak(text)) return false;
+        if (isGroupInvalidPlaceholderReply(text)) return false;
+        if (looksLikeGroupSelfAddressReply(text, member)) return false;
+      }
+      return true;
+    });
+  const safeMemberCount = Math.max(2, Number(memberCount) || 2);
+  const maxEntries = Math.max(8, Math.min(24, safeMemberCount * 4));
+  return filtered
+    .slice(-maxEntries)
+    .map((m) => {
+      let content = String(m.content || '').trim();
+      if (m.role === 'assistant' && m.speakerAvatarId) {
+        content = getSanitizedGroupAssistantText(session, m, content);
+        const speaker = getAvatarById(m.speakerAvatarId);
+        if (speaker) content = `[${speaker.name}]: ${content}`;
+      } else if (m.role === 'user') {
+        content = `[用户]: ${stripConversationBoundaryMarkers(content)}`;
+      }
+      return { role: 'user', content };
+    })
+    .filter((m) => String(m && m.content || '').trim());
+}
+
+function trimGroupPayloadMessages(messages, memberCount) {
+  const src = Array.isArray(messages) ? messages.filter(Boolean) : [];
+  if (!src.length) return [];
+  const safeMemberCount = Math.max(2, Number(memberCount) || 2);
+  const maxEntries = Math.max(8, Math.min(24, safeMemberCount * 4));
+  return src
+    .filter((item) => item && item.role && String(item.content || '').trim())
+    .slice(-maxEntries);
+}
+
+function sanitizeSingleAvatarReplyContent(text) {
+  const raw = String(text || '')
+    .replace(/\r/g, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .trim();
+  if (!raw) return '';
+  let sanitized = raw
+    .replace(/^```[a-zA-Z]*\s*/, '')
+    .replace(/```$/, '')
+    .replace(/^(?:Translation|译文|翻译)\s*[:：]\s*/i, '')
+    .trim();
+  return sanitized;
+}
+
+function getSingleAvatarReplyIssue(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'empty';
+  if (/^(未收到有效回复，请重试。|测试失败：|请求失败：)/.test(raw)) return 'empty';
+  if (looksLikeGroupPromptLeak(raw) || looksLikeGroupReasoningOnly(raw)) return 'prompt-leak';
+  return '';
+}
+
+function resolveSingleAvatarAssistantReply(message) {
+  const msg = message && typeof message === 'object' ? message : null;
+  if (!msg) return { content: '', source: '', issue: 'empty' };
+
+  const contentText = sanitizeSingleAvatarReplyContent(msg.content || '');
+  const contentIssue = getSingleAvatarReplyIssue(contentText);
+  if (contentText && !contentIssue) {
+    return { content: contentText, source: 'content', issue: '' };
+  }
+
+  const thinkText = sanitizeSingleAvatarReplyContent(msg.thinkContent || '');
+  const thinkIssue = getSingleAvatarReplyIssue(thinkText);
+  if (thinkText && !thinkIssue) {
+    return { content: thinkText, source: 'think', issue: '' };
+  }
+
+  return {
+    content: contentText || thinkText || '',
+    source: contentText ? 'content' : (thinkText ? 'think' : ''),
+    issue: contentIssue || thinkIssue || 'empty'
+  };
+}
+
+function buildSingleAvatarReplyInstruction(reason) {
+  const base = '这是角色私聊。请直接回应用户最后一句话。首句必须包含角色真正说出口的话，不要整条只写括号动作、表情、旁白或省略号；可以有动作描写，但必须有清晰可读的正文回应，建议至少 2 句。';
+  if (reason === 'action-only') {
+    return `${base} 你上一条只有动作描写。这次不要先写括号动作，先给出一句明确台词。`;
+  }
+  if (reason === 'prompt-leak') {
+    return `${base} 你上一条混入了规则、提示词或思考过程。这次只输出正式回复正文。`;
+  }
+  if (reason === 'too-short') {
+    return `${base} 你上一条太短了。请补充一个明确的信息、情绪或邀请，不要只回两三个字。`;
+  }
+  return base;
+}
+
 async function streamSSEResponse(response, messageId, requestStartedAt, options = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -6192,6 +7264,10 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
   let full = '';
   let thinkFull = '';
   let isThinking = false;
+  const allowThinking = options && options.allowThinking !== false;
+  const captureThinking = options && Object.prototype.hasOwnProperty.call(options, 'captureThinking')
+    ? options.captureThinking !== false
+    : allowThinking;
   let toolCalls = [];
   let lorebookHits;
   let firstTokenLatencyMs = null;
@@ -6199,6 +7275,69 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
   const contentGuard = (options && typeof options.contentGuard === 'function') ? options.contentGuard : null;
   let stoppedByGuard = false;
   let guardReason = '';
+  let sawDone = false;
+
+  const applyPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.error) {
+      full = payload.message || '请求失败';
+    } else if (payload.tool_call) {
+      toolCalls.push({ name: payload.tool_call.name, args: payload.tool_call.arguments, status: 'running' });
+    } else if (payload.tool_result) {
+      const tc = toolCalls.find(t => t.name === payload.tool_result.name && t.status === 'running');
+      if (tc) { tc.status = 'done'; tc.result = payload.tool_result.result; tc.isError = payload.tool_result.isError; }
+    } else if (Array.isArray(payload.lorebook_hits)) {
+      lorebookHits = payload.lorebook_hits;
+    } else if (captureThinking && payload.thinking === true) {
+      if (allowThinking) isThinking = true;
+    } else if (captureThinking && payload.thinking === false) {
+      isThinking = false;
+    } else if (captureThinking && payload.think_content) {
+      thinkFull += payload.think_content;
+    } else if (payload.content) {
+      if (firstTokenLatencyMs == null && Number.isFinite(requestStartedAt)) {
+        firstTokenLatencyMs = Date.now() - requestStartedAt;
+      }
+      full += payload.content;
+      if (contentGuard) {
+        const decision = contentGuard(full);
+        if (decision && typeof decision === 'object' && decision.content) {
+          full = String(decision.content);
+        }
+        if (decision && decision.stop === true) {
+          stoppedByGuard = true;
+          guardReason = String(decision.reason || '');
+          isThinking = false;
+        }
+      }
+    }
+    updateMessage(messageId, (m) => ({
+      ...m,
+      content: full,
+      thinkContent: captureThinking ? (thinkFull || undefined) : undefined,
+      isThinking: allowThinking ? isThinking : false,
+      toolCalls: toolCalls.length ? [...toolCalls] : undefined,
+      lorebookHits: Array.isArray(lorebookHits) ? lorebookHits : m.lorebookHits,
+      firstTokenLatencyMs: Number.isFinite(firstTokenLatencyMs) ? firstTokenLatencyMs : m.firstTokenLatencyMs
+    }));
+    if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || Array.isArray(payload.lorebook_hits) || typeof payload.thinking === 'boolean') {
+      renderMessages();
+    }
+  };
+
+  const processSSELine = (line) => {
+    if (!line.startsWith('data: ')) return;
+    const dataText = line.slice(6).trim();
+    if (!dataText) return;
+    if (dataText === '[DONE]') {
+      sawDone = true;
+      isThinking = false;
+      return;
+    }
+    try {
+      applyPayload(JSON.parse(dataText));
+    } catch (_) { }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -6208,62 +7347,19 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
     buf = lines.pop() || '';
 
     for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const dataText = line.slice(6).trim();
-      if (!dataText || dataText === '[DONE]') continue;
-      try {
-        const payload = JSON.parse(dataText);
-        if (payload.error) {
-          full = payload.message || '请求失败';
-        } else if (payload.tool_call) {
-          toolCalls.push({ name: payload.tool_call.name, args: payload.tool_call.arguments, status: 'running' });
-        } else if (payload.tool_result) {
-          const tc = toolCalls.find(t => t.name === payload.tool_result.name && t.status === 'running');
-          if (tc) { tc.status = 'done'; tc.result = payload.tool_result.result; tc.isError = payload.tool_result.isError; }
-        } else if (Array.isArray(payload.lorebook_hits)) {
-          lorebookHits = payload.lorebook_hits;
-        } else if (payload.thinking === true) {
-          isThinking = true;
-        } else if (payload.thinking === false) {
-          isThinking = false;
-        } else if (payload.think_content) {
-          thinkFull += payload.think_content;
-        } else if (payload.content) {
-          if (firstTokenLatencyMs == null && Number.isFinite(requestStartedAt)) {
-            firstTokenLatencyMs = Date.now() - requestStartedAt;
-          }
-          full += payload.content;
-          if (contentGuard) {
-            const decision = contentGuard(full);
-            if (decision && typeof decision === 'object' && decision.content) {
-              full = String(decision.content);
-            }
-            if (decision && decision.stop !== false && (decision.reason || decision.content)) {
-              stoppedByGuard = true;
-              guardReason = String(decision.reason || '');
-              isThinking = false;
-            }
-          }
-        }
-        updateMessage(messageId, (m) => ({
-          ...m,
-          content: full,
-          thinkContent: thinkFull || undefined,
-          isThinking,
-          toolCalls: toolCalls.length ? [...toolCalls] : undefined,
-          lorebookHits: Array.isArray(lorebookHits) ? lorebookHits : m.lorebookHits,
-          firstTokenLatencyMs: Number.isFinite(firstTokenLatencyMs) ? firstTokenLatencyMs : m.firstTokenLatencyMs
-        }));
-        if (incrementalRender || payload.error || payload.tool_call || payload.tool_result || Array.isArray(payload.lorebook_hits) || typeof payload.thinking === 'boolean') {
-          renderMessages();
-        }
-        if (stoppedByGuard) {
-          try { await reader.cancel(); } catch (_) { }
-          break;
-        }
-      } catch (_) { }
+      processSSELine(line);
+      if (stoppedByGuard || sawDone) break;
     }
-    if (stoppedByGuard) break;
+    if (stoppedByGuard) {
+      try { await reader.cancel(); } catch (_) { }
+      break;
+    }
+    if (sawDone) break;
+  }
+
+  const trailing = String(buf || '').trim();
+  if (trailing && !sawDone) {
+    processSSELine(trailing);
   }
 
   if (!full) {
@@ -6295,11 +7391,14 @@ async function streamSSEResponse(response, messageId, requestStartedAt, options 
 async function sendChatMessage() {
   // hard self-heal for stale lock after session deletion/switching
   restoreComposerInteractivityNow({ forceUnlockStreaming: true, focus: false });
-  if (state.ui.sidebarTab === 'contacts' && state.ui.activeContactAvatarId) {
+  const effectiveContactAvatarId = state.ui.sidebarTab === 'contacts'
+    ? getEffectiveActiveContactAvatarId()
+    : '';
+  if (effectiveContactAvatarId) {
     const active = getActiveSession();
-    const required = resolveContactSession(state.ui.activeContactAvatarId, { createIfMissing: true, focus: false });
+    const required = resolveContactSession(effectiveContactAvatarId, { createIfMissing: true, focus: false });
     if (!active || !required || active.id !== required.id) {
-      openContact(state.ui.activeContactAvatarId);
+      openContact(effectiveContactAvatarId);
     }
   }
   const session = getActiveSession();
@@ -6335,8 +7434,13 @@ async function sendSingleChatMessage(session, options = {}) {
   const assistant = (options && options.assistantMessage)
     ? options.assistantMessage
     : appendChatMessage('assistant', '', { modelName: getChatModelName() });
+  const boundAvatar = session && session.avatarId ? getAvatarById(session.avatarId) : null;
+  const isSingleAvatar = Boolean(boundAvatar && boundAvatar.type !== 'group');
   const samplingOptions = getChatSamplingOptions();
   const streamAbortController = new AbortController();
+  let lastSingleReplyIssue = '';
+  let bestSingleReplyContent = '';
+  let avatarUsageRecorded = false;
 
   state.ui.chatStreaming = true;
   state.ui.chatAbortController = streamAbortController;
@@ -6360,61 +7464,151 @@ async function sendSingleChatMessage(session, options = {}) {
       } catch (_) { }
     }
 
-    const requestStartedAt = Date.now();
-    const proxyHeader = getClientProxyHeaderValue();
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      signal: streamAbortController.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(state.token ? { 'x-access-token': state.token } : {}),
-        ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
-        ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
-      },
-      body: JSON.stringify({
-        messages: payloadMessages,
-        context: session.materialsText || '',
-        mode: state.ui.chatMode,
-        providerId: state.ui.selectedProviderId || undefined,
-        model: state.ui.selectedModel || undefined,
-        preferences: getChatClientPreferences(),
-        ...samplingOptions,
-        searchResults: searchResults.length ? searchResults : undefined,
-        knowledgeBaseIds: getEnabledKbIds(),
-        avatar: (() => {
-          const av = session.avatarId ? getAvatarById(session.avatarId) : null;
-          if (!av) return undefined;
-          return {
-            id: av.id,
-            type: av.type || 'single',
-            name: av.name,
-            relationship: av.relationship || '',
-            customPrompt: av.customPrompt || '',
-            memoryText: av.memoryText || ''
-          };
-        })()
-      })
-    });
+    const maxAttempts = isSingleAvatar ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (attempt > 1) {
+        updateMessage(assistant.id, (m) => ({
+          ...m,
+          content: '',
+          thinkContent: undefined,
+          isThinking: false
+        }));
+        renderMessages();
+      }
 
-    if (response.status === 401) {
-      askForToken();
-      throw new Error('口令已更新，请重试。');
+      const requestStartedAt = Date.now();
+      const proxyHeader = getClientProxyHeaderValue();
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        signal: streamAbortController.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(state.token ? { 'x-access-token': state.token } : {}),
+          ...(CLIENT_INSTANCE_ID ? { 'x-client-id': CLIENT_INSTANCE_ID } : {}),
+          ...(proxyHeader ? { 'x-client-proxy-config': proxyHeader } : {})
+        },
+        body: JSON.stringify({
+          messages: payloadMessages,
+          context: session.materialsText || '',
+          mode: state.ui.chatMode,
+          providerId: state.ui.selectedProviderId || undefined,
+          model: state.ui.selectedModel || undefined,
+          preferences: getChatClientPreferences(),
+          ...samplingOptions,
+          searchResults: searchResults.length ? searchResults : undefined,
+          knowledgeBaseIds: getEnabledKbIds(),
+          avatar: (() => {
+            const av = session.avatarId ? getAvatarById(session.avatarId) : null;
+            if (!av) return undefined;
+            return {
+              id: av.id,
+              type: av.type || 'single',
+              name: av.name,
+              relationship: av.relationship || '',
+              customPrompt: av.customPrompt || '',
+              memoryText: av.memoryText || ''
+            };
+          })(),
+          replyInstruction: isSingleAvatar
+            ? buildSingleAvatarReplyInstruction(attempt > 1 ? lastSingleReplyIssue : '')
+            : undefined
+        })
+      });
+
+      if (response.status === 401) {
+        askForToken();
+        throw new Error('口令已更新，请重试。');
+      }
+
+      if (!response.ok) {
+        const raw = await response.text();
+        let msg = `请求失败：${response.status}`;
+        try {
+          const parsed = JSON.parse(raw);
+          msg = parsed.message || msg;
+        } catch (_) { }
+        updateMessage(assistant.id, (m) => ({ ...m, content: msg, thinkContent: undefined, isThinking: false }));
+        renderMessages();
+        return;
+      }
+
+      await streamSSEResponse(response, assistant.id, requestStartedAt, {
+        allowThinking: !session.avatarId && state.ui.chatMode === 'thinking',
+        captureThinking: isSingleAvatar
+      });
+
+      if (!isSingleAvatar) {
+        if (session.avatarId && !avatarUsageRecorded) {
+          recordAvatarUsage(session.avatarId, 1);
+          avatarUsageRecorded = true;
+        }
+        break;
+      }
+
+      const liveAssistant = session.messages.find((m) => m && m.id === assistant.id) || null;
+      const resolvedReply = resolveSingleAvatarAssistantReply(liveAssistant);
+      if (resolvedReply.content && (!bestSingleReplyContent || resolvedReply.content.length > bestSingleReplyContent.length)) {
+        bestSingleReplyContent = resolvedReply.content;
+      }
+      if (resolvedReply.content && (resolvedReply.source === 'think' || resolvedReply.content !== String((liveAssistant && liveAssistant.content) || '').trim())) {
+        updateMessage(assistant.id, (m) => ({
+          ...m,
+          content: resolvedReply.content,
+          thinkContent: resolvedReply.source === 'think' ? undefined : m.thinkContent,
+          isThinking: false
+        }));
+        renderMessages();
+      }
+
+      lastSingleReplyIssue = resolvedReply.issue || getSingleAvatarReplyIssue(resolvedReply.content);
+      if (!lastSingleReplyIssue) {
+        if (session.avatarId && !avatarUsageRecorded) {
+          recordAvatarUsage(session.avatarId, 1);
+          avatarUsageRecorded = true;
+        }
+        break;
+      }
+
+      if (attempt < maxAttempts) {
+        try { setStatus(`${boundAvatar.name} 回复异常（${lastSingleReplyIssue}），正在重试...`); } catch (_) { }
+        continue;
+      }
+
+      if (bestSingleReplyContent && !getSingleAvatarReplyIssue(bestSingleReplyContent)) {
+        updateMessage(assistant.id, (m) => ({
+          ...m,
+          content: bestSingleReplyContent,
+          thinkContent: undefined,
+          isThinking: false
+        }));
+        renderMessages();
+        if (session.avatarId && !avatarUsageRecorded) {
+          recordAvatarUsage(session.avatarId, 1);
+          avatarUsageRecorded = true;
+        }
+      } else {
+        updateMessage(assistant.id, (m) => ({
+          ...m,
+          content: '这次没有拿到可显示的角色回复，请重试。',
+          thinkContent: undefined,
+          isThinking: false,
+          excludeFromContext: true
+        }));
+        renderMessages();
+      }
     }
 
-    if (!response.ok) {
-      const raw = await response.text();
-      let msg = `请求失败：${response.status}`;
-      try {
-        const parsed = JSON.parse(raw);
-        msg = parsed.message || msg;
-      } catch (_) { }
-      updateMessage(assistant.id, (m) => ({ ...m, content: msg }));
+    const finalAssistant = session.messages.find((m) => m && m.id === assistant.id) || null;
+    if (finalAssistant && !String(finalAssistant.content || '').trim()) {
+      updateMessage(assistant.id, (m) => ({
+        ...m,
+        content: '这次没有拿到可显示的角色回复，请重试。',
+        thinkContent: undefined,
+        isThinking: false,
+        excludeFromContext: true
+      }));
       renderMessages();
-      return;
     }
-
-    if (session.avatarId) recordAvatarUsage(session.avatarId, 1);
-    await streamSSEResponse(response, assistant.id, requestStartedAt);
   } catch (error) {
     if (!(streamAbortController.signal && streamAbortController.signal.aborted)) {
       updateMessage(assistant.id, (m) => ({ ...m, content: `测试失败：${error.message || error}`, isThinking: false }));
@@ -6439,27 +7633,44 @@ async function sendGroupChatMessage(session, group, options = {}) {
     ? clampGroupSpectatorRounds((options && options.spectatorRounds) || (groupSettings && groupSettings.spectatorRoundsPerTrigger) || 1)
     : 1;
   let groupSettingsChanged = false;
+  let totalSuccessfulReplies = 0;
+  const failedMemberReasons = [];
+  const createdGroupAssistantMessageIds = new Set();
+  let groupFailureNoticeShown = false;
+  let currentGroupTreeAnchorId = null;
   const streamAbortController = new AbortController();
   state.ui.chatStreaming = true;
   state.ui.chatAbortController = streamAbortController;
   els.sendBtn.disabled = true;
 
   try {
+    const resolveGroupAnchorId = () => {
+      const messages = session && Array.isArray(session.messages) ? session.messages : [];
+      const currentAnchor = String(currentGroupTreeAnchorId || '').trim();
+      if (currentAnchor && messages.some((m) => m && m.kind === 'chat' && String(m.id || '') === currentAnchor)) {
+        return currentAnchor;
+      }
+      const visibleLeaf = getVisibleChatLeafMessage(session);
+      return visibleLeaf ? visibleLeaf.id : null;
+    };
+    if (cleanupInvalidGroupAssistantMessages(session)) {
+      currentGroupTreeAnchorId = resolveGroupAnchorId();
+      renderMessages();
+      renderSessionList();
+    }
     renderMessages();
     renderSessionList();
     persistSessionsState();
 
-    const members = (group.memberIds || [])
-      .map((id) => getAvatarById(id))
-      .filter(Boolean);
+    const members = getGroupMembers(group);
 
-    if (!members.length) {
-      appendChatMessage('assistant', '群组中没有有效成员。');
+    if (members.length < 2) {
+      appendChatMessage('assistant', `当前群组只有 ${members.length} 个有效成员，至少需要 2 个有效成员。请重新建群后再使用群聊/旁观。`, { excludeFromContext: true });
       renderMessages();
       return;
     }
 
-    let payloadMessages = buildChatPayloadMessages(session);
+    let payloadMessages = trimGroupPayloadMessages(buildGroupPayloadMessages(session, members.length), members.length);
     if (spectatorMode && !payloadMessages.length) {
       payloadMessages = [{
         role: 'user',
@@ -6468,13 +7679,25 @@ async function sendGroupChatMessage(session, group, options = {}) {
     }
 
     let lastSpeakerName = '';
+    currentGroupTreeAnchorId = (() => {
+      const leaf = getVisibleChatLeafMessage(session);
+      return leaf ? leaf.id : null;
+    })();
     let stopRemainingSpectatorRounds = false;
     for (let roundIdx = 0; roundIdx < spectatorRounds; roundIdx += 1) {
       if (stopRemainingSpectatorRounds) break;
       let successfulRepliesInRound = 0;
-      const orderedMembers = getGroupOrderedMembersForTurn(group, members);
+      const orderedMembers = getGroupOrderedMembersForTurn(group, members, session);
+      const roundStarterId = String((orderedMembers[0] && orderedMembers[0].id) || '').trim();
+      const consumedSpeakerIds = new Set();
       for (const member of orderedMembers) {
-        const assistant = appendChatMessage('assistant', '', { modelName: getChatModelName() });
+        if (consumedSpeakerIds.has(String(member && member.id || '').trim())) continue;
+        const assistant = appendChatMessage('assistant', '', {
+          modelName: getChatModelName(),
+          isThinking: true,
+          _treeParentId: currentGroupTreeAnchorId
+        });
+        if (assistant && assistant.id) createdGroupAssistantMessageIds.add(assistant.id);
         const samplingOptions = getChatSamplingOptions();
         /* tag this message with the speaker */
         const msgInSession = session.messages.find((m) => m.id === assistant.id);
@@ -6489,26 +7712,38 @@ async function sendGroupChatMessage(session, group, options = {}) {
         const proxyHeader = getClientProxyHeaderValue();
         let finalContent = '';
         let memberSucceeded = false;
-        const maxAttempts = 2;
+        const maxAttempts = 3;
         let retryReason = '';
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const loopBreakHint = buildGroupLoopBreakHint(session);
           const retryHint = attempt > 1
             ? (retryReason === 'short-loop'
-              ? '检测到群聊陷入短句重复/寒暄循环。请换一个新话题或推进情节，补充一个新信息、新动作或新问题；不要只说“再见/好的/嗯嗯”等短句，也不要复述上一句。'
-              : '上一次回复为空或无效。请直接输出你这一轮的一次发言（1-3句），不要代替他人发言，不要重复寒暄/再见。')
+              ? '换个新信息、新动作或新问题，别重复上一句。'
+              : retryReason === 'duplicate-other-speaker'
+                ? '不要复读上一位成员刚说过的话，也不要直接照搬对方台词。以你自己的身份重新接话。'
+              : retryReason === 'prompt-leak'
+                ? '上一条不像角色发言。现在直接继续对话，不要解释规则。'
+                : retryReason === 'wrong-speaker'
+                  ? '不要用你自己的名字称呼自己，也不要把当前说话人写串。直接以当前角色身份接话。'
+                : retryReason === 'too-short'
+                  ? '不要只回几个字、角色名或资料碎片，至少给一句完整自然的台词。'
+                : retryReason === 'think-only'
+                  ? '直接写这位角色此刻会说的话。'
+                : retryReason === 'action-only'
+                    ? '先给一句清楚的台词，再补动作或表情。'
+              : '直接继续这一轮对话，给出一段完整发言。')
             : '';
           const baseTurnInstruction = spectatorMode
-            ? '当前为旁观模式。优先回应其他角色并自然推进话题，不要等待用户再次发言。'
-            : '这是群聊回合。可以回应其他角色，也可以回应用户，但请保持群聊互动感。';
+            ? '直接接上上文，以当前角色身份自然接话并推进话题。用户这轮不会发言。'
+            : '直接接上上文，以当前角色身份自然接话。不要替别人说话。';
           const composedTurnInstruction = [baseTurnInstruction, loopBreakHint, retryHint]
             .map((s) => String(s || '').trim())
             .filter(Boolean)
             .join('\n');
 
           if (attempt > 1) {
-            updateMessage(assistant.id, (m) => ({ ...m, content: '', isThinking: false }));
+            updateMessage(assistant.id, (m) => ({ ...m, content: '', thinkContent: undefined, isThinking: true }));
             renderMessages();
           }
 
@@ -6550,7 +7785,8 @@ async function sendGroupChatMessage(session, group, options = {}) {
                 spectatorRounds,
                 relationshipHints: relationHints,
                 turnInstruction: composedTurnInstruction
-              }
+              },
+              groupTurnValidated: true
             })
           });
 
@@ -6563,85 +7799,173 @@ async function sendGroupChatMessage(session, group, options = {}) {
             const raw = await response.text();
             let msg = `请求失败：${response.status}`;
             try { msg = JSON.parse(raw).message || msg; } catch (_) { }
-            updateMessage(assistant.id, (m) => ({ ...m, content: msg, excludeFromContext: true }));
+            retryReason = 'request-failed';
+            updateMessage(assistant.id, (m) => ({
+              ...m,
+              content: msg,
+              thinkContent: undefined,
+              isThinking: false,
+              excludeFromContext: true
+            }));
             renderMessages();
             finalContent = '';
             break;
           }
 
           finalContent = await streamSSEResponse(response, assistant.id, requestStartedAt, {
+            allowThinking: false,
+            captureThinking: true,
             contentGuard: (partialText) => {
               const detected = detectGroupReplyRunawayDuringStream(partialText, member, members);
               if (!detected) return null;
               return {
                 stop: true,
                 reason: detected.reason,
-                content: detected.content
+                content: detected.content || partialText
               };
             }
           });
 
+          const liveAssistant = session.messages.find((m) => m && m.id === assistant.id) || null;
+          const resolvedAttempt = resolveGroupAssistantReply(liveAssistant, member, members);
+          const recoveryCandidates = [
+            resolvedAttempt.content,
+            sanitizeGroupSpeakerReplyContent(String(finalContent || ''), member, members).trim(),
+            extractGroupReplyBestEffortContent(String((liveAssistant && liveAssistant.content) || ''), member, members),
+            extractGroupReplyBestEffortContent(String((liveAssistant && liveAssistant.thinkContent) || ''), member, members),
+            extractGroupReplyVisibleFallback(String((liveAssistant && liveAssistant.content) || ''), member, members),
+            extractGroupReplyVisibleFallback(String((liveAssistant && liveAssistant.thinkContent) || ''), member, members)
+          ].map((text) => String(text || '').trim()).filter(Boolean);
+          finalContent = recoveryCandidates[0] || '';
+
+          if (finalContent && (!liveAssistant || finalContent !== String(liveAssistant.content || '').trim())) {
+            updateMessage(assistant.id, (m) => ({
+              ...m,
+              content: finalContent,
+              thinkContent: resolvedAttempt.source.startsWith('think') ? undefined : m.thinkContent,
+              isThinking: false
+            }));
+            renderMessages();
+          }
+
           const normalizedAttemptContent = String(finalContent || '').trim();
-          if (normalizedAttemptContent && normalizedAttemptContent !== '未收到有效回复，请重试。') {
-            const attemptSanitizedContent = sanitizeGroupSpeakerReplyContent(finalContent, member, members);
-            if (attemptSanitizedContent && attemptSanitizedContent !== finalContent) {
-              finalContent = attemptSanitizedContent;
-              updateMessage(assistant.id, (m) => ({ ...m, content: finalContent }));
-              renderMessages();
-            }
-            const shortLoopCandidate = detectGroupShortLoopReplyCandidate(session, finalContent, member, {
+          const attemptIssue = getGroupAssistantReplyIssue(
+            normalizedAttemptContent,
+            member,
+            members,
+            normalizedAttemptContent
+          );
+          if (!attemptIssue) {
+            const shortLoopCandidate = detectGroupShortLoopReplyCandidate(session, normalizedAttemptContent, member, {
               excludeMessageId: assistant.id
             });
             if (shortLoopCandidate) {
-              retryReason = 'short-loop';
+              retryReason = shortLoopCandidate.reason === 'duplicate-other-speaker'
+                ? 'duplicate-other-speaker'
+                : 'short-loop';
               if (attempt < maxAttempts) {
-                try { setStatus(`${member.name} 出现短句循环，正在重试并引导换话题...`); } catch (_) { }
+                try {
+                  setStatus(shortLoopCandidate.reason === 'duplicate-other-speaker'
+                    ? `${member.name} 复读了上一位成员的回复，正在重试...`
+                    : `${member.name} 出现短句循环，正在重试并引导换话题...`);
+                } catch (_) { }
                 continue;
               }
               finalContent = '';
               memberSucceeded = false;
               break;
             }
+            retryReason = '';
             memberSucceeded = true;
             break;
           }
+          retryReason = attemptIssue || 'empty';
           if (attempt < maxAttempts) {
             try { setStatus(`${member.name} 本轮未正常回复，正在重试...`); } catch (_) { }
           }
         }
 
-        const sanitizedContent = sanitizeGroupSpeakerReplyContent(finalContent, member, members);
+        const liveAssistant = session.messages.find((m) => m && m.id === assistant.id) || null;
+        if (!memberSucceeded) {
+          const resolvedFinal = resolveGroupAssistantReply(liveAssistant, member, members);
+          const finalIssue = getGroupAssistantReplyIssue(
+            resolvedFinal.content,
+            member,
+            members,
+            resolvedFinal.content
+          );
+          if (resolvedFinal.content && !finalIssue && !(liveAssistant && liveAssistant.excludeFromContext)) {
+            finalContent = resolvedFinal.content;
+            memberSucceeded = true;
+          } else if (finalIssue) {
+            retryReason = retryReason || finalIssue;
+          }
+        }
+        const sanitizedContent = sanitizeGroupSpeakerReplyContent(finalContent, member, members).trim();
         if (sanitizedContent && sanitizedContent !== finalContent) {
           finalContent = sanitizedContent;
-          updateMessage(assistant.id, (m) => ({ ...m, content: finalContent }));
+          updateMessage(assistant.id, (m) => ({ ...m, content: finalContent, isThinking: false }));
           renderMessages();
         }
         const finalText = String(finalContent || '').trim();
-        if (!memberSucceeded || !finalText || finalText === '未收到有效回复，请重试。') {
+        if (!memberSucceeded || !finalText || finalText === '未收到有效回复，请重试。' || looksLikeGroupPromptLeak(finalText)) {
           session.messages = (session.messages || []).filter((m) => m && m.id !== assistant.id);
           try { ensureSessionMessageTreeState(session); } catch (_) { }
           renderMessages();
-          // Do not advance turn anchor or payload history for empty/invalid replies.
+          failedMemberReasons.push(retryReason ? `${member.name}: ${retryReason}` : `${member.name}: empty`);
           try { setStatus(`${member.name} 本轮未生成有效回复，已跳过。`); } catch (_) { }
           continue;
         }
+        updateMessage(assistant.id, (m) => ({
+          ...m,
+          content: finalText,
+          speakerAvatarId: member.id,
+          thinkContent: undefined,
+          isThinking: false,
+          excludeFromContext: false
+        }));
+        currentGroupTreeAnchorId = assistant.id;
+        renderMessages();
         recordAvatarUsage(member.id, 1);
         successfulRepliesInRound += 1;
-        payloadMessages.push({ role: 'assistant', content: `[${member.name}]: ${finalContent}` });
+        totalSuccessfulReplies += 1;
+        payloadMessages.push({ role: 'user', content: `[${member.name}]: ${finalText}` });
+        payloadMessages = trimGroupPayloadMessages(payloadMessages, members.length);
         lastSpeakerName = member.name;
         if (groupSettings && String(groupSettings.lastSpeakerId || '') !== String(member.id || '')) {
           groupSettings.lastSpeakerId = String(member.id || '');
           groupSettingsChanged = true;
         }
       }
+      if (successfulRepliesInRound > 0 && groupSettings && roundStarterId && String(groupSettings.lastStarterId || '') !== roundStarterId) {
+        groupSettings.lastStarterId = roundStarterId;
+        groupSettingsChanged = true;
+      }
       if (spectatorMode && successfulRepliesInRound <= 0) {
         stopRemainingSpectatorRounds = true;
         try { setStatus('本轮旁观未生成有效回复，已停止继续连发。'); } catch (_) { }
       }
     }
+    if (totalSuccessfulReplies <= 0) {
+      const detail = failedMemberReasons.length
+        ? `\n${failedMemberReasons.slice(0, 3).join('\n')}`
+        : '';
+      currentGroupTreeAnchorId = resolveGroupAnchorId();
+      appendChatMessage(
+        'assistant',
+        spectatorMode
+          ? `旁观模式这次没有拿到可显示的群成员回复。请先确认当前模型能正常单聊，再重试群聊/旁观。${detail}`
+          : `这次群聊没有拿到可显示的成员回复。请先确认当前模型能正常单聊，再重试群聊。${detail}`,
+        { excludeFromContext: true, _treeParentId: currentGroupTreeAnchorId }
+      );
+      groupFailureNoticeShown = true;
+      renderMessages();
+    }
   } catch (error) {
     if (!(streamAbortController.signal && streamAbortController.signal.aborted)) {
-      appendChatMessage('assistant', `群组聊天失败：${error.message}`);
+      currentGroupTreeAnchorId = resolveGroupAnchorId();
+      appendChatMessage('assistant', `群组聊天失败：${error.message}`, { _treeParentId: currentGroupTreeAnchorId });
+      groupFailureNoticeShown = true;
       renderMessages();
     }
   } finally {
@@ -6650,6 +7974,27 @@ async function sendGroupChatMessage(session, group, options = {}) {
     }
     state.ui.chatStreaming = false;
     els.sendBtn.disabled = false;
+    cleanupInvalidGroupAssistantMessages(session);
+    currentGroupTreeAnchorId = resolveGroupAnchorId();
+    const survivingCreatedGroupReplies = session && Array.isArray(session.messages)
+      ? getVisibleSessionMessages(session).filter((m) => m && createdGroupAssistantMessageIds.has(m.id) && m.role === 'assistant' && String(m.content || '').trim())
+      : [];
+    if (!groupFailureNoticeShown
+      && !streamAbortController.signal.aborted
+      && createdGroupAssistantMessageIds.size > 0
+      && !survivingCreatedGroupReplies.length) {
+      const detail = failedMemberReasons.length
+        ? `\n${failedMemberReasons.slice(0, 3).join('\n')}`
+        : '';
+      appendChatMessage(
+        'assistant',
+        spectatorMode
+          ? `旁观模式这次没有留下可显示的群成员回复。请重试；如果仍然失败，再继续调整群聊回复解析。${detail}`
+          : `这次群聊没有留下可显示的成员回复。请重试；如果仍然失败，再继续调整群聊回复解析。${detail}`,
+        { excludeFromContext: true, _treeParentId: currentGroupTreeAnchorId }
+      );
+      groupFailureNoticeShown = true;
+    }
     if (groupSettingsChanged) persistAvatars();
     persistSessionsState();
     renderMessages();
@@ -8992,9 +10337,7 @@ function ensureGroupChatEnhanceModal() {
 function renderGroupChatEnhanceRelationRows(group) {
   const ui = ensureGroupChatEnhanceModal();
   if (!ui || !ui.relationRows) return;
-  const members = (group && Array.isArray(group.memberIds) ? group.memberIds : [])
-    .map((id) => getAvatarById(id))
-    .filter(Boolean);
+  const members = getGroupMembers(group);
   if (members.length < 2) {
     ui.relationRows.innerHTML = '<div class="muted">当前群组成员不足 2 人。</div>';
     return;
@@ -9030,9 +10373,12 @@ function openGroupChatEnhanceModal(groupId) {
   const settings = ensureGroupChatSettings(group);
   const ui = ensureGroupChatEnhanceModal();
   if (!ui) return;
+  const memberCount = getGroupMembers(group).length;
   groupChatEnhanceRuntime.activeGroupId = group.id;
   if (ui.title) ui.title.textContent = `群聊增强设置 · ${group.name}`;
-  if (ui.sub) ui.sub.textContent = `成员 ${Math.max(0, (group.memberIds || []).length)} 人 · 可配置关系、旁观轮次与互动风格`;
+  if (ui.sub) ui.sub.textContent = memberCount >= 2
+    ? `有效成员 ${memberCount} 人 · 可配置关系、旁观轮次与互动风格`
+    : `当前仅 ${memberCount} 个有效成员 · 群聊与旁观至少需要 2 个有效成员`;
   if (ui.spectatorRounds) ui.spectatorRounds.value = String(clampGroupSpectatorRounds(settings && settings.spectatorRoundsPerTrigger));
   if (ui.allowCrosstalk) ui.allowCrosstalk.checked = Boolean(settings && settings.allowAiCrossTalk !== false);
   if (ui.status) ui.status.textContent = '';
@@ -9065,10 +10411,15 @@ function saveGroupChatEnhanceModal() {
 }
 
 async function runGroupSpectatorRound() {
-  const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+  const avatarId = getEffectiveActiveContactAvatarId();
   const group = avatarId ? getAvatarById(avatarId) : null;
   if (!group || group.type !== 'group') {
     alert('请先选择一个群组联系人。');
+    return;
+  }
+  const members = getGroupMembers(group);
+  if (members.length < 2) {
+    alert(`当前群组只有 ${members.length} 个有效成员，旁观模式至少需要 2 个有效成员。请重新建群。`);
     return;
   }
   const session = resolveContactSession(group.id, { createIfMissing: true, focus: true });
@@ -9091,41 +10442,29 @@ function ensureContactsLorebookShortcut() {
 
   host = document.createElement('div');
   host.id = 'contactsLorebookShortcutRow';
-  host.style.cssText = 'display:grid;gap:8px;padding:8px 2px 10px 2px;border-bottom:1px solid rgba(148,163,184,.16);margin-bottom:8px;';
+  host.style.cssText = 'display:grid;gap:4px;padding:6px 10px 8px;border-bottom:1px solid var(--line);';
   host.innerHTML = `
-    <div id="contactsPrimaryActionRow" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <button id="contactsAvatarGalleryBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
-        <span aria-hidden="true">🖼️</span>
-        <span>角色画廊</span>
+    <div id="contactsPrimaryActionRow" class="contacts-toolbar">
+      <button id="contactsAvatarGalleryBtn" class="contacts-chip" type="button" title="角色画廊">
+        🖼️ 画廊
       </button>
-      <button id="contactsScenePickerBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
-        <span aria-hidden="true">🎬</span>
-        <span>开场</span>
+      <button id="contactsScenePickerBtn" class="contacts-chip" type="button" title="开场场景">
+        🎬 开场
       </button>
-      <button id="contactsLorebookOpenBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:6px;border-radius:12px;padding:8px 12px;">
-        <span aria-hidden="true">📚</span>
-        <span>世界观书</span>
+      <button id="contactsLorebookOpenBtn" class="contacts-chip" type="button" title="世界观书">
+        📚 世界观
       </button>
     </div>
-    <div id="contactsGroupEnhanceRow" style="display:none;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding:6px 8px;margin-top:4px;border:1px solid rgba(99,102,241,.12);background:rgba(99,102,241,.03);border-radius:8px;">
-      <div style="display:flex;align-items:center;gap:6px;min-width:0;">
-        <span aria-hidden="true" style="font-size:14px;">👥</span>
-        <div style="min-width:0;">
-          <div id="contactsGroupEnhanceLabel" style="font-size:11px;font-weight:700;color:#475569;">群聊增强</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:4px;flex-wrap:wrap;">
-        <button id="contactsGroupSpectatorBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:4px 8px;font-size:11px;background:#fff;border:1px solid rgba(148,163,184,.15);">
-          <span aria-hidden="true">👀</span>
-          <span>旁观一轮</span>
-        </button>
-        <button id="contactsGroupEnhanceBtn" class="btn ghost" type="button" style="display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:4px 8px;font-size:11px;background:#fff;border:1px solid rgba(148,163,184,.15);">
-          <span aria-hidden="true">🤝</span>
-          <span>群聊关系</span>
-        </button>
-      </div>
+    <div id="contactsGroupEnhanceRow" class="contacts-toolbar" style="display:none;">
+      <span class="contacts-group-label">👥 群聊</span>
+      <button id="contactsGroupSpectatorBtn" class="contacts-chip" type="button" title="旁观一轮">
+        👀 旁观
+      </button>
+      <button id="contactsGroupEnhanceBtn" class="contacts-chip" type="button" title="群聊关系设置">
+        🤝 关系
+      </button>
     </div>
-    <div id="contactsLorebookHint" class="muted" style="font-size:12px;line-height:1.35;min-width:0;padding:0 2px;"></div>
+    <div id="contactsLorebookHint" class="muted" style="font-size:11px;line-height:1.35;min-width:0;padding:0 2px;"></div>
   `;
   els.contactsPane.insertBefore(host, els.contactList);
   const galleryBtn = host.querySelector('#contactsAvatarGalleryBtn');
@@ -9137,13 +10476,13 @@ function ensureContactsLorebookShortcut() {
     galleryBtn.addEventListener('click', () => {
       openAvatarGalleryModal({
         source: 'contacts',
-        selectedAvatarId: String(state.ui.activeContactAvatarId || '').trim()
+        selectedAvatarId: getEffectiveActiveContactAvatarId()
       });
     });
   }
   if (sceneBtn) {
     sceneBtn.addEventListener('click', () => {
-      const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+      const avatarId = getEffectiveActiveContactAvatarId();
       const avatar = avatarId ? getAvatarById(avatarId) : null;
       if (!avatar) {
         alert('请先选择一个联系人。');
@@ -9162,7 +10501,7 @@ function ensureContactsLorebookShortcut() {
   }
   if (openBtn) {
     openBtn.addEventListener('click', () => {
-      openLorebookSettingsForAvatar(state.ui.activeContactAvatarId || '', { create: false }).catch(() => { });
+      openLorebookSettingsForAvatar(getEffectiveActiveContactAvatarId(), { create: false }).catch(() => { });
     });
   }
   if (spectatorBtn) {
@@ -9172,7 +10511,7 @@ function ensureContactsLorebookShortcut() {
   }
   if (enhanceBtn) {
     enhanceBtn.addEventListener('click', () => {
-      openGroupChatEnhanceModal(state.ui.activeContactAvatarId || '');
+      openGroupChatEnhanceModal(getEffectiveActiveContactAvatarId());
     });
   }
   return host;
@@ -9220,7 +10559,7 @@ function refreshContactsLorebookShortcut() {
   const enhanceBtn = host.querySelector('#contactsGroupEnhanceBtn');
   const groupRow = host.querySelector('#contactsGroupEnhanceRow');
   if (!hint) return;
-  const avatarId = String(state.ui.activeContactAvatarId || '').trim();
+  const avatarId = getEffectiveActiveContactAvatarId();
   if (!avatarId) {
     if (spectatorBtn) spectatorBtn.style.display = 'none';
     if (enhanceBtn) enhanceBtn.style.display = 'none';
@@ -9242,16 +10581,32 @@ function refreshContactsLorebookShortcut() {
   if (groupRow) groupRow.style.display = isGroup ? 'flex' : 'none';
   const sceneCount = getAvatarOpeningScenarios(avatar).length;
   if (isGroup) {
+    const memberCount = getGroupMembers(avatar).length;
     const settings = ensureGroupChatSettings(avatar);
     const rounds = clampGroupSpectatorRounds(settings && settings.spectatorRoundsPerTrigger);
-    hint.textContent = isZhUiLanguage()
-      ? `当前群组：${avatar.name} · 成员${(avatar.memberIds || []).length}人 · 旁观每次${rounds}轮（可在“群聊关系”里设置朋友/对手/陌生人）`
-      : `Group: ${avatar.name} · Members ${(avatar.memberIds || []).length} · Watch ${rounds} round(s) (set relations in Group Relations)`;
+    hint.textContent = memberCount >= 2
+      ? (isZhUiLanguage()
+        ? `当前群组：${avatar.name} · 成员${memberCount}人 · 旁观每次${rounds}轮（可在“群聊关系”里设置朋友/对手/陌生人）`
+        : `Group: ${avatar.name} · Members ${memberCount} · Watch ${rounds} round(s) (set relations in Group Relations)`)
+      : (isZhUiLanguage()
+        ? `当前群组：${avatar.name} · 仅剩${memberCount}个有效成员，请重新建群后再使用群聊/旁观`
+        : `Group: ${avatar.name} · Only ${memberCount} valid member(s). Recreate it before group chat/watch.`);
     return;
   }
   hint.textContent = isZhUiLanguage()
     ? `当前联系人：${avatar.name} · 开场${sceneCount}个 · 可打开角色画廊`
     : `Contact: ${avatar.name} · Scenes ${sceneCount} · Open gallery`;
+}
+
+function getOpenModalDialog() {
+  const dialogs = Array.from(document.querySelectorAll('dialog[open]'));
+  if (!dialogs.length) return null;
+  for (const dialog of dialogs) {
+    try {
+      if (typeof dialog.matches === 'function' && dialog.matches(':modal')) return dialog;
+    } catch (_) { }
+  }
+  return dialogs[dialogs.length - 1] || null;
 }
 
 function getLorebookSettingsSection() {

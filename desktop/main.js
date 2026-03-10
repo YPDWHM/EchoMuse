@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const { app, BrowserWindow, Menu, Tray, nativeImage, shell, screen, ipcMain, dialog } = require('electron');
 
 let mainWindow = null;
@@ -98,6 +99,79 @@ function ensureDesktopServerEnv() {
   if (!process.env.PORT) process.env.PORT = process.env.ELECTRON_APP_PORT || '53173';
   if (!process.env.RATE_LIMIT_PER_MIN) process.env.RATE_LIMIT_PER_MIN = '600';
   if (!process.env.RATE_LIMIT_TRANSLATE_PER_MIN) process.env.RATE_LIMIT_TRANSLATE_PER_MIN = '1200';
+
+  const bundledOllamaDir = resolveBundledOllamaDir();
+  const bundledOllamaExe = path.join(bundledOllamaDir, 'ollama.exe');
+  const bundledOllamaModels = path.join(bundledOllamaDir, 'models');
+  if (fs.existsSync(bundledOllamaModels) && !process.env.OLLAMA_MODELS) {
+    process.env.OLLAMA_MODELS = bundledOllamaModels;
+  }
+  if (fs.existsSync(bundledOllamaExe)) {
+    if (!process.env.OLLAMA_HOST) process.env.OLLAMA_HOST = '127.0.0.1:11434';
+    const currentPath = String(process.env.PATH || '');
+    const parts = currentPath ? currentPath.split(path.delimiter) : [];
+    const normalizedDir = path.resolve(bundledOllamaDir);
+    const exists = parts.some((item) => {
+      try { return path.resolve(String(item || '')) === normalizedDir; } catch (_) { return false; }
+    });
+    if (!exists) {
+      process.env.PATH = currentPath ? `${bundledOllamaDir}${path.delimiter}${currentPath}` : bundledOllamaDir;
+    }
+  }
+}
+
+function canListenOnPort(host, port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    let settled = false;
+    const finish = (ok, value = null) => {
+      if (settled) return;
+      settled = true;
+      try { server.close(); } catch (_) { }
+      resolve(ok ? value : null);
+    };
+    server.once('error', () => finish(false));
+    server.listen({ host, port }, () => {
+      const addr = server.address();
+      const resolvedPort = addr && typeof addr === 'object' ? Number(addr.port) : port;
+      finish(true, resolvedPort);
+    });
+  });
+}
+
+async function resolveDesktopServerPort() {
+  ensureDesktopServerEnv();
+  const host = process.env.HOST || '127.0.0.1';
+  const preferredPort = Number(process.env.PORT || process.env.ELECTRON_APP_PORT || 53173);
+  const preferred = Number.isInteger(preferredPort) && preferredPort > 0 ? preferredPort : 53173;
+  const direct = await canListenOnPort(host, preferred);
+  if (direct) {
+    process.env.PORT = String(direct);
+    return direct;
+  }
+  const fallback = await canListenOnPort(host, 0);
+  if (!fallback) {
+    throw new Error(`Unable to allocate a local port on ${host}`);
+  }
+  process.env.PORT = String(fallback);
+  return fallback;
+}
+
+function resolveBundledOllamaDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'vendor', 'ollama'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'vendor', 'ollama') : '',
+    path.join(process.cwd(), 'vendor', 'ollama')
+  ].filter(Boolean);
+
+  for (const dir of candidates) {
+    try {
+      if (fs.existsSync(path.join(dir, 'ollama.exe')) || fs.existsSync(path.join(dir, 'models'))) {
+        return dir;
+      }
+    } catch (_) {}
+  }
+  return candidates[0] || path.join(__dirname, '..', 'vendor', 'ollama');
 }
 
 function getServerBaseUrl() {
@@ -410,6 +484,7 @@ async function bootDesktopApp() {
   ensureTray();
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
 
+  await resolveDesktopServerPort();
   const baseUrl = getServerBaseUrl();
   try {
     startEmbeddedServer();

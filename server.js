@@ -2938,6 +2938,23 @@ function normalizeChatPrefLang(code, fallback = 'zh-CN', allowAuto = false) {
   return CHAT_PREF_LANG_NAMES[v] ? v : fallback;
 }
 
+function sanitizeSupplementalInstruction(text, options = {}) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return '';
+  const maxLen = Math.max(1, Number(options.maxLen || 400) || 400);
+  const blockedLineRe = /(必须使用中文|必须用中文|请使用中文|用中文回答|保持中文回复|统一输出语言|你扮演.{0,40}角色|请扮演.{0,40}角色|这是群聊中的单个角色回合|这是群聊，当前发言者是|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|reply in chinese|respond in chinese|speak chinese|output in chinese)/i;
+  const groupControlLeakRe = /(?:这是群聊(?:中的单个角色回合)?|必须和其他角色自然对话|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|不要输出前缀|不要输出规则说明|不要代替他人发言|不要写多轮对话脚本|回合补充要求|输出要求|当前为旁观模式|群聊回合规则|只输出|只写当前角色|你这次只能输出)/u;
+  return raw
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .filter((line) => !blockedLineRe.test(line))
+    .filter((line) => !groupControlLeakRe.test(line))
+    .join('\n')
+    .slice(0, maxLen)
+    .trim();
+}
+
 function buildChatPreferenceSystemNote(pref = {}, options = {}) {
   const uiLanguage = normalizeChatPrefLang(pref.uiLanguage, 'zh-CN');
   const translateEnabled = Boolean(pref.translateEnabled);
@@ -2951,13 +2968,13 @@ function buildChatPreferenceSystemNote(pref = {}, options = {}) {
 
   const lines = [];
 
-  if (translateActive) {
-    lines.push(`\u672c\u8f6e\u662f\u89d2\u8272/\u8054\u7cfb\u4eba\u804a\u5929\uff0c\u5df2\u542f\u7528\u7edf\u4e00\u8f93\u51fa\u8bed\u8a00\uff1a\u9ed8\u8ba4\u5c06\u6240\u6709\u201c\u7528\u6237\u53ef\u89c1\u56de\u590d\u201d\u7edf\u4e00\u4f7f\u7528${toLangName}\u8f93\u51fa\uff08\u9664\u975e\u7528\u6237\u660e\u786e\u8981\u6c42\u4fdd\u7559\u539f\u6587\u6216\u53cc\u8bed\uff09\u3002`);
-    lines.push('\u5df2\u542f\u7528\u804a\u5929\u7ffb\u8bd1\u504f\u597d\uff1a\u7ffb\u8bd1\u4e3b\u8981\u4f5c\u7528\u4e8e\u804a\u5929\u5185\u5bb9\u4e0e\u4e0a\u4e0b\u6587\u7406\u89e3\uff08\u5305\u62ec\u89d2\u8272\u5361\u3001\u89d2\u8272\u8bb0\u5fc6\u3001\u5386\u53f2\u6d88\u606f\u4e2d\u7684\u5916\u8bed\u5185\u5bb9\uff09\u3002');
-    lines.push('\u4e0d\u9700\u8981\u7528\u6237\u989d\u5916\u8bf4\u201c\u8bf7\u7ffb\u8bd1\u201d\uff1b\u9ed8\u8ba4\u5c31\u6309\u76ee\u6807\u8bed\u8a00\u56de\u590d\u3002');
-    lines.push(`\u65e0\u8bba\u7528\u6237\u8f93\u5165\u3001\u89d2\u8272\u5361\u3001\u8bb0\u5fc6\u6216\u5386\u53f2\u6d88\u606f\u662f\u4ec0\u4e48\u8bed\u8a00\uff0c\u90fd\u5148\u6b63\u786e\u7406\u89e3\u5185\u5bb9\uff0c\u518d\u7528${toLangName}\u7ed9\u51fa\u56de\u590d\u3002`);
-    lines.push(`\u5373\u4f7f\u89d2\u8272\u5361/\u8bb0\u5fc6\u5185\u5bb9\u503e\u5411\u4f7f\u7528\u82f1\u6587\u6216\u5176\u4ed6\u8bed\u8a00\uff0c\u4e5f\u53ea\u80fd\u5f71\u54cd\u4eba\u8bbe\u4e0e\u8bed\u6c14\uff0c\u4e0d\u80fd\u6539\u53d8\u6700\u7ec8\u8f93\u51fa\u8bed\u8a00\uff1b\u6700\u7ec8\u5fc5\u987b\u7528${toLangName}\u56de\u7b54\u3002`);
-    lines.push('\u7ffb\u8bd1/\u8f6c\u8ff0\u573a\u666f\u4e0b\u4f18\u5148\u76f4\u63a5\u8f93\u51fa\u76ee\u6807\u8bed\u8a00\u5185\u5bb9\uff1b\u9664\u975e\u7528\u6237\u8981\u6c42\u89e3\u91ca\u6216\u5bf9\u7167\uff0c\u5426\u5219\u4e0d\u8981\u9644\u52a0\u591a\u4f59\u8bf4\u660e\u3002');
+  if (isAvatarMode && translateActive) {
+    lines.push('已开启聊天翻译偏好：翻译只用于理解外语上下文和展示翻译结果，不要因此强制改变角色原本的说话语言。');
+    lines.push('优先沿用角色卡、记忆、最近对话和用户当前输入已经建立的语言与语气。');
+    lines.push(`只有当用户当前这条消息明确要求翻译、双语输出，或明确要求改用${toLangName}时，再临时切换输出语言。`);
+  } else if (isAvatarMode) {
+    lines.push('当前是角色/联系人聊天。优先沿用角色卡、记忆和最近对话已经建立的语言，不要因为界面语言或翻译设置而强制切换输出语言。');
+    lines.push('如果用户当前消息明确要求换一种语言或要求翻译，再按该次请求处理。');
   } else if (translateEnabled && !isAvatarMode) {
     lines.push(`\u5df2\u5f00\u542f\u7ffb\u8bd1\uff0c\u4f46\u6309\u5f53\u524d\u8bbe\u8ba1\u4ec5\u5bf9\u89d2\u8272/\u8054\u7cfb\u4eba\u804a\u5929\u751f\u6548\uff1b\u5f53\u524d\u662f\u666e\u901a\u804a\u5929\uff0c\u4e0d\u8981\u81ea\u52a8\u5f53\u4f5c\u7ffb\u8bd1\u4efb\u52a1\u3002`);
   } else {
@@ -2990,6 +3007,7 @@ app.post('/api/chat', async (req, res) => {
       avatar.id = avatar.id.trim().slice(0, 120);
     }
     const groupContext = req.body?.groupContext || null;
+    const replyInstruction = sanitizeSupplementalInstruction(req.body?.replyInstruction, { maxLen: 400 });
     const searchResults = Array.isArray(req.body?.searchResults) ? req.body.searchResults : [];
     const knowledgeBaseIds = Array.isArray(req.body?.knowledgeBaseIds) ? req.body.knowledgeBaseIds : [];
     const preferences = (req.body?.preferences && typeof req.body.preferences === 'object')
@@ -3075,7 +3093,12 @@ app.post('/api/chat', async (req, res) => {
         if (typeof groupContext.turnInstruction === 'string' && groupContext.turnInstruction.trim()) {
           systemContent += `\n${groupContext.turnInstruction.trim().slice(0, 220)}`;
         }
-        systemContent += '\n群聊回合规则（必须遵守）：你这次只能输出“你自己（当前角色）的一次发言”，不要代替其他角色连续发言，不要写多轮对话脚本，不要输出 [角色A]/[角色B] 的往返台词列表。保持 1 次回复、1 位说话者、简洁连贯。';
+        systemContent += '\n群聊回合规则（必须遵守）：你这次只能输出"你自己（当前角色）的一次发言"，不要代替其他角色连续发言，不要写多轮对话脚本，不要输出 [角色A]/[角色B] 的往返台词列表。保持 1 次回复、1 位说话者、简洁连贯。不要输出 <<<BEGIN>>> / <<<END>>>、代码块、角色名前缀或场景说明标题。';
+      } else {
+        systemContent += '\n这是角色私聊。请直接回应用户最后一句话。首句必须包含角色真正说出口的话，不要整条只写括号动作、表情、旁白或省略号；可以有动作描写，但必须有清晰可读的正文回应，建议至少 2 句。';
+        if (replyInstruction) {
+          systemContent += `\n补充要求：${replyInstruction}`;
+        }
       }
       llmMessages.push({ role: 'system', content: systemContent });
     } else if (useContext) {
@@ -3121,6 +3144,70 @@ app.post('/api/chat', async (req, res) => {
     }
 
     /* ── MCP Tool-Use Loop ── */
+    const isGroupAvatarTurn = Boolean(isAvatarMode && groupContext && groupContext.groupName && groupContext.currentSpeaker);
+    if (isGroupAvatarTurn) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      if (lorebookHitsForSse.length) {
+        res.write(`data: ${JSON.stringify({ lorebook_hits: lorebookHitsForSse })}\n\n`);
+      }
+      try {
+        const validatedReply = await generateStructuredAvatarGroupReply({
+          provider,
+          model,
+          temperature: resolvedTemperature,
+          topP: resolvedTopP,
+          maxTokens: casualMode ? 1200 : (mode === 'thinking' ? 8192 : 4096),
+          maxAttempts: 3,
+          currentSpeaker: groupContext.currentSpeaker,
+          avatar,
+          groupContext,
+          transcriptMessages: recent,
+          contextText: useContext ? context.slice(0, CHAT_CTX_LIMIT) : '',
+          searchResults,
+          lorebookContext: lorebookPack.context || '',
+          knowledgeBaseContext: knowledgeBaseIds.length ? await buildKbInjectedContext(knowledgeBaseIds, recent) : '',
+          chatPreferenceNote: buildChatPreferenceSystemNote(effectiveChatPrefs, { isAvatarMode })
+        });
+        const finalContent = String(validatedReply.content || '').trim() || '本轮没有拿到可显示的群成员回复，请重试。';
+        res.write(`data: ${JSON.stringify({ content: finalContent })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      } catch (error) {
+        const msg = error.message || '群聊角色回合生成失败';
+        try { res.write(`data: ${JSON.stringify({ error: true, message: msg })}\n\n`); } catch (_) { }
+        return res.end();
+      }
+    }
+    if (isAvatarMode && !isGroupAvatarTurn) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      if (lorebookHitsForSse.length) {
+        res.write(`data: ${JSON.stringify({ lorebook_hits: lorebookHitsForSse })}\n\n`);
+      }
+      try {
+        const validatedReply = await generateValidatedAvatarSingleReply(llmMessages, {
+          provider,
+          model,
+          temperature: resolvedTemperature,
+          topP: resolvedTopP,
+          maxTokens: casualMode ? 1200 : (mode === 'thinking' ? 8192 : 4096),
+          maxAttempts: 2
+        });
+        const finalContent = String(validatedReply.content || '').trim() || '这次没有拿到可显示的角色回复，请重试。';
+        res.write(`data: ${JSON.stringify({ content: finalContent })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      } catch (error) {
+        const msg = error.message || '角色私聊生成失败';
+        try { res.write(`data: ${JSON.stringify({ error: true, message: msg })}\n\n`); } catch (_) { }
+        return res.end();
+      }
+    }
     const enabledMcp = (appConfig.mcpServers || []).filter(s => s.enabled);
     if (enabledMcp.length) {
       let mcpTools = [];
@@ -4237,7 +4324,7 @@ function buildTranslateCacheKey({ text, targetLang, provider, model, fastMode })
   const providerKey = provider && typeof provider === 'object'
     ? [provider.id || '', provider.type || '', provider.baseUrl || ''].join('|')
     : '';
-  return [targetLang || 'zh-CN', model || '', providerKey, fastMode ? 'fast' : 'full', stableSha1(text || '')].join('|');
+  return ['overlay-translate-v3', targetLang || 'zh-CN', model || '', providerKey, fastMode ? 'fast' : 'full', stableSha1(text || '')].join('|');
 }
 
 function getTranslateRequestTimeoutMs(text, provider, fastMode) {
@@ -4433,6 +4520,52 @@ async function llmChatGenerate(messages, options = {}, provider, model) {
   return String(content || '').trim();
 }
 
+const OVERLAY_TRANSLATE_NAME_TOKEN = "[A-Za-z\\u3400-\\u9fff][A-Za-z0-9_\\-.'\\u2019\\u00b7\\u3400-\\u9fff]{0,40}";
+const OVERLAY_TRANSLATE_JP_HONORIFICS = "(?:\\u3061\\u3083\\u3093|\\u304f\\u3093|\\u3055\\u3093|\\u3055\\u307e|\\u69d8|\\u5148\\u8f29|\\u5f8c\\u8f29)";
+const OVERLAY_TRANSLATE_KR_HONORIFICS = "(?:\\uc624\\ube60|\\uc5b8\\ub2c8|\\ub204\\ub098|\\ud615|\\uc120\\ubc30)";
+const OVERLAY_TRANSLATE_ANY_HONORIFIC_RE = new RegExp(`(?:${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:${OVERLAY_TRANSLATE_JP_HONORIFICS}|${OVERLAY_TRANSLATE_KR_HONORIFICS})`);
+const OVERLAY_TRANSLATE_LONG_FOREIGN_SEGMENT_RE = /[\u3040-\u30ff]{4,}|[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]{4,}/;
+
+function normalizeHonorificsForOverlayChinese(text) {
+  return String(text || '').trim()
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u3061\\u3083\\u3093`, 'g'), '$1\u9171')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u304f\\u3093`, 'g'), '$1\u541b')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:\\u3055\\u3093|\\u3055\\u307e|\\u69d8)`, 'g'), '$1')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u5148\\u8f29`, 'g'), '$1\u524d\u8f88')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\u5f8c\\u8f29`, 'g'), '$1\u540e\u8f88')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\uc624\\ube60`, 'g'), '$1\u6b27\u5df4')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*(?:\\uc5b8\\ub2c8|\\ub204\\ub098)`, 'g'), '$1\u59d0\u59d0')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\ud615`, 'g'), '$1\u54e5')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*\\uc120\\ubc30`, 'g'), '$1\u524d\u8f88')
+    .trim();
+}
+
+function stripOverlayHonorificsForHeuristic(text) {
+  return String(text || '')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*${OVERLAY_TRANSLATE_JP_HONORIFICS}`, 'g'), '$1')
+    .replace(new RegExp(`(${OVERLAY_TRANSLATE_NAME_TOKEN})\\s*${OVERLAY_TRANSLATE_KR_HONORIFICS}`, 'g'), '$1');
+}
+
+function getDirectNormalizedOverlayTranslation(text, targetLang) {
+  const raw = String(text || '').trim();
+  if (!raw || String(targetLang || '').trim() !== 'zh-CN') return '';
+
+  const normalized = normalizeHonorificsForOverlayChinese(raw);
+  const stripped = stripOverlayHonorificsForHeuristic(raw);
+  const chineseChars = (stripped.match(/[\u3400-\u9fff]/g) || []).length;
+  const kanaChars = (stripped.match(/[\u3040-\u30ff]/g) || []).length;
+  const hangulChars = (stripped.match(/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/g) || []).length;
+  const latinWords = (stripped.match(/[A-Za-z]{3,}/g) || []).length;
+  const mostlyChinese =
+    chineseChars >= 4 &&
+    chineseChars >= Math.max(1, (kanaChars + hangulChars) * 2) &&
+    !OVERLAY_TRANSLATE_LONG_FOREIGN_SEGMENT_RE.test(stripped) &&
+    latinWords <= 4;
+
+  if (!mostlyChinese) return '';
+  return OVERLAY_TRANSLATE_ANY_HONORIFIC_RE.test(raw) ? normalized : '';
+}
+
 async function translateAvatarReplyContent(text, pref = {}, provider, model) {
   const source = String(text || '').trim();
   if (!source) return '';
@@ -4440,6 +4573,165 @@ async function translateAvatarReplyContent(text, pref = {}, provider, model) {
   const uiLanguage = normalizeChatPrefLang(pref.uiLanguage, 'zh-CN');
   const translateTo = normalizeChatPrefLang(pref.translateTo, uiLanguage);
   const langName = chatPrefLangNameEn(translateTo);
+  const directNormalized = getDirectNormalizedOverlayTranslation(source, translateTo);
+  if (directNormalized) return directNormalized;
+
+  const untranslatedHonorificRe = /(?:[A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*(?:ちゃん|くん|さん|さま|様|先輩|後輩|オッパ|오빠|언니|누나|형|선배)/;
+  const hasUntranslatedHonorificLeak = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return false;
+    if (translateTo === 'ja-JP') return false;
+    if (translateTo === 'ko-KR' && !/(?:ちゃん|くん|さん|さま|様|先輩|後輩)/.test(raw)) return false;
+    return untranslatedHonorificRe.test(raw);
+  };
+  const normalizeHonorifics = (value) => {
+    let out = String(value || '').trim();
+    if (!out) return '';
+    if (translateTo === 'zh-CN') {
+      out = out
+        .replace(/([A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*ちゃん/g, '$1酱')
+        .replace(/([A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*くん/g, '$1君')
+        .replace(/([A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*先輩/g, '$1前辈')
+        .replace(/([A-Za-z\u3400-\u9fff][A-Za-z0-9_\-.'’·\u3400-\u9fff]{0,40})\s*後輩/g, '$1后辈');
+    }
+    return out.trim();
+  };
+  const maybeNormalizeDirectlyForTarget = () => {
+    if (translateTo !== 'zh-CN') return '';
+    const chineseChars = (source.match(/[\u3400-\u9fff]/g) || []).length;
+    const kanaChars = (source.match(/[\u3040-\u30ff]/g) || []).length;
+    const hangulChars = (source.match(/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/g) || []).length;
+    const latinWords = (source.match(/[A-Za-z]{3,}/g) || []).length;
+    const mostlyChinese = chineseChars >= 8
+      && chineseChars >= Math.max(1, (kanaChars + hangulChars) * 3)
+      && latinWords <= 2;
+    if (!mostlyChinese) return '';
+    return normalizeHonorifics(source);
+  };
+  const looksAbruptlyShort = (translatedText) => {
+    const compactSource = source.replace(/\s+/g, '');
+    const compactOut = String(translatedText || '').replace(/\s+/g, '');
+    if (!compactSource || !compactOut) return true;
+    const sourceSentenceCount = (source.match(/[。！？.!?]/g) || []).length;
+    const outputSentenceCount = (String(translatedText || '').match(/[。！？.!?]/g) || []).length;
+    if (compactSource.length < 18 && sourceSentenceCount < 2) return false;
+    if (compactOut.length <= Math.max(6, Math.floor(compactSource.length * 0.35))
+      && outputSentenceCount < Math.max(1, sourceSentenceCount)) {
+      return true;
+    }
+    if ((/[（(]/.test(source) || /[）)]/.test(source))
+      && compactOut.length <= Math.max(8, Math.floor(compactSource.length * 0.55))
+      && !/[（(]/.test(String(translatedText || ''))) {
+      return true;
+    }
+    return false;
+  };
+  const validateOverlayTranslationShape = (data) => {
+    if (!isObj(data)) return fail('top-level object required');
+    const translation = typeof data.translation === 'string' ? data.translation.trim() : '';
+    if (!translation) return fail('translation must be a non-empty string');
+    if (translation.length > 30000) return fail('translation is too long');
+    return { ok: true, data: { translation } };
+  };
+  const buildOverlayTranslationMessages = (strictMode = false) => [
+    {
+      role: 'system',
+      content: [
+        'You are a deterministic translation engine used only for UI display overlays.',
+        `Translate the user-provided roleplay assistant reply into ${langName} (${translateTo}).`,
+        'Do not continue the scene, roleplay, answer the speaker, or invent new content.',
+        'Keep the original addressee, tone, wording intensity, and emotional style.',
+        'Preserve Markdown structure, bullet points, line breaks, bracketed actions, ellipses, and LaTeX formulas.',
+        'Keep character names as written unless the target language normally transliterates them.',
+        'Translate honorific suffixes, titles, and address forms naturally into the target language instead of leaving them in the source language.',
+        translateTo === 'zh-CN'
+          ? 'For Japanese cute suffixes like ちゃん attached to a name, translate them naturally into Simplified Chinese, typically 酱 when the tone is affectionate.'
+          : 'Do not leave source-language suffixes like さん, ちゃん, くん, 先輩, 오빠, 언니 untranslated.',
+        strictMode
+          ? 'Do not shorten, summarize, paraphrase, or drop any visible clause. Every sentence and parenthetical action should remain represented in the translation.'
+          : 'Do not omit visible content.',
+        'Do not add explanations, notes, prefixes, bilingual output, <think> tags, or reasoning blocks.',
+        'Return only one JSON object with this exact shape: {"translation":"..."}'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: ['<<<BEGIN>>>', source, '<<<END>>>'].join('\n')
+    }
+  ];
+  const buildOverlayTranslationPrompt = (strictMode = false) => [
+    `Translate the following roleplay assistant reply into ${langName} (${translateTo}).`,
+    'Rules:',
+    '- This is translation only, not roleplay continuation.',
+    '- Keep the same addressee, tone, emotional style, line breaks, bracketed actions, and ellipses.',
+    '- Keep names unchanged, but translate honorific suffixes and titles naturally into the target language.',
+    translateTo === 'zh-CN'
+      ? '- If a Japanese name is followed by ちゃん, translate that cute suffix naturally into Simplified Chinese, usually 酱.'
+      : '- Do not leave source-language honorifics like さん / ちゃん / くん / 先輩 untranslated.',
+    strictMode
+      ? '- Do not shorten, summarize, or omit any visible clause.'
+      : '- Do not omit visible content.',
+    '- Output only JSON: {"translation":"..."}',
+    '',
+    'Reply to translate:',
+    '<<<BEGIN>>>',
+    source,
+    '<<<END>>>'
+  ].join('\n');
+  const finalizeTranslatedText = (rawOutput) => {
+    const parsed = parseStructuredJson(rawOutput, validateOverlayTranslationShape);
+    const textBody = parsed.ok ? parsed.data.translation : rawOutput;
+    return normalizeHonorifics(
+      String(textBody || '')
+        .replace(/<think>[\s\S]*?<\/think>/g, '')
+        .replace(/^```[a-zA-Z]*\s*/, '')
+        .replace(/```$/, '')
+        .replace(/^(Translation|译文|翻译)\s*[:：]\s*/i, '')
+        .trim()
+    );
+  };
+  const shouldRetryTranslation = (translatedText) => {
+    const out = String(translatedText || '').trim();
+    if (!out) return true;
+    if (out === source) return true;
+    if (hasUntranslatedHonorificLeak(out)) return true;
+    if (looksAbruptlyShort(out)) return true;
+    return false;
+  };
+
+  const legacyDirectNormalized = maybeNormalizeDirectlyForTarget();
+  if (legacyDirectNormalized) return legacyDirectNormalized;
+
+  let translatedV2 = '';
+  let primaryError = null;
+  for (const strictMode of [false, true]) {
+    try {
+      const raw = await llmChatGenerate(buildOverlayTranslationMessages(strictMode), {
+        temperature: strictMode ? 0.02 : 0.05,
+        maxTokens: Math.max(256, Math.min(8192, source.length * 2 + 320)),
+        skipReasoning: true
+      }, provider, model);
+      translatedV2 = finalizeTranslatedText(raw);
+      if (!shouldRetryTranslation(translatedV2)) break;
+    } catch (error) {
+      primaryError = error;
+    }
+  }
+
+  if (shouldRetryTranslation(translatedV2)) {
+    try {
+      const fallbackRaw = await llmGenerate(buildOverlayTranslationPrompt(true), 0.02, provider, model);
+      const fallbackTranslated = finalizeTranslatedText(fallbackRaw);
+      if (!shouldRetryTranslation(fallbackTranslated)) {
+        translatedV2 = fallbackTranslated;
+      }
+    } catch (error) {
+      if (!primaryError) primaryError = error;
+    }
+  }
+
+  if (!translatedV2 && primaryError) throw primaryError;
+  return translatedV2 || source;
 
   const messages = [
     {
@@ -5216,6 +5508,558 @@ function safeSnippet(text) {
 
 function normalizeChatChunk(text) {
   return String(text || '').replace(/\r/g, '');
+}
+
+function stripConversationBoundaryMarkers(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .replace(/^\s*<{3}\s*(?:BEGIN|END|开始|结束)\s*>{3}\s*$/gim, '')
+    .replace(/<<<\s*(?:BEGIN|END|开始|结束)\s*>>>/gi, '')
+    .trim();
+}
+
+function sanitizeAvatarSingleReplyContent(text) {
+  const raw = stripConversationBoundaryMarkers(
+    String(text || '')
+      .replace(/\r/g, '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+  );
+  if (!raw) return '';
+  let sanitized = raw
+    .replace(/^```[a-zA-Z]*\s*/, '')
+    .replace(/```$/, '')
+    .replace(/^(Translation|译文|翻译)\s*[:：]\s*/i, '')
+    .trim();
+  const withoutLeadingAction = sanitized.replace(/^\s*(?:\([^\)\n]{0,40}\)|（[^）\n]{0,40}）|\*[^\*\n]{0,40}\*|【[^】\n]{0,40}】)\s*/, '').trim();
+  if (withoutLeadingAction) sanitized = withoutLeadingAction;
+  return stripConversationBoundaryMarkers(sanitized);
+}
+
+function stripAvatarActionLikeSegments(text) {
+  return String(text || '')
+    .replace(/(^|[\s　])[(（][^()（）"'“”‘’\n]{0,160}[)）](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[(（][^()（）"'“”‘’\n]{0,160}(?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[*＊][^*＊"'“”‘’\n]{0,160}[*＊](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[*＊][^*＊"'“”‘’\n]{0,160}(?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[【\[][^【】\[\]"'“”‘’\n]{0,160}[】\]](?=$|[\s　])/g, ' ')
+    .replace(/(^|[\s　])[【\[][^【】\[\]"'“”‘’\n]{0,160}(?=$|[\s　])/g, ' ');
+}
+
+function isAvatarActionOnlyReply(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (/^[.…~～·•\s]+$/.test(raw)) return true;
+  const stripped = stripAvatarActionLikeSegments(raw)
+    .replace(/["“”'‘’]/g, '')
+    .replace(/[.…~～·•,，;；:：!?！？、\s]+/g, '')
+    .trim();
+  return !stripped;
+}
+
+function looksLikeAvatarReplyMeta(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const indicators = [
+    '需要注意',
+    '只输出',
+    '不要控制用户',
+    '输出要求',
+    '补充要求',
+    '当前角色',
+    '思考',
+    '分析',
+    '保持中文回复',
+    '必须使用中文',
+    '必须用中文',
+    '请使用中文',
+    '用中文回答',
+    '你扮演',
+    '请扮演',
+    '角色设定',
+    '身份设定',
+    '历史参考记录',
+    '模仿其说话语气',
+    '回合补充要求',
+    'replyInstruction',
+    '<<<BEGIN>>>',
+    '<<<END>>>'
+  ];
+  let hits = 0;
+  for (const token of indicators) {
+    if (raw.includes(token)) hits += 1;
+  }
+  const bulletCount = (raw.match(/^\s*(?:[-*•]|\d+\.)\s+/gm) || []).length;
+  return hits >= 2 || (hits >= 1 && bulletCount >= 1);
+}
+
+function looksLikeAvatarGroupAdviceMeta(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean) || '';
+  if (/^(?:\u5efa\u8bae|\u6539\u8fdb\u5efa\u8bae|\u53ef\u4ee5\u8fd9\u6837\u6539|\u53ef\u4ee5\u8865\u5145|\u53ef\u4ee5\u52a0\u4e00\u53e5)\s*[:：]/.test(firstLine)) return true;
+  const bulletCount = (raw.match(/^\s*(?:[-*•]|\d+\.)\s+/gm) || []).length;
+  const hits = [
+    '\u63a8\u8fdb\u5267\u60c5',
+    '\u60c5\u7eea\u7ec6\u8282',
+    '\u5177\u4f53\u52a8\u4f5c',
+    '\u52a0\u4e00\u53e5',
+    '\u52a0\u4e00\u4e2a',
+    '\u6bd4\u5982\u201c',
+    '\u6bd4\u5982\u300c',
+    '\u53ef\u4ee5\u6539\u6210'
+  ].filter((token) => raw.includes(token)).length;
+  return bulletCount >= 2 && hits >= 2;
+}
+
+function looksLikeAvatarGroupPromptLeak(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  if (looksLikeAvatarGroupPromptFragmentReply(raw)) return true;
+  const retryLeakRe = /(?:上(?:一条|一次|次)?回复(?:为空|无效)|请直接输出(?:本次|这一轮|当前轮次|这次).{0,16}(?:完整发言|正式回复|回复正文))/u;
+  const groupControlLeakRe = /(?:这是群聊(?:中的单个角色回合)?|必须和其他角色自然对话|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户|不要输出前缀|不要输出规则说明|不要代替他人发言|不要写多轮对话脚本|回合补充要求|输出要求|当前为旁观模式|群聊回合规则|只输出|只写当前角色|你这次只能输出)/u;
+  const systemPersonaLeakRe = /(?:^\s*(?:\[\s*系统\s*\]|系统[:：]).{0,160}(?:角色名称|角色身份|扮演)|请提供您希望扮演的角色名称|我将以该角色身份进行回复)/u;
+  if (/\u8ba9\u60c5\u8282\u81ea\u7136\u6d41\u6dCC\uff0c\u65e0\u9700\u523b\u610f\u8854\u63a5/.test(raw)) return true;
+  if (retryLeakRe.test(raw)) return true;
+  if (groupControlLeakRe.test(raw)) return true;
+  if (systemPersonaLeakRe.test(raw)) return true;
+  if (looksLikeAvatarGroupAdviceMeta(raw)) return true;
+  if (looksLikeAvatarReplyMeta(raw)) return true;
+  if (/(这是群聊中的单个角色回合|这是群聊，当前发言者是|当前发言者是|根据设定和关系|优先回应 ta|也可回应用户)/.test(raw)) return true;
+  const directLeakRe = /(必须使用中文|必须用中文|请使用中文|用中文回答|你扮演.{0,40}角色|请扮演.{0,40}角色|角色设定|身份设定|历史参考记录|模仿其说话语气|回合补充要求|当前是旁观模式|重要：你正在群聊)/;
+  if (directLeakRe.test(raw)) return true;
+  const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean) || '';
+  const profileLead = /^([A-Za-z0-9_\-·\u4e00-\u9fa5]{1,40})(是一个|是个|目前|性格|喜欢|习惯|正在|在)/.test(firstLine);
+  const bioMarkers = [
+    '性格',
+    '喜欢',
+    '目前',
+    '习惯',
+    '背景',
+    '身份',
+    '设定',
+    '用户的',
+    '名叫',
+    '她在',
+    '他在',
+    '她是',
+    '他是'
+  ];
+  const bioHits = bioMarkers.filter((token) => raw.includes(token)).length;
+  return profileLead && bioHits >= 2;
+}
+
+function looksLikeAvatarGroupPromptFragmentReply(text) {
+  const raw = stripConversationBoundaryMarkers(text);
+  if (!raw) return false;
+  const compact = raw.replace(/\s+/g, '');
+  const exactShortTokens = new Set([
+    '保持',
+    '只',
+    '输出',
+    '回复',
+    '中文',
+    '角色',
+    '规则',
+    '回合',
+    '前缀',
+    '当前',
+    '用户',
+    '当前角色',
+    '当前说话人'
+  ]);
+  if (compact.length <= 6 && exactShortTokens.has(compact)) return true;
+  if (compact === '如果' || compact === '暂无消息') return true;
+
+  const fragmentTokens = [
+    '不要包含未指定角色的括号说明',
+    '未指定角色',
+    '角色语言风格',
+    '基于之前的对话内容',
+    '之前的对话内容',
+    '务必保持',
+    '只写当前角色',
+    '只输出当前角色',
+    '输出当前角色',
+    '当前角色这一轮',
+    '当前说话人是',
+    '最终发言正文',
+    '不要输出前缀',
+    '不要输出规则说明',
+    '不要复读',
+    '不要代替其他角色',
+    '不要替别人说话',
+    '直接接上上文',
+    '自然接话',
+    '代码块',
+    '角色名前缀',
+    '场景说明标题'
+  ];
+  if (raw.includes('避免输出多余信息')) return true;
+  const hits = fragmentTokens.filter((token) => raw.includes(token)).length;
+  if (hits >= 2) return true;
+  if (hits >= 1 && raw.length <= 90) return true;
+
+  const lines = raw.split('\n').map((line) => String(line || '').trim()).filter(Boolean);
+  if (!lines.length || lines.length > 2) return false;
+  return lines.every((line) => /^(?:保持|只|输出|回复|中文|规则|回合|当前角色|当前说话人|不要输出|不要包含|务必保持|基于之前的对话内容)/.test(line));
+}
+
+function getAvatarSingleReplyIssue(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'empty';
+  if (isAvatarActionOnlyReply(raw)) return 'action-only';
+  if (looksLikeAvatarReplyMeta(raw)) return 'meta';
+  const compact = raw.replace(/\s+/g, '');
+  if (compact.length <= 8 && !/[。！？.!?]/.test(raw)) return 'too-short';
+  return '';
+}
+
+function buildAvatarSingleRetryInstruction(reason) {
+  const base = '这是角色私聊。请直接回应用户最后一句话。首句必须包含角色真正说出口的话，不要整条只写括号动作、表情、旁白或省略号；可以有动作描写，但必须有清晰可读的正文回应，建议至少 2 句。';
+  if (reason === 'action-only') {
+    return `${base} 你上一条只有动作描写。这次不要先写括号动作，先给出一句明确台词。`;
+  }
+  if (reason === 'meta') {
+    return `${base} 你上一条混入了提示词、规则或思考过程。这次只输出正式回复正文。`;
+  }
+  if (reason === 'too-short') {
+    return `${base} 你上一条太短了。请补充一个明确的信息、情绪或邀请，不要只回两三个字。`;
+  }
+  return base;
+}
+
+function sanitizeAvatarGroupReplyContent(text) {
+  const sanitized = sanitizeAvatarSingleReplyContent(text);
+  if (!sanitized) return '';
+  return sanitized.replace(/^\s*(?:\[[^\]\n]{1,80}\]|【[^】\n]{1,80}】|\([^\)\n]{1,80}\)|（[^）\n]{1,80}）)\s*[:：]\s*/, '').trim();
+}
+
+function looksLikeMultiSpeakerScript(text) {
+  const raw = String(text || '').replace(/\r/g, '').trim();
+  if (!raw) return false;
+  const taggedLines = raw
+    .split('\n')
+    .map((line) => String(line || '').trim())
+    .filter(Boolean)
+    .filter((line) => /^\s*[\[【(（]?\s*[^:\]】)）]{1,80}\s*[\]】)）]?\s*[:：]\s*/.test(line));
+  return taggedLines.length >= 2;
+}
+
+function normalizeGroupDuplicateKey(text) {
+  return stripConversationBoundaryMarkers(text)
+    .replace(/\s+/g, '')
+    .replace(/[“”"'‘’`~!@#$%^&*()（）\[\]【】<>《》{}、,，;；:：。！？!?….\-—_]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function parseGroupTranscriptSpeakerContent(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/^\s*\[([^\]\n]{1,80})\]\s*[:：]\s*([\s\S]*)$/);
+  if (!match) return null;
+  return {
+    speaker: String(match[1] || '').trim(),
+    content: String(match[2] || '').trim()
+  };
+}
+
+function buildAvatarRoleplaySystemContent(avatar) {
+  const src = avatar && typeof avatar === 'object' ? avatar : {};
+  const avatarName = String(src.name || '角色').slice(0, 50);
+  const avatarRel = String(src.relationship || '').slice(0, 50);
+  const relClause = avatarRel
+    ? `你是用户的${avatarRel}，名叫${avatarName}。`
+    : `你现在的身份是${avatarName}。`;
+  let systemContent = '';
+  if (src.customPrompt) {
+    systemContent = relClause + String(src.customPrompt).slice(0, CHAT_CTX_LIMIT);
+  }
+  if (src.memoryText) {
+    const memoryTruncated = String(src.memoryText).slice(0, CHAT_CTX_LIMIT);
+    const mimicInstruction = '请严格参考以下真实聊天记录，模仿其说话语气、口头禅、标点习惯以及回复长短节奏。';
+    if (systemContent) {
+      systemContent += `\n\n${mimicInstruction}\n历史参考记录：\n${memoryTruncated}`;
+    } else {
+      systemContent = `${relClause}${mimicInstruction}\n历史参考记录：\n${memoryTruncated}`;
+    }
+  }
+  if (!systemContent) {
+    systemContent = relClause;
+  }
+  systemContent += '\n你必须完全代入角色，绝对不能表现出 AI 的特征。始终维持你和用户之间的关系设定。';
+  return systemContent.trim();
+}
+
+function buildAvatarGroupTranscriptBlock(messages) {
+  return (Array.isArray(messages) ? messages : [])
+    .map((msg) => String(msg && msg.content || '').replace(/\r/g, '').trim())
+    .filter(Boolean)
+    .slice(-12)
+    .join('\n');
+}
+
+function buildAvatarGroupSearchContext(searchResults) {
+  return (Array.isArray(searchResults) ? searchResults : [])
+    .map((item, index) => {
+      const title = String(item && item.title || '').trim();
+      const snippet = String(item && item.snippet || '').trim();
+      if (!title && !snippet) return '';
+      return [`[${index + 1}] ${title}`.trim(), snippet].filter(Boolean).join('\n');
+    })
+    .filter(Boolean)
+    .slice(0, 4)
+    .join('\n\n');
+}
+
+function validateAvatarGroupTurnShape(data) {
+  if (!isObj(data)) return fail('top-level object required');
+  const reply = typeof data.reply === 'string' ? data.reply.trim() : '';
+  if (!reply) return fail('reply must be a non-empty string');
+  if (reply.length > 2400) return fail('reply is too long');
+  return { ok: true, data: { reply } };
+}
+
+function looksLikeAvatarGroupSelfAddress(text, currentSpeaker) {
+  const raw = stripConversationBoundaryMarkers(text);
+  const name = String(currentSpeaker || '').trim();
+  if (!raw || !name) return false;
+  const firstLine = raw.split('\n').map((line) => String(line || '').trim()).find(Boolean) || '';
+  const compactLine = firstLine.replace(/\s+/g, '');
+  const compactName = name.replace(/\s+/g, '');
+  if (!compactLine || !compactName || !compactLine.startsWith(compactName)) return false;
+  const rest = compactLine.slice(compactName.length);
+  return /^(?:酱|醬|ちゃん|同学|老师|老師|先生|小姐|宝宝|宝贝|亲|親|呀|啊|呢|啦|嘛|喵)?(?:[，,：:!！?？\s]|$)/.test(rest);
+}
+
+function isDuplicateOfRecentOtherSpeaker(text, messages, currentSpeaker) {
+  const current = normalizeGroupDuplicateKey(text);
+  const currentName = String(currentSpeaker || '').trim();
+  if (!current || !currentName) return false;
+  const recent = (Array.isArray(messages) ? messages : [])
+    .slice(-12)
+    .map((msg) => parseGroupTranscriptSpeakerContent(msg && msg.content))
+    .filter(Boolean);
+  if (!recent.length) return false;
+  const last = recent[recent.length - 1];
+  if (!last || !last.content || !last.speaker || last.speaker === currentName) return false;
+  return normalizeGroupDuplicateKey(last.content) === current;
+}
+
+function getAvatarGroupReplyIssue(text, rawText = '', options = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'empty';
+  if (isAvatarActionOnlyReply(raw)) return 'action-only';
+  if (looksLikeAvatarGroupPromptFragmentReply(rawText || raw)) return 'meta';
+  if (looksLikeAvatarGroupPromptLeak(rawText || raw)) return 'meta';
+  if (looksLikeMultiSpeakerScript(rawText || raw)) return 'multi-speaker';
+  if (looksLikeAvatarGroupSelfAddress(raw, options.currentSpeaker)) return 'wrong-speaker';
+  if (isDuplicateOfRecentOtherSpeaker(raw, options.messages, options.currentSpeaker)) return 'duplicate';
+  return '';
+}
+
+function buildAvatarGroupRetryInstruction(reason, currentSpeaker = '') {
+  const base = '延续上文，只写当前角色这一次会说的话。先给一句自然台词，再补动作或情绪。';
+  if (reason === 'action-only') {
+    return `${base} 你上一条只有动作描写或表情。这次先说一句明确台词，再补动作。`;
+  }
+  if (reason === 'meta') {
+    return `${base} 你上一条不像角色发言。这次直接继续对话，不要解释规则。`;
+  }
+  if (reason === 'multi-speaker') {
+    return `${base} 你上一条把别人的话也写进来了。这次只写当前角色一个人的发言。`;
+  }
+  if (reason === 'wrong-speaker') {
+    return `${base} 你上一条把当前说话人写串了，不要用你自己的名字称呼自己。当前说话人是${currentSpeaker || '当前角色'}。`;
+  }
+  if (reason === 'duplicate') {
+    return `${base} 你上一条几乎照搬了上一位成员的原话。这次换成${currentSpeaker || '当前角色'}自己的回应，不要复读别人。`;
+  }
+  if (reason === 'too-short') {
+    return `${base} 你上一条太短了。请补一个明确的新信息、情绪变化或追问。`;
+  }
+  return base;
+}
+
+function describeAvatarGroupRetryIssue(reason, currentSpeaker = '') {
+  if (reason === 'action-only') return '上一版只有动作或表情，没有明确台词';
+  if (reason === 'meta') return '上一版把规则、提示词或说明句写进了正文';
+  if (reason === 'multi-speaker') return '上一版替多个角色连续发言了';
+  if (reason === 'wrong-speaker') return `上一版把当前说话人写串了，当前说话人是${currentSpeaker || '当前角色'}`;
+  if (reason === 'duplicate') return '上一版几乎照搬了上一位成员的原话';
+  if (reason === 'too-short') return '上一版太短或像半截词，缺少完整自然的发言';
+  if (reason === 'empty') return '上一版没有可用内容';
+  return '上一版不是可显示的群聊发言';
+}
+
+function buildAvatarGroupGenerationMessages(options = {}, lastIssue = '') {
+  const avatar = options.avatar && typeof options.avatar === 'object' ? options.avatar : {};
+  const groupContext = options.groupContext && typeof options.groupContext === 'object' ? options.groupContext : {};
+  const currentSpeaker = String(options.currentSpeaker || groupContext.currentSpeaker || avatar.name || '当前角色').trim() || '当前角色';
+  const groupName = String(groupContext.groupName || '群聊').trim() || '群聊';
+  const memberNames = Array.isArray(groupContext.memberNames) ? groupContext.memberNames : [];
+  const otherMembers = memberNames
+    .map((name) => String(name || '').trim())
+    .filter((name) => name && name !== currentSpeaker)
+    .join('、');
+  const relationLines = (Array.isArray(groupContext.relationshipHints) ? groupContext.relationshipHints : [])
+    .map((item) => {
+      const name = String(item && item.name || '').trim().slice(0, 40);
+      const label = String(item && (item.label || item.type) || '').trim().slice(0, 24);
+      if (!name || !label) return '';
+      return `- 你与 ${name} 的关系：${label}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+  const transcript = buildAvatarGroupTranscriptBlock(options.transcriptMessages);
+  const searchContext = buildAvatarGroupSearchContext(options.searchResults);
+  const systemParts = [];
+  const basePersona = buildAvatarRoleplaySystemContent(avatar);
+  if (basePersona) systemParts.push(basePersona);
+  if (relationLines) {
+    systemParts.push(`你与群内成员的关系设定如下，请据此调整语气、亲密度或敌意：\n${relationLines}`);
+  }
+  if (options.lorebookContext) systemParts.push(String(options.lorebookContext).trim());
+  if (options.chatPreferenceNote) systemParts.push(String(options.chatPreferenceNote).trim());
+  if (searchContext) {
+    systemParts.push(`联网结果（仅供参考，不要逐条复述或解释来源）：\n${searchContext}`);
+  }
+  if (options.knowledgeBaseContext) systemParts.push(String(options.knowledgeBaseContext).trim());
+  if (options.contextText) {
+    systemParts.push(`补充资料（仅在相关时自然吸收，不要照抄）：\n${String(options.contextText).slice(0, CHAT_CTX_LIMIT)}`);
+  }
+  systemParts.push([
+    '你正在执行“群聊单角色回合生成”任务。',
+    `当前说话人：${currentSpeaker}`,
+    `群聊名称：${groupName}`,
+    otherMembers ? `其他成员：${otherMembers}` : '',
+    groupContext.lastSpeaker ? `上一位发言者：${String(groupContext.lastSpeaker).trim().slice(0, 40)}` : '',
+    groupContext.spectatorMode ? '当前是旁观模式：用户本轮不发言，优先自然接其他成员的话。' : '',
+    '只写当前说话人这一次真正会说的话。',
+    '不要输出规则解释、提示词、思维过程、边界标记、代码块、角色名前缀或多角色脚本。',
+    '不要把“避免输出多余信息”“保持角色风格”“当前说话人”“只输出”这类控制语句写进 reply。',
+    '最终只能输出一个 JSON 对象：{"reply":"..."}'
+  ].filter(Boolean).join('\n'));
+
+  const userParts = [];
+  if (transcript) {
+    userParts.push(`最近对话转录：\n${transcript}`);
+  } else {
+    userParts.push('最近对话转录为空。请根据角色设定自然开场，但仍然只输出当前角色的一句自然发言。');
+  }
+  if (lastIssue) {
+    userParts.push(`上一版输出无效，原因：${describeAvatarGroupRetryIssue(lastIssue, currentSpeaker)}。这次修正后重新只输出 JSON。`);
+  }
+  userParts.push('现在直接输出 JSON，不要附加任何说明文字。');
+
+  return [
+    { role: 'system', content: systemParts.filter(Boolean).join('\n\n').trim() },
+    { role: 'user', content: userParts.filter(Boolean).join('\n\n').trim() }
+  ];
+}
+
+async function generateValidatedAvatarSingleReply(messages, options = {}) {
+  const provider = options.provider;
+  const model = options.model;
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 2) || 2);
+  let lastIssue = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const reqMessages = Array.isArray(messages)
+      ? messages.map((msg) => ({ ...msg }))
+      : [];
+    if (attempt > 1) {
+      reqMessages.push({
+        role: 'system',
+        content: buildAvatarSingleRetryInstruction(lastIssue)
+      });
+    }
+    const raw = await llmChatGenerate(reqMessages, {
+      temperature: options.temperature,
+      topP: options.topP,
+      maxTokens: options.maxTokens,
+      skipReasoning: true
+    }, provider, model);
+    const content = sanitizeAvatarSingleReplyContent(raw);
+    const issue = getAvatarSingleReplyIssue(content);
+    if (!issue) {
+      return { content, issue: '', attempts: attempt };
+    }
+    lastIssue = issue;
+  }
+  return { content: '', issue: lastIssue || 'empty', attempts: maxAttempts };
+}
+
+async function generateValidatedAvatarGroupReply(messages, options = {}) {
+  const provider = options.provider;
+  const model = options.model;
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 3) || 3);
+  const currentSpeaker = String(options.currentSpeaker || '').trim();
+  let lastIssue = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const reqMessages = Array.isArray(messages)
+      ? messages.map((msg) => ({ ...msg }))
+      : [];
+    reqMessages.push({
+      role: 'system',
+      content: [
+        `当前说话人是：${currentSpeaker || '当前角色'}`,
+        '只输出当前角色这一轮的最终发言正文。',
+        '不要输出 <<<BEGIN>>> / <<<END>>>、代码块、角色名前缀、脚本分镜或多角色往返台词。'
+      ].join('\n')
+    });
+    if (attempt > 1) {
+      reqMessages.push({
+        role: 'system',
+        content: buildAvatarGroupRetryInstruction(lastIssue, currentSpeaker)
+      });
+    }
+    const raw = await llmChatGenerate(reqMessages, {
+      temperature: options.temperature,
+      topP: options.topP,
+      maxTokens: options.maxTokens,
+      skipReasoning: true
+    }, provider, model);
+    const content = sanitizeAvatarGroupReplyContent(raw);
+    const issue = getAvatarGroupReplyIssue(content, raw, {
+      currentSpeaker,
+      messages: reqMessages
+    });
+    if (!issue) {
+      return { content, issue: '', attempts: attempt };
+    }
+    lastIssue = issue;
+  }
+  return { content: '', issue: lastIssue || 'empty', attempts: maxAttempts };
+}
+
+async function generateStructuredAvatarGroupReply(options = {}) {
+  const provider = options.provider;
+  const model = options.model;
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 3) || 3);
+  const currentSpeaker = String(options.currentSpeaker || '').trim();
+  const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : [];
+  let lastIssue = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const reqMessages = buildAvatarGroupGenerationMessages(options, attempt > 1 ? lastIssue : '');
+    const raw = await llmChatGenerate(reqMessages, {
+      temperature: options.temperature,
+      topP: options.topP,
+      maxTokens: options.maxTokens,
+      skipReasoning: true
+    }, provider, model);
+    const parsed = parseStructuredJson(raw, validateAvatarGroupTurnShape);
+    const sourceReply = parsed.ok ? parsed.data.reply : raw;
+    const content = sanitizeAvatarGroupReplyContent(sourceReply);
+    const issue = getAvatarGroupReplyIssue(content, raw, {
+      currentSpeaker,
+      messages: transcriptMessages
+    });
+    if (!issue) {
+      return { content, issue: '', attempts: attempt, raw };
+    }
+    lastIssue = issue;
+  }
+  return { content: '', issue: lastIssue || 'empty', attempts: maxAttempts };
 }
 
 function normalizeChatMessages(messages, userLimit, assistantLimit) {

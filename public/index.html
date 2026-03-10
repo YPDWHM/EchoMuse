@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 
 <head>
@@ -447,20 +447,20 @@
             </div>
           </div>
           <div class="settings-group">
-            <h4>?????</h4>
+            <h4>显示设置</h4>
             <div class="setting-switch-list">
               <div class="setting-switch-item">
-                <div class="setting-switch-title">???????</div>
+                <div class="setting-switch-title">显示消息时间戳</div>
                 <label class="toggle"><input id="chatShowTimestampToggle" type="checkbox" checked
                     aria-label="chatShowTimestampToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
-                <div class="setting-switch-title">??????</div>
+                <div class="setting-switch-title">显示模型名称</div>
                 <label class="toggle"><input id="chatShowModelToggle" type="checkbox"
                     aria-label="chatShowModelToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
-                <div class="setting-switch-title">??????</div>
+                <div class="setting-switch-title">显示字数统计</div>
                 <label class="toggle"><input id="chatShowCharCountToggle" type="checkbox"
                     aria-label="chatShowCharCountToggle"><span class="toggle-slider"></span></label>
               </div>
@@ -476,22 +476,22 @@
               </div>
               <div class="setting-switch-item">
                 <div>
-                  <div class="setting-switch-title">Markdown ??</div>
-                  <div class="setting-switch-desc">?????????????</div>
+                  <div class="setting-switch-title">Markdown 渲染</div>
+                  <div class="setting-switch-desc">关闭后将以纯文本显示消息内容</div>
                 </div>
                 <label class="toggle"><input id="chatMarkdownToggle" type="checkbox" checked
                     aria-label="chatMarkdownToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div>
-                  <div class="setting-switch-title">LaTeX ????</div>
-                  <div class="setting-switch-desc">???? Markdown ??</div>
+                  <div class="setting-switch-title">LaTeX 公式渲染</div>
+                  <div class="setting-switch-desc">依赖 Markdown 渲染开启</div>
                 </div>
                 <label class="toggle"><input id="chatLatexToggle" type="checkbox" checked
                     aria-label="chatLatexToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
-                <div class="setting-switch-title">?????????</div>
+                <div class="setting-switch-title">输入框拼写检查</div>
                 <label class="toggle"><input id="chatSpellcheckToggle" type="checkbox"
                     aria-label="chatSpellcheckToggle"><span class="toggle-slider"></span></label>
               </div>
@@ -499,20 +499,20 @@
           </div>
 
           <div class="settings-group">
-            <h4>??</h4>
+            <h4>自动化</h4>
             <div class="setting-switch-list">
               <div class="setting-switch-item">
                 <div>
-                  <div class="setting-switch-title">????????</div>
-                  <div class="setting-switch-desc">???????????????</div>
+                  <div class="setting-switch-title">自动生成会话标题</div>
+                  <div class="setting-switch-desc">第一条消息后自动生成标题</div>
                 </div>
                 <label class="toggle"><input id="chatAutoTitleToggle" type="checkbox" checked
                     aria-label="chatAutoTitleToggle"><span class="toggle-slider"></span></label>
               </div>
               <div class="setting-switch-item">
                 <div>
-                  <div class="setting-switch-title">????????Artifacts?</div>
-                  <div class="setting-switch-desc">???????????????</div>
+                  <div class="setting-switch-title">自动预览 Artifacts</div>
+                  <div class="setting-switch-desc">生成后自动展开预览面板</div>
                 </div>
                 <label class="toggle"><input id="chatAutoPreviewArtifactToggle" type="checkbox" checked
                     aria-label="chatAutoPreviewArtifactToggle"><span class="toggle-slider"></span></label>
@@ -679,7 +679,8 @@
       <input id="groupNameInput" type="text" placeholder="给群组起一个名字" aria-label="groupNameInput">
     </div>
     <div class="setting-row">
-      <label>选择成员（至少 1 个）</label>
+      <label id="groupMemberLabel">选择成员（可随时增减，群聊至少 2 个）</label>
+      <div id="groupMemberHint" class="muted" style="font-size:12px;line-height:1.45;margin:4px 0 8px;">群组创建后也可以随时邀请新的单人角色进群；这里只显示可邀请的单人角色。</div>
       <div id="groupMemberList" class="group-member-list"></div>
     </div>
     <div class="setting-row-actions">

@@ -3,6 +3,8 @@
 
   const STORAGE_KEY = 'echomuse_voice_assist_v1';
   const MSG_BTN_CLASS = 'voice-assist-msg-btn';
+  const WHISPER_CPP_RELEASES_URL = 'https://github.com/ggml-org/whisper.cpp/releases';
+  const WHISPER_CPP_QUICKSTART_URL = 'https://github.com/ggml-org/whisper.cpp#quick-start';
 
   function clampNumber(value, min, max, fallback) {
     const n = Number(value);
@@ -254,7 +256,8 @@
         .voice-pack-item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid rgba(148,163,184,.18);border-radius:10px;background:#f8fafc}
         .voice-pack-name{font-size:13px;font-weight:600;color:#334155}
         .voice-pack-meta{font-size:12px;color:#64748b}
-        .${MSG_BTN_CLASS}{position:absolute;top:8px;right:8px;border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 7px;font-size:12px;color:#334155;cursor:pointer;opacity:.9}
+        .${MSG_BTN_CLASS}{position:absolute;top:8px;right:8px;border:1px solid rgba(148,163,184,.35);background:#fff;border-radius:999px;padding:2px 7px;font-size:12px;color:#334155;cursor:pointer;opacity:0;pointer-events:none;transform:translateY(-2px);transition:opacity .16s ease,transform .16s ease}
+        .msg.assistant:hover .${MSG_BTN_CLASS},.msg.assistant:focus-within .${MSG_BTN_CLASS}{opacity:.92;pointer-events:auto;transform:translateY(0)}
         .msg.assistant{position:relative}
       `;
       document.head.appendChild(style);
@@ -797,9 +800,15 @@
 
       const sttNote = section.querySelector('[data-role="stt-note"]');
       if (sttNote) {
-        sttNote.textContent = state.prefs.sttMode === 'local_whisper'
-          ? t('本地 Whisper 需要填写可执行文件和模型路径。默认保留原语言转写；仅在开启“翻译为英文”时才会转成英文。回到聊天页点击“开始录音/停止并转写”。', 'Local Whisper requires executable + model paths. It keeps the original spoken language by default; only translates when “Translate to English” is enabled. Use Start Recording / Stop & Transcribe in chat.')
-          : t('浏览器原生语音输入在 Electron 环境兼容性不稳定，桌面版建议使用本地 Whisper。', 'Native browser speech input is unstable in Electron; desktop users should prefer local Whisper.');
+        sttNote.innerHTML = state.prefs.sttMode === 'local_whisper'
+          ? t(
+            `本地 Whisper 需要填写可执行文件和模型路径。默认保留原语言转写；仅在开启“翻译为英文”时才会转成英文。回到聊天页点击“开始录音/停止并转写”。<br>如果安装包未内置 Whisper，可从 <a href="${WHISPER_CPP_RELEASES_URL}" target="_blank" rel="noopener noreferrer">官方下载页</a> 获取 whisper.cpp（Windows 包里需要 <code>whisper-cli.exe</code>），模型可参考 <a href="${WHISPER_CPP_QUICKSTART_URL}" target="_blank" rel="noopener noreferrer">官方 Quick Start</a>。`,
+            `Local Whisper requires an executable path and a model path. It keeps the original spoken language by default; only translates when “Translate to English” is enabled. Use Start Recording / Stop & Transcribe in chat.<br>If your app package does not bundle Whisper, download whisper.cpp from the <a href="${WHISPER_CPP_RELEASES_URL}" target="_blank" rel="noopener noreferrer">official releases page</a> (the Windows package should include <code>whisper-cli.exe</code>). Model instructions are in the <a href="${WHISPER_CPP_QUICKSTART_URL}" target="_blank" rel="noopener noreferrer">official Quick Start</a>.`
+          )
+          : t(
+            `浏览器原生语音输入在 Electron 环境兼容性不稳定，桌面版建议使用本地 Whisper。若安装包未内置 Whisper，可从 <a href="${WHISPER_CPP_RELEASES_URL}" target="_blank" rel="noopener noreferrer">官方下载页</a> 获取。`,
+            `Native browser speech input is unstable in Electron; desktop users should prefer Local Whisper. If your package does not bundle Whisper, download it from the <a href="${WHISPER_CPP_RELEASES_URL}" target="_blank" rel="noopener noreferrer">official releases page</a>.`
+          );
       }
 
       const importBtn = section.querySelector('[data-action="import-pack-file"]');
@@ -1496,6 +1505,13 @@
       const list = getMessageList();
       const session = getActiveSession();
       if (!list || !session) return;
+      const shouldShowPerMessageBtn = Boolean(state.prefs && state.prefs.toolbarVisible);
+      if (!shouldShowPerMessageBtn) {
+        list.querySelectorAll(`.${MSG_BTN_CLASS}`).forEach((node) => {
+          try { node.remove(); } catch (_) { }
+        });
+        return;
+      }
       const nodes = list.querySelectorAll('.msg.assistant[data-mid]');
       nodes.forEach((node) => {
         if (node.querySelector(`.${MSG_BTN_CLASS}`)) return;

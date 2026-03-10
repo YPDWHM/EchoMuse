@@ -1,6 +1,6 @@
 {
   "name": "offline-review-pack-local-ollama",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "Zero-cloud final-review pack generator powered by local Ollama",
   "main": "desktop/main.js",

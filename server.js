@@ -3100,6 +3100,11 @@ app.post('/api/chat', async (req, res) => {
           systemContent += `\n补充要求：${replyInstruction}`;
         }
       }
+      // Replace {{user}} and {{char}} template variables
+      const userDisplayName = String(preferences && preferences.userDisplayName || '').trim().slice(0, 30) || '用户';
+      systemContent = systemContent
+        .replace(/\{\{user\}\}/gi, userDisplayName)
+        .replace(/\{\{char\}\}/gi, avatarName);
       llmMessages.push({ role: 'system', content: systemContent });
     } else if (useContext) {
       llmMessages.push({
@@ -3140,7 +3145,13 @@ app.post('/api/chat', async (req, res) => {
     }
 
     for (const msg of recent) {
-      llmMessages.push({ role: msg.role, content: msg.content });
+      let content = msg.content;
+      if (isAvatarMode) {
+        const udn = String(preferences && preferences.userDisplayName || '').trim().slice(0, 30) || '用户';
+        const an = String(avatar && avatar.name || '角色').slice(0, 50);
+        content = content.replace(/\{\{user\}\}/gi, udn).replace(/\{\{char\}\}/gi, an);
+      }
+      llmMessages.push({ role: msg.role, content });
     }
 
     /* ── MCP Tool-Use Loop ── */

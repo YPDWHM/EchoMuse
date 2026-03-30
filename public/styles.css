@@ -1798,9 +1798,33 @@ body.drawer-open .artifact-drawer {
 }
 
 .settings-section[data-section="personas"] #avatarListWrap.avatar-list {
-  max-height: min(340px, calc(50dvh - 32px));
+  max-height: min(400px, calc(55dvh - 32px));
   overflow-y: auto;
   padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent, #7c5cfc) transparent;
+}
+.settings-section[data-section="personas"] #avatarListWrap.avatar-list::-webkit-scrollbar {
+  width: 6px;
+}
+.settings-section[data-section="personas"] #avatarListWrap.avatar-list::-webkit-scrollbar-thumb {
+  background: var(--accent, #7c5cfc);
+  border-radius: 3px;
+}
+.settings-section[data-section="personas"] #avatarListWrap.avatar-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.avatar-list-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  letter-spacing: 0.5px;
+  padding: 6px 2px 2px;
+  margin-top: 4px;
+  border-bottom: 1px solid var(--line, #eee);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .avatar-card {
@@ -2210,12 +2234,15 @@ img.avatar-card-icon {
 }
 
 .contact-badge {
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--soft);
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-size: 10px;
+  color: #6366f1;
+  background: linear-gradient(135deg, #eef2ff, #e0e7ff);
+  padding: 1px 6px;
+  border-radius: 6px;
   margin-left: 4px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  border: 1px solid rgba(99,102,241,.15);
 }
 
 /* Group dialog */
@@ -2266,4 +2293,52 @@ img.avatar-card-icon {
   font-weight: 600;
   color: var(--muted);
   margin-bottom: 2px;
+}
+
+.msg-branch-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.msg-branch-btn {
+  border: 1px solid rgba(148,163,184,.25);
+  background: rgba(248,250,252,.9);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #64748b;
+  cursor: pointer;
+  transition: all .15s;
+  line-height: 1.4;
+}
+
+.msg-branch-btn:hover:not(:disabled) {
+  background: #eef2ff;
+  color: #4f46e5;
+  border-color: rgba(99,102,241,.3);
+}
+
+.msg-branch-btn:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+.msg-branch-nav-btn {
+  padding: 2px 6px;
+}
+
+.msg-branch-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.msg-branch-index {
+  font-size: 11px;
+  color: #94a3b8;
+  min-width: 30px;
+  text-align: center;
 }

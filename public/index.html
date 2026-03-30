@@ -166,6 +166,8 @@
       <nav class="settings-nav">
         <h2>设置</h2>
         <button class="settings-nav-item active" data-section="general" type="button">通用</button>
+        <button class="settings-nav-item" data-section="avatar" type="button">对话</button>
+        <button class="settings-nav-item" data-section="personas" type="button">角色</button>
         <button class="settings-nav-item" data-section="provider" type="button">模型</button>
         <button class="settings-nav-item" data-section="mcp" type="button">MCP 工具</button>
         <button class="settings-nav-item" data-section="knowledge" type="button">知识库</button>
@@ -522,6 +524,12 @@
 
           <div class="settings-group">
             <h4>头像</h4>
+            <div class="setting-row">
+              <label>用户名（替换角色卡中的 {{user}}）</label>
+              <div class="setting-control">
+                <input id="userDisplayNameInput" type="text" placeholder="你的名字" maxlength="30" aria-label="userDisplayName">
+              </div>
+            </div>
             <div class="avatar-preview-row">
               <div class="avatar-preview-item">
                 <span class="avatar-preview" id="userAvatarPreview">👤</span>
